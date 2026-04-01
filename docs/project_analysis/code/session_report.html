@@ -1,0 +1,664 @@
+<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>session_report.py - Radar Project Code Explorer</title><style>
+    :root {
+      --bg: #f2f6f8;
+      --panel: rgba(255,255,255,.95);
+      --ink: #14222d;
+      --muted: #536d7b;
+      --line: #d8e2e8;
+      --brand: #0d6e6e;
+      --brand2: #153f68;
+      --accent: #ff7d32;
+      --shadow: 0 18px 50px rgba(18,39,56,.12);
+      --mono: "JetBrains Mono", Consolas, monospace;
+      --sans: "Pretendard Variable", "IBM Plex Sans KR", "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(13,110,110,.18), transparent 32%),
+        radial-gradient(circle at top right, rgba(21,63,104,.14), transparent 28%),
+        linear-gradient(180deg, #edf4f6 0%, #f8fbfc 28%, #eef3f5 100%);
+    }
+    a { color: inherit; }
+    .wrap { width: min(1320px, calc(100vw - 40px)); margin: 0 auto 60px; }
+    .topbar {
+      position: sticky; top: 0; z-index: 30; backdrop-filter: blur(18px);
+      background: rgba(242,246,248,.84); border-bottom: 1px solid rgba(20,34,45,.08);
+    }
+    .topbar-inner {
+      width: min(1320px, calc(100vw - 40px)); margin: 0 auto; padding: 16px 0;
+      display: flex; justify-content: space-between; align-items: center; gap: 16px;
+    }
+    .brand { display: flex; align-items: center; gap: 14px; font-weight: 700; }
+    .mark {
+      width: 44px; height: 44px; border-radius: 14px;
+      background: linear-gradient(135deg, var(--brand), #19a0a0 60%, var(--brand2));
+      box-shadow: var(--shadow); position: relative;
+    }
+    .mark::before, .mark::after {
+      content: ""; position: absolute; border: 2px solid rgba(255,255,255,.9); border-radius: 999px;
+    }
+    .mark::before { inset: 10px; }
+    .mark::after { inset: 18px; }
+    .nav { display: flex; gap: 10px; flex-wrap: wrap; }
+    .nav a {
+      text-decoration: none; color: var(--muted); font-size: 14px;
+      padding: 10px 14px; border-radius: 999px; background: rgba(255,255,255,.78);
+      border: 1px solid rgba(20,34,45,.06);
+    }
+    .hero {
+      margin-top: 28px; padding: 32px; border-radius: 32px; color: #f7fbfd;
+      background: linear-gradient(135deg, rgba(13,110,110,.94), rgba(21,63,104,.93));
+      box-shadow: var(--shadow); overflow: hidden; position: relative;
+    }
+    .hero::before {
+      content: ""; position: absolute; right: -80px; top: -60px; width: 240px; height: 240px;
+      border-radius: 50%; background: radial-gradient(circle, rgba(255,255,255,.18), transparent 68%);
+    }
+    .hero-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 24px; position: relative; z-index: 1; }
+    .eyebrow {
+      display: inline-block; margin-bottom: 18px; padding: 8px 12px; border-radius: 999px;
+      background: rgba(255,255,255,.12); font-size: 13px;
+    }
+    h1 { margin: 0 0 16px; font-size: clamp(32px, 4vw, 54px); line-height: 1.04; letter-spacing: -.04em; }
+    .hero p { margin: 0; line-height: 1.72; font-size: 16px; color: rgba(247,251,253,.92); }
+    .hero-meta { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+    .meta { padding: 18px; border-radius: 20px; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.12); }
+    .meta span { font-size: 13px; color: rgba(247,251,253,.76); }
+    .meta strong { display: block; margin-top: 10px; font-size: 28px; letter-spacing: -.04em; }
+    .section {
+      margin-top: 26px; padding: 28px; border-radius: 28px; background: var(--panel);
+      border: 1px solid rgba(20,34,45,.06); box-shadow: var(--shadow);
+    }
+    .section h2 { margin: 0 0 10px; font-size: 30px; letter-spacing: -.03em; }
+    .intro { margin: 0 0 24px; color: var(--muted); line-height: 1.72; font-size: 15px; }
+    .grid2, .grid3, .grid4 { display: grid; gap: 18px; }
+    .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .card, .flow-step, .table-wrap, .landmark, .metric, .note { background: #fff; border: 1px solid var(--line); border-radius: 20px; }
+    .card, .metric, .note, .flow-step { padding: 20px; }
+    .card h3, .metric h3, .note h3 { margin: 0 0 10px; font-size: 19px; letter-spacing: -.02em; }
+    .card p, .metric p, .note p, li, td, th { color: var(--muted); line-height: 1.72; font-size: 14px; }
+    .signal {
+      display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .08em; color: var(--brand); margin-bottom: 10px;
+    }
+    .signal::before {
+      content: ""; width: 10px; height: 10px; border-radius: 50%; background: currentColor;
+      box-shadow: 0 0 0 6px rgba(13,110,110,.12);
+    }
+    .pill-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .pill {
+      display: inline-flex; align-items: center; border-radius: 999px; padding: 8px 12px;
+      background: rgba(13,110,110,.08); color: var(--brand); font-size: 12px; font-weight: 700;
+      letter-spacing: .04em; text-transform: uppercase;
+    }
+    .flow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: stretch; }
+    .flow-step strong { display: block; margin-bottom: 10px; font-size: 18px; }
+    .flow-step span { display: inline-block; font-size: 12px; color: var(--brand); margin-bottom: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+    .landmark-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+    .landmark { padding: 18px; text-decoration: none; display: block; }
+    .landmark strong { display: block; font-size: 18px; margin-bottom: 8px; }
+    .landmark span { display: inline-block; font-size: 12px; color: var(--brand); font-weight: 700; margin-bottom: 10px; }
+    .landmark p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.65; }
+    .table-wrap { overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 14px 16px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { background: #f7fafb; color: var(--ink); font-size: 13px; text-transform: uppercase; letter-spacing: .06em; }
+    .link-card { text-decoration: none; color: inherit; display: block; }
+    .mini-card { height: 100%; }
+    .contract-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+    .contract-card { background: #fff; border: 1px solid var(--line); border-radius: 22px; padding: 20px; }
+    .contract-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+    .contract-top h3 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
+    .contract-tag {
+      display: inline-flex; align-items: center; border-radius: 999px; padding: 8px 12px;
+      background: rgba(21,63,104,.08); color: var(--brand2); font-size: 12px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .05em;
+    }
+    .contract-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
+    .contract-meta div { background: #f7fafb; border: 1px solid var(--line); border-radius: 14px; padding: 12px; }
+    .contract-meta span { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--brand); margin-bottom: 6px; font-weight: 700; }
+    .contract-meta strong { display: block; font-size: 13px; line-height: 1.5; color: var(--ink); }
+    .field-list { margin-top: 14px; padding-left: 18px; }
+    .field-list li { margin-bottom: 6px; }
+    details.accordion {
+      background: #fff; border: 1px solid var(--line); border-radius: 20px; overflow: hidden;
+    }
+    details.accordion + details.accordion { margin-top: 14px; }
+    details.accordion summary {
+      list-style: none; cursor: pointer; padding: 18px 20px;
+      display: flex; justify-content: space-between; align-items: center; gap: 16px;
+      font-weight: 700; color: var(--ink);
+    }
+    details.accordion summary::-webkit-details-marker { display: none; }
+    .summary-copy { display: flex; flex-direction: column; gap: 6px; }
+    .summary-copy small { color: var(--muted); font-weight: 500; font-size: 13px; }
+    .summary-tag {
+      display: inline-flex; align-items: center; border-radius: 999px; padding: 8px 12px;
+      background: rgba(13,110,110,.08); color: var(--brand); font-size: 12px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .05em;
+    }
+    .accordion-body { padding: 0 20px 20px; }
+    .handoff {
+      display: grid; grid-template-columns: 160px 1.4fr 1fr 1fr;
+      gap: 0; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; margin-top: 14px;
+    }
+    .handoff-cell {
+      padding: 14px 16px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
+      color: var(--muted); font-size: 14px; line-height: 1.68; background: #fff;
+    }
+    .handoff-cell:nth-child(4n) { border-right: 0; }
+    .handoff.head .handoff-cell {
+      background: #f7fafb; color: var(--ink); font-size: 12px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .06em;
+    }
+    .handoff .fn { font-family: var(--mono); color: var(--brand2); font-size: 13px; }
+    .pipeline-strip {
+      display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 12px; align-items: stretch;
+    }
+    .pipeline-node {
+      position: relative; background: #fff; border: 1px solid var(--line); border-radius: 22px; padding: 18px;
+      min-height: 200px;
+    }
+    .pipeline-node:not(:last-child)::after {
+      content: "→"; position: absolute; right: -18px; top: calc(50% - 14px); z-index: 2;
+      width: 28px; height: 28px; border-radius: 999px; background: var(--brand); color: #fff;
+      display: flex; align-items: center; justify-content: center; font-weight: 700;
+      box-shadow: 0 8px 20px rgba(13,110,110,.18);
+    }
+    .pipeline-node .stage { display: inline-flex; margin-bottom: 10px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--brand); font-weight: 800; }
+    .pipeline-node h3 { margin: 0 0 10px; font-size: 18px; letter-spacing: -.02em; }
+    .pipeline-node p { margin: 0 0 10px; color: var(--muted); line-height: 1.65; font-size: 14px; }
+    .pipeline-node .mono { font-family: var(--mono); color: var(--brand2); font-size: 12px; }
+    .code-shell { background: #0f1720; color: #ecf6fb; border-radius: 24px; overflow: hidden; border: 1px solid rgba(255,255,255,.06); }
+    .code-head {
+      display: flex; justify-content: space-between; align-items: center; gap: 16px;
+      padding: 16px 20px; background: rgba(255,255,255,.04); border-bottom: 1px solid rgba(255,255,255,.06);
+      font-family: var(--mono); font-size: 13px;
+    }
+    .code-body { max-height: 880px; overflow: auto; font-family: var(--mono); font-size: 13px; }
+    .code-line { display: grid; grid-template-columns: 72px 1fr; border-bottom: 1px solid rgba(255,255,255,.03); }
+    .ln {
+      display: block; text-decoration: none; color: #86b5d3; text-align: right; padding: 0 14px;
+      background: rgba(255,255,255,.02); border-right: 1px solid rgba(255,255,255,.05); line-height: 22px;
+    }
+    .code-text { display: block; white-space: pre; padding: 0 16px; line-height: 22px; }
+    ul { padding-left: 18px; margin: 0; }
+    .footer { margin-top: 28px; text-align: center; color: var(--muted); font-size: 13px; }
+    @media (max-width: 1080px) {
+      .hero-grid, .grid4, .grid3, .grid2, .flow, .landmark-grid, .contract-grid { grid-template-columns: 1fr 1fr; }
+      .pipeline-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .pipeline-node::after { display: none; }
+    }
+    @media (max-width: 760px) {
+      .wrap, .topbar-inner { width: min(100vw - 24px, 1320px); }
+      .hero-grid, .grid4, .grid3, .grid2, .flow, .landmark-grid, .hero-meta, .contract-grid, .contract-meta, .pipeline-strip { grid-template-columns: 1fr; }
+      .section { padding: 22px; }
+      .code-line { grid-template-columns: 58px 1fr; }
+      .handoff { grid-template-columns: 1fr; }
+      .handoff-cell { border-right: 0; }
+      .nav { display: none; }
+    }
+    </style></head><body>
+    <div class="topbar">
+      <div class="topbar-inner">
+        <div class="brand"><div class="mark"></div><div>Radar Project Code Explorer</div></div>
+        <nav class="nav">
+          <a href="../index.html">메인 분석</a>
+          <a href="index.html">코드 카탈로그</a>
+          <a href="../../REQ/index.html">REQ</a>
+          <a href="#code">전체 코드</a>
+        </nav>
+      </div>
+    </div>
+    <div class="wrap">
+      <section class="hero">
+        <div class="hero-grid">
+          <div>
+            <span class="eyebrow">Reporting</span>
+            <h1>session_report.py</h1>
+            <p>한 세션 폴더를 읽어 summary.json을 생성하는 리포트 빌더다. processed 로그와 render 로그를 왜 나눴는지 가장 잘 보여 주는 파일이다. 알고리즘 성능과 UI 체감 성능을 같은 세션 안에서도 분리해서 본다.</p>
+            <div class="pill-row"><span class="pill">Logging</span><span class="pill">Reports</span></div>
+          </div>
+          <div class="hero-meta">
+            <div class="meta"><span>Source Path</span><strong>tools/diagnostics/session_report.py</strong></div>
+            <div class="meta"><span>Line Count</span><strong>269</strong></div>
+            <div class="meta"><span>Before</span><strong>session_meta.json, processed_frames.jsonl, render_frames.jsonl</strong></div>
+            <div class="meta"><span>After</span><strong>summary.json, session_compare.py</strong></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>이 파일이 맡는 역할</h2>
+        <p class="intro">로그가 남는 것만으로 끝나지 않고, 사람이 바로 비교 가능한 숫자로 정리해야 하기 때문이다.</p>
+        <div class="flow">
+          <article class="flow-step"><span>Input Side</span><strong>session_meta.json, processed_frames.jsonl, render_frames.jsonl</strong><p>세션 디렉터리의 JSON과 JSONL 로그</p></article>
+          <article class="flow-step"><span>This File</span><strong>session_report.py</strong><p>processed 로그와 render 로그를 왜 나눴는지 가장 잘 보여 주는 파일이다. 알고리즘 성능과 UI 체감 성능을 같은 세션 안에서도 분리해서 본다.</p></article>
+          <article class="flow-step"><span>Output Side</span><strong>summary.json, session_compare.py</strong><p>summary.json</p></article>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>핵심 책임</h2>
+        <p class="intro">처음 보는 사람이 이 파일을 읽을 때 놓치면 안 되는 책임을 세 갈래로 나눴다.</p>
+        <div class="grid3"><article class="card"><h3>세션 요약</h3><p>프레임 로그를 사람이 읽기 쉬운 summary.json으로 압축한다.</p></article>
+<article class="card"><h3>지표 표준화</h3><p>invalid rate, latency, track count 같은 지표를 일관된 구조로 만든다.</p></article>
+<article class="card"><h3>비교 준비</h3><p>session_compare가 바로 사용할 수 있는 입력 포맷을 제공한다.</p></article></div>
+      </section>
+
+      <section class="section">
+        <h2>쉽게 이해하는 모델</h2>
+        <p class="intro">처음 보는 사람이 이 파일을 딱 한 문장으로 붙잡아야 할 때의 설명이다.</p>
+        <div class="card"><p>이 파일은 세션 통계 압축기다. JSONL 로그 여러 개를 읽어 사람이 바로 비교할 수 있는 summary.json 하나로 요약한다.</p></div>
+      </section>
+
+      <section class="section">
+        <h2>입력에서 출력까지 단계별 설명</h2>
+        <p class="intro">로그가 남는 것과 비교 가능한 숫자가 생기는 것은 다르다. 이 파일은 raw log를 실험 판단에 쓸 수 있는 통계로 바꾸는 역할을 한다.</p>
+        <div class="contract-grid">
+            <article class="contract-card">
+              <div class="contract-top">
+                <div><h3>1. 세션 경로와 JSONL을 읽는다</h3></div>
+                <span class="contract-tag">Step</span>
+              </div>
+              <p>_resolve_session_dir, _load_json, _load_jsonl이 세션 폴더와 로그 파일을 안전하게 읽는다.</p>
+              <div class="contract-meta">
+                <div><span>왜 필요한가</span><strong>옛 세션이나 일부 로그가 없는 세션도 최대한 읽혀야 실험 기록을 잃지 않는다.</strong></div>
+                <div><span>다음으로 넘기는 것</span><strong>processed_records, render_records, session_meta</strong></div>
+              </div>
+            </article>
+            
+
+            <article class="contract-card">
+              <div class="contract-top">
+                <div><h3>2. 숫자 집계 함수를 준비한다</h3></div>
+                <span class="contract-tag">Step</span>
+              </div>
+              <p>_quantile, _safe_rate, _summarize_numeric가 mean과 p50과 p95와 rate 계산을 맡는다.</p>
+              <div class="contract-meta">
+                <div><span>왜 필요한가</span><strong>세션마다 같은 스키마로 통계를 만들어야 before와 after 비교가 안정적이다.</strong></div>
+                <div><span>다음으로 넘기는 것</span><strong>재사용 가능한 통계 dict</strong></div>
+              </div>
+            </article>
+            
+
+            <article class="contract-card">
+              <div class="contract-top">
+                <div><h3>3. processed와 render를 분리 집계한다</h3></div>
+                <span class="contract-tag">Step</span>
+              </div>
+              <p>build_summary는 processed_frames와 render_frames를 따로 세어 latency와 track count를 각각 계산한다.</p>
+              <div class="contract-meta">
+                <div><span>왜 필요한가</span><strong>알고리즘 처리 성능과 사용자 체감 렌더 성능을 같은 값으로 섞으면 원인 분석이 어려워진다.</strong></div>
+                <div><span>다음으로 넘기는 것</span><strong>processed summary, render summary</strong></div>
+              </div>
+            </article>
+            
+
+            <article class="contract-card">
+              <div class="contract-top">
+                <div><h3>4. 다중 타깃 성공률을 계산한다</h3></div>
+                <span class="contract-tag">Step</span>
+              </div>
+              <p>candidate가 2개 이상인 프레임에서 confirmed 또는 display track이 2개 이상인지 따로 센다.</p>
+              <div class="contract-meta">
+                <div><span>왜 필요한가</span><strong>이 프로젝트의 핵심 문제 중 하나가 multi-target 분리이기 때문이다.</strong></div>
+                <div><span>다음으로 넘기는 것</span><strong>multi-target success metrics</strong></div>
+              </div>
+            </article>
+            
+
+            <article class="contract-card">
+              <div class="contract-top">
+                <div><h3>5. summary.json으로 저장한다</h3></div>
+                <span class="contract-tag">Step</span>
+              </div>
+              <p>main은 최종 summary dict를 파일로 써서 다음 비교 단계에 넘긴다.</p>
+              <div class="contract-meta">
+                <div><span>왜 필요한가</span><strong>실험 비교는 raw JSONL이 아니라 요약 스키마 기준으로 굴리는 편이 안정적이다.</strong></div>
+                <div><span>다음으로 넘기는 것</span><strong>summary.json</strong></div>
+              </div>
+            </article>
+            </div>
+      </section>
+
+      <section class="section">
+        <h2>놓치기 쉬운 부분</h2>
+        <p class="intro">코드를 읽을 때 자주 헷갈리거나, 설명 없이 넘어가면 오해하기 쉬운 부분을 따로 정리했다.</p>
+        <div class="card"><ul><li>render 로그가 없으면 legacy status_log.jsonl을 fallback으로 읽는다.</li><li>이 파일이 계산하는 success rate는 label 없는 운영 지표이지 정답 기반 accuracy 지표는 아니다.</li><li>processed와 render를 분리해 보는 것이 이 파일의 가장 중요한 가치다.</li><li>summary schema가 바뀌면 session_compare와 장기 추세 분석도 함께 손봐야 한다.</li></ul></div>
+      </section>
+
+      <section class="section">
+        <h2>핵심 라인 바로가기</h2>
+        <p class="intro">실제 코드 기준으로 중요한 클래스와 함수를 직접 눌러 내려갈 수 있다.</p>
+        <div class="landmark-grid"><a class="landmark" href="#L16"><strong>_load_jsonl</strong><span>Line 16</span><p>JSONL 로더다.</p></a>
+<a class="landmark" href="#L73"><strong>_summarize_numeric</strong><span>Line 73</span><p>평균, p50, p95를 계산한다.</p></a>
+<a class="landmark" href="#L103"><strong>build_summary</strong><span>Line 103</span><p>리포트 핵심 집계 함수다.</p></a>
+<a class="landmark" href="#L241"><strong>main</strong><span>Line 241</span><p>CLI entrypoint다.</p></a></div>
+      </section>
+
+      <section class="section">
+        <h2>해석 가이드</h2>
+        <p class="intro">입력, 출력, 디버깅 포인트를 같이 보면 이 파일 역할이 훨씬 빨리 정리된다.</p>
+        <div class="grid4">
+          <article class="note"><h3>입력</h3><p>세션 디렉터리의 JSON과 JSONL 로그</p></article>
+          <article class="note"><h3>출력</h3><p>summary.json</p></article>
+          <article class="note"><h3>디버깅 포인트</h3><p>legacy status_log만 있는 옛 세션도 읽히는지, missing log에서 안전한지 확인한다.</p></article>
+          <article class="note"><h3>현업 메모</h3><p>리포트 스키마를 고정해 두어야 장기 추세 비교가 편하다.</p></article>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>읽는 순서</h2>
+        <p class="intro">시간을 아끼려면 아래 순서대로 보면 된다.</p>
+        <div class="card"><ul><li>_load_jsonl과 _summarize_numeric로 집계 기본기를 본다.</li><li>build_summary에서 processed와 render를 어떻게 나눠 계산하는지 확인한다.</li><li>main으로 실제 CLI 사용 흐름을 본다.</li></ul></div>
+      </section>
+
+      <section class="section">
+        <h2>중요 심볼 표</h2>
+        <p class="intro">코드 리뷰나 발표 자료용으로 바로 참고할 수 있는 함수와 클래스 요약이다.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>심볼</th><th>라인</th><th>설명</th></tr></thead>
+            <tbody><tr><td>_load_jsonl</td><td><a href="#L16">L16</a></td><td>JSONL 로더다.</td></tr>
+<tr><td>_summarize_numeric</td><td><a href="#L73">L73</a></td><td>평균, p50, p95를 계산한다.</td></tr>
+<tr><td>build_summary</td><td><a href="#L103">L103</a></td><td>리포트 핵심 집계 함수다.</td></tr>
+<tr><td>main</td><td><a href="#L241">L241</a></td><td>CLI entrypoint다.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>연관 파일</h2>
+        <p class="intro">이 파일 다음에 이어서 보면 좋은 코드들이다.</p>
+        <div class="grid4"><a class="link-card" href="session_compare.html"><article class="card mini-card"><div class="signal">Related</div><h3>session_compare.py</h3><p>before와 after 두 summary.json을 읽어 개선인지 회귀인지 판단하는 비교기다.</p></article></a>
+<a class="link-card" href="live_motion_viewer.html"><article class="card mini-card"><div class="signal">Related</div><h3>live_motion_viewer.py</h3><p>실시간 데모를 구동하는 메인 앱이다. static/runtime/tuning 설정을 읽고, 장비 제어, 워커 시작, UI 렌더링, 세션 로그를 묶는다.</p></article></a>
+<a class="link-card" href="real_time_process.html"><article class="card mini-card"><div class="signal">Related</div><h3>real_time_process.py</h3><p>UDP 패킷을 프레임으로 조립하고 DSP, detection, tracking까지 이어 붙이는 실시간 처리 파이프라인이다.</p></article></a></div>
+      </section>
+
+      <section class="section" id="code">
+        <h2>전체 코드</h2>
+        <p class="intro">UI는 유지한 채로 실제 코드 전문을 그대로 볼 수 있게 구성했다. 라인 번호를 누르면 해당 줄 링크를 쉽게 잡을 수 있다.</p>
+        <div class="code-shell">
+          <div class="code-head"><span>tools/diagnostics/session_report.py</span><span>269 lines</span></div>
+          <div class="code-body"><div class="code-line" id="L1"><a class="ln" href="#L1">1</a><span class="code-text">from __future__ import annotations</span></div>
+<div class="code-line" id="L2"><a class="ln" href="#L2">2</a><span class="code-text"></span></div>
+<div class="code-line" id="L3"><a class="ln" href="#L3">3</a><span class="code-text">import argparse</span></div>
+<div class="code-line" id="L4"><a class="ln" href="#L4">4</a><span class="code-text">from datetime import datetime</span></div>
+<div class="code-line" id="L5"><a class="ln" href="#L5">5</a><span class="code-text">import json</span></div>
+<div class="code-line" id="L6"><a class="ln" href="#L6">6</a><span class="code-text">import math</span></div>
+<div class="code-line" id="L7"><a class="ln" href="#L7">7</a><span class="code-text">from pathlib import Path</span></div>
+<div class="code-line" id="L8"><a class="ln" href="#L8">8</a><span class="code-text"></span></div>
+<div class="code-line" id="L9"><a class="ln" href="#L9">9</a><span class="code-text"></span></div>
+<div class="code-line" id="L10"><a class="ln" href="#L10">10</a><span class="code-text">def _load_json(path: Path, default):</span></div>
+<div class="code-line" id="L11"><a class="ln" href="#L11">11</a><span class="code-text">    if not path.exists():</span></div>
+<div class="code-line" id="L12"><a class="ln" href="#L12">12</a><span class="code-text">        return default</span></div>
+<div class="code-line" id="L13"><a class="ln" href="#L13">13</a><span class="code-text">    return json.loads(path.read_text(encoding=&quot;utf-8&quot;))</span></div>
+<div class="code-line" id="L14"><a class="ln" href="#L14">14</a><span class="code-text"></span></div>
+<div class="code-line" id="L15"><a class="ln" href="#L15">15</a><span class="code-text"></span></div>
+<div class="code-line" id="L16"><a class="ln" href="#L16">16</a><span class="code-text">def _load_jsonl(path: Path):</span></div>
+<div class="code-line" id="L17"><a class="ln" href="#L17">17</a><span class="code-text">    if not path.exists():</span></div>
+<div class="code-line" id="L18"><a class="ln" href="#L18">18</a><span class="code-text">        return []</span></div>
+<div class="code-line" id="L19"><a class="ln" href="#L19">19</a><span class="code-text"></span></div>
+<div class="code-line" id="L20"><a class="ln" href="#L20">20</a><span class="code-text">    records = []</span></div>
+<div class="code-line" id="L21"><a class="ln" href="#L21">21</a><span class="code-text">    with path.open(&quot;r&quot;, encoding=&quot;utf-8&quot;) as handle:</span></div>
+<div class="code-line" id="L22"><a class="ln" href="#L22">22</a><span class="code-text">        for line_number, line in enumerate(handle, start=1):</span></div>
+<div class="code-line" id="L23"><a class="ln" href="#L23">23</a><span class="code-text">            stripped = line.strip()</span></div>
+<div class="code-line" id="L24"><a class="ln" href="#L24">24</a><span class="code-text">            if not stripped:</span></div>
+<div class="code-line" id="L25"><a class="ln" href="#L25">25</a><span class="code-text">                continue</span></div>
+<div class="code-line" id="L26"><a class="ln" href="#L26">26</a><span class="code-text">            try:</span></div>
+<div class="code-line" id="L27"><a class="ln" href="#L27">27</a><span class="code-text">                records.append(json.loads(stripped))</span></div>
+<div class="code-line" id="L28"><a class="ln" href="#L28">28</a><span class="code-text">            except json.JSONDecodeError as exc:</span></div>
+<div class="code-line" id="L29"><a class="ln" href="#L29">29</a><span class="code-text">                raise RuntimeError(</span></div>
+<div class="code-line" id="L30"><a class="ln" href="#L30">30</a><span class="code-text">                    f&quot;Invalid JSON in {path} at line {line_number}: {exc}&quot;</span></div>
+<div class="code-line" id="L31"><a class="ln" href="#L31">31</a><span class="code-text">                ) from exc</span></div>
+<div class="code-line" id="L32"><a class="ln" href="#L32">32</a><span class="code-text">    return records</span></div>
+<div class="code-line" id="L33"><a class="ln" href="#L33">33</a><span class="code-text"></span></div>
+<div class="code-line" id="L34"><a class="ln" href="#L34">34</a><span class="code-text"></span></div>
+<div class="code-line" id="L35"><a class="ln" href="#L35">35</a><span class="code-text">def _resolve_session_dir(path_value: str) -&gt; Path:</span></div>
+<div class="code-line" id="L36"><a class="ln" href="#L36">36</a><span class="code-text">    path = Path(path_value)</span></div>
+<div class="code-line" id="L37"><a class="ln" href="#L37">37</a><span class="code-text">    if path.is_dir():</span></div>
+<div class="code-line" id="L38"><a class="ln" href="#L38">38</a><span class="code-text">        return path</span></div>
+<div class="code-line" id="L39"><a class="ln" href="#L39">39</a><span class="code-text">    if path.name == &quot;summary.json&quot;:</span></div>
+<div class="code-line" id="L40"><a class="ln" href="#L40">40</a><span class="code-text">        return path.parent</span></div>
+<div class="code-line" id="L41"><a class="ln" href="#L41">41</a><span class="code-text">    raise ValueError(f&quot;Session path must be a session directory or summary.json: {path}&quot;)</span></div>
+<div class="code-line" id="L42"><a class="ln" href="#L42">42</a><span class="code-text"></span></div>
+<div class="code-line" id="L43"><a class="ln" href="#L43">43</a><span class="code-text"></span></div>
+<div class="code-line" id="L44"><a class="ln" href="#L44">44</a><span class="code-text">def _quantile(values, q: float):</span></div>
+<div class="code-line" id="L45"><a class="ln" href="#L45">45</a><span class="code-text">    if not values:</span></div>
+<div class="code-line" id="L46"><a class="ln" href="#L46">46</a><span class="code-text">        return None</span></div>
+<div class="code-line" id="L47"><a class="ln" href="#L47">47</a><span class="code-text">    ordered = sorted(float(value) for value in values)</span></div>
+<div class="code-line" id="L48"><a class="ln" href="#L48">48</a><span class="code-text">    if len(ordered) == 1:</span></div>
+<div class="code-line" id="L49"><a class="ln" href="#L49">49</a><span class="code-text">        return ordered[0]</span></div>
+<div class="code-line" id="L50"><a class="ln" href="#L50">50</a><span class="code-text">    position = (len(ordered) - 1) * q</span></div>
+<div class="code-line" id="L51"><a class="ln" href="#L51">51</a><span class="code-text">    lower = int(math.floor(position))</span></div>
+<div class="code-line" id="L52"><a class="ln" href="#L52">52</a><span class="code-text">    upper = int(math.ceil(position))</span></div>
+<div class="code-line" id="L53"><a class="ln" href="#L53">53</a><span class="code-text">    if lower == upper:</span></div>
+<div class="code-line" id="L54"><a class="ln" href="#L54">54</a><span class="code-text">        return ordered[lower]</span></div>
+<div class="code-line" id="L55"><a class="ln" href="#L55">55</a><span class="code-text">    lower_value = ordered[lower]</span></div>
+<div class="code-line" id="L56"><a class="ln" href="#L56">56</a><span class="code-text">    upper_value = ordered[upper]</span></div>
+<div class="code-line" id="L57"><a class="ln" href="#L57">57</a><span class="code-text">    weight = position - lower</span></div>
+<div class="code-line" id="L58"><a class="ln" href="#L58">58</a><span class="code-text">    return lower_value + ((upper_value - lower_value) * weight)</span></div>
+<div class="code-line" id="L59"><a class="ln" href="#L59">59</a><span class="code-text"></span></div>
+<div class="code-line" id="L60"><a class="ln" href="#L60">60</a><span class="code-text"></span></div>
+<div class="code-line" id="L61"><a class="ln" href="#L61">61</a><span class="code-text">def _round_or_none(value, digits=4):</span></div>
+<div class="code-line" id="L62"><a class="ln" href="#L62">62</a><span class="code-text">    if value is None:</span></div>
+<div class="code-line" id="L63"><a class="ln" href="#L63">63</a><span class="code-text">        return None</span></div>
+<div class="code-line" id="L64"><a class="ln" href="#L64">64</a><span class="code-text">    return round(float(value), digits)</span></div>
+<div class="code-line" id="L65"><a class="ln" href="#L65">65</a><span class="code-text"></span></div>
+<div class="code-line" id="L66"><a class="ln" href="#L66">66</a><span class="code-text"></span></div>
+<div class="code-line" id="L67"><a class="ln" href="#L67">67</a><span class="code-text">def _safe_rate(numerator: int, denominator: int):</span></div>
+<div class="code-line" id="L68"><a class="ln" href="#L68">68</a><span class="code-text">    if denominator &lt;= 0:</span></div>
+<div class="code-line" id="L69"><a class="ln" href="#L69">69</a><span class="code-text">        return None</span></div>
+<div class="code-line" id="L70"><a class="ln" href="#L70">70</a><span class="code-text">    return numerator / denominator</span></div>
+<div class="code-line" id="L71"><a class="ln" href="#L71">71</a><span class="code-text"></span></div>
+<div class="code-line" id="L72"><a class="ln" href="#L72">72</a><span class="code-text"></span></div>
+<div class="code-line" id="L73"><a class="ln" href="#L73">73</a><span class="code-text">def _summarize_numeric(values, digits=4):</span></div>
+<div class="code-line" id="L74"><a class="ln" href="#L74">74</a><span class="code-text">    numeric = [float(value) for value in values if value is not None]</span></div>
+<div class="code-line" id="L75"><a class="ln" href="#L75">75</a><span class="code-text">    if not numeric:</span></div>
+<div class="code-line" id="L76"><a class="ln" href="#L76">76</a><span class="code-text">        return {</span></div>
+<div class="code-line" id="L77"><a class="ln" href="#L77">77</a><span class="code-text">            &quot;count&quot;: 0,</span></div>
+<div class="code-line" id="L78"><a class="ln" href="#L78">78</a><span class="code-text">            &quot;mean&quot;: None,</span></div>
+<div class="code-line" id="L79"><a class="ln" href="#L79">79</a><span class="code-text">            &quot;min&quot;: None,</span></div>
+<div class="code-line" id="L80"><a class="ln" href="#L80">80</a><span class="code-text">            &quot;max&quot;: None,</span></div>
+<div class="code-line" id="L81"><a class="ln" href="#L81">81</a><span class="code-text">            &quot;p50&quot;: None,</span></div>
+<div class="code-line" id="L82"><a class="ln" href="#L82">82</a><span class="code-text">            &quot;p95&quot;: None,</span></div>
+<div class="code-line" id="L83"><a class="ln" href="#L83">83</a><span class="code-text">        }</span></div>
+<div class="code-line" id="L84"><a class="ln" href="#L84">84</a><span class="code-text">    return {</span></div>
+<div class="code-line" id="L85"><a class="ln" href="#L85">85</a><span class="code-text">        &quot;count&quot;: len(numeric),</span></div>
+<div class="code-line" id="L86"><a class="ln" href="#L86">86</a><span class="code-text">        &quot;mean&quot;: _round_or_none(sum(numeric) / len(numeric), digits),</span></div>
+<div class="code-line" id="L87"><a class="ln" href="#L87">87</a><span class="code-text">        &quot;min&quot;: _round_or_none(min(numeric), digits),</span></div>
+<div class="code-line" id="L88"><a class="ln" href="#L88">88</a><span class="code-text">        &quot;max&quot;: _round_or_none(max(numeric), digits),</span></div>
+<div class="code-line" id="L89"><a class="ln" href="#L89">89</a><span class="code-text">        &quot;p50&quot;: _round_or_none(_quantile(numeric, 0.50), digits),</span></div>
+<div class="code-line" id="L90"><a class="ln" href="#L90">90</a><span class="code-text">        &quot;p95&quot;: _round_or_none(_quantile(numeric, 0.95), digits),</span></div>
+<div class="code-line" id="L91"><a class="ln" href="#L91">91</a><span class="code-text">    }</span></div>
+<div class="code-line" id="L92"><a class="ln" href="#L92">92</a><span class="code-text"></span></div>
+<div class="code-line" id="L93"><a class="ln" href="#L93">93</a><span class="code-text"></span></div>
+<div class="code-line" id="L94"><a class="ln" href="#L94">94</a><span class="code-text">def _extract_count(record, explicit_key: str, list_key: str):</span></div>
+<div class="code-line" id="L95"><a class="ln" href="#L95">95</a><span class="code-text">    if explicit_key in record and record[explicit_key] is not None:</span></div>
+<div class="code-line" id="L96"><a class="ln" href="#L96">96</a><span class="code-text">        return int(record[explicit_key])</span></div>
+<div class="code-line" id="L97"><a class="ln" href="#L97">97</a><span class="code-text">    values = record.get(list_key)</span></div>
+<div class="code-line" id="L98"><a class="ln" href="#L98">98</a><span class="code-text">    if isinstance(values, list):</span></div>
+<div class="code-line" id="L99"><a class="ln" href="#L99">99</a><span class="code-text">        return len(values)</span></div>
+<div class="code-line" id="L100"><a class="ln" href="#L100">100</a><span class="code-text">    return 0</span></div>
+<div class="code-line" id="L101"><a class="ln" href="#L101">101</a><span class="code-text"></span></div>
+<div class="code-line" id="L102"><a class="ln" href="#L102">102</a><span class="code-text"></span></div>
+<div class="code-line" id="L103"><a class="ln" href="#L103">103</a><span class="code-text">def build_summary(session_dir: Path):</span></div>
+<div class="code-line" id="L104"><a class="ln" href="#L104">104</a><span class="code-text">    processed_path = session_dir / &quot;processed_frames.jsonl&quot;</span></div>
+<div class="code-line" id="L105"><a class="ln" href="#L105">105</a><span class="code-text">    render_path = session_dir / &quot;render_frames.jsonl&quot;</span></div>
+<div class="code-line" id="L106"><a class="ln" href="#L106">106</a><span class="code-text">    legacy_render_path = session_dir / &quot;status_log.jsonl&quot;</span></div>
+<div class="code-line" id="L107"><a class="ln" href="#L107">107</a><span class="code-text"></span></div>
+<div class="code-line" id="L108"><a class="ln" href="#L108">108</a><span class="code-text">    processed_records = _load_jsonl(processed_path)</span></div>
+<div class="code-line" id="L109"><a class="ln" href="#L109">109</a><span class="code-text">    render_records = _load_jsonl(render_path)</span></div>
+<div class="code-line" id="L110"><a class="ln" href="#L110">110</a><span class="code-text">    if not render_records and legacy_render_path.exists():</span></div>
+<div class="code-line" id="L111"><a class="ln" href="#L111">111</a><span class="code-text">        render_records = _load_jsonl(legacy_render_path)</span></div>
+<div class="code-line" id="L112"><a class="ln" href="#L112">112</a><span class="code-text"></span></div>
+<div class="code-line" id="L113"><a class="ln" href="#L113">113</a><span class="code-text">    session_meta = _load_json(session_dir / &quot;session_meta.json&quot;, {})</span></div>
+<div class="code-line" id="L114"><a class="ln" href="#L114">114</a><span class="code-text">    runtime_config = _load_json(session_dir / &quot;runtime_config.json&quot;, {})</span></div>
+<div class="code-line" id="L115"><a class="ln" href="#L115">115</a><span class="code-text"></span></div>
+<div class="code-line" id="L116"><a class="ln" href="#L116">116</a><span class="code-text">    processed_frame_count = len(processed_records)</span></div>
+<div class="code-line" id="L117"><a class="ln" href="#L117">117</a><span class="code-text">    render_frame_count = len(render_records)</span></div>
+<div class="code-line" id="L118"><a class="ln" href="#L118">118</a><span class="code-text"></span></div>
+<div class="code-line" id="L119"><a class="ln" href="#L119">119</a><span class="code-text">    processed_invalid_count = sum(bool(record.get(&quot;invalid&quot;)) for record in processed_records)</span></div>
+<div class="code-line" id="L120"><a class="ln" href="#L120">120</a><span class="code-text">    processed_birth_block_count = sum(</span></div>
+<div class="code-line" id="L121"><a class="ln" href="#L121">121</a><span class="code-text">        bool(record.get(&quot;track_birth_blocked&quot;)) for record in processed_records</span></div>
+<div class="code-line" id="L122"><a class="ln" href="#L122">122</a><span class="code-text">    )</span></div>
+<div class="code-line" id="L123"><a class="ln" href="#L123">123</a><span class="code-text">    render_invalid_count = sum(bool(record.get(&quot;invalid&quot;)) for record in render_records)</span></div>
+<div class="code-line" id="L124"><a class="ln" href="#L124">124</a><span class="code-text"></span></div>
+<div class="code-line" id="L125"><a class="ln" href="#L125">125</a><span class="code-text">    processed_candidate_counts = [int(record.get(&quot;candidate_count&quot;, 0)) for record in processed_records]</span></div>
+<div class="code-line" id="L126"><a class="ln" href="#L126">126</a><span class="code-text">    processed_tracker_input_counts = [int(record.get(&quot;tracker_input_count&quot;, 0)) for record in processed_records]</span></div>
+<div class="code-line" id="L127"><a class="ln" href="#L127">127</a><span class="code-text">    processed_confirmed_counts = [</span></div>
+<div class="code-line" id="L128"><a class="ln" href="#L128">128</a><span class="code-text">        _extract_count(record, &quot;confirmed_track_count&quot;, &quot;confirmed_tracks&quot;)</span></div>
+<div class="code-line" id="L129"><a class="ln" href="#L129">129</a><span class="code-text">        for record in processed_records</span></div>
+<div class="code-line" id="L130"><a class="ln" href="#L130">130</a><span class="code-text">    ]</span></div>
+<div class="code-line" id="L131"><a class="ln" href="#L131">131</a><span class="code-text">    processed_tentative_counts = [</span></div>
+<div class="code-line" id="L132"><a class="ln" href="#L132">132</a><span class="code-text">        _extract_count(record, &quot;tentative_track_count&quot;, &quot;tentative_tracks&quot;)</span></div>
+<div class="code-line" id="L133"><a class="ln" href="#L133">133</a><span class="code-text">        for record in processed_records</span></div>
+<div class="code-line" id="L134"><a class="ln" href="#L134">134</a><span class="code-text">    ]</span></div>
+<div class="code-line" id="L135"><a class="ln" href="#L135">135</a><span class="code-text"></span></div>
+<div class="code-line" id="L136"><a class="ln" href="#L136">136</a><span class="code-text">    render_candidate_counts = [int(record.get(&quot;candidate_count&quot;, 0)) for record in render_records]</span></div>
+<div class="code-line" id="L137"><a class="ln" href="#L137">137</a><span class="code-text">    render_display_counts = [</span></div>
+<div class="code-line" id="L138"><a class="ln" href="#L138">138</a><span class="code-text">        _extract_count(record, &quot;display_track_count&quot;, &quot;display_tracks&quot;)</span></div>
+<div class="code-line" id="L139"><a class="ln" href="#L139">139</a><span class="code-text">        for record in render_records</span></div>
+<div class="code-line" id="L140"><a class="ln" href="#L140">140</a><span class="code-text">    ]</span></div>
+<div class="code-line" id="L141"><a class="ln" href="#L141">141</a><span class="code-text">    render_tentative_display_counts = [</span></div>
+<div class="code-line" id="L142"><a class="ln" href="#L142">142</a><span class="code-text">        _extract_count(record, &quot;tentative_display_track_count&quot;, &quot;tentative_display_tracks&quot;)</span></div>
+<div class="code-line" id="L143"><a class="ln" href="#L143">143</a><span class="code-text">        for record in render_records</span></div>
+<div class="code-line" id="L144"><a class="ln" href="#L144">144</a><span class="code-text">    ]</span></div>
+<div class="code-line" id="L145"><a class="ln" href="#L145">145</a><span class="code-text">    skipped_render_frames = [int(record.get(&quot;skipped_render_frames&quot;, 0)) for record in render_records]</span></div>
+<div class="code-line" id="L146"><a class="ln" href="#L146">146</a><span class="code-text"></span></div>
+<div class="code-line" id="L147"><a class="ln" href="#L147">147</a><span class="code-text">    processed_multi_candidate_frames = [</span></div>
+<div class="code-line" id="L148"><a class="ln" href="#L148">148</a><span class="code-text">        record for record in processed_records</span></div>
+<div class="code-line" id="L149"><a class="ln" href="#L149">149</a><span class="code-text">        if int(record.get(&quot;candidate_count&quot;, 0)) &gt;= 2</span></div>
+<div class="code-line" id="L150"><a class="ln" href="#L150">150</a><span class="code-text">    ]</span></div>
+<div class="code-line" id="L151"><a class="ln" href="#L151">151</a><span class="code-text">    processed_multi_confirmed_success = sum(</span></div>
+<div class="code-line" id="L152"><a class="ln" href="#L152">152</a><span class="code-text">        1</span></div>
+<div class="code-line" id="L153"><a class="ln" href="#L153">153</a><span class="code-text">        for record in processed_multi_candidate_frames</span></div>
+<div class="code-line" id="L154"><a class="ln" href="#L154">154</a><span class="code-text">        if _extract_count(record, &quot;confirmed_track_count&quot;, &quot;confirmed_tracks&quot;) &gt;= 2</span></div>
+<div class="code-line" id="L155"><a class="ln" href="#L155">155</a><span class="code-text">    )</span></div>
+<div class="code-line" id="L156"><a class="ln" href="#L156">156</a><span class="code-text"></span></div>
+<div class="code-line" id="L157"><a class="ln" href="#L157">157</a><span class="code-text">    render_multi_candidate_frames = [</span></div>
+<div class="code-line" id="L158"><a class="ln" href="#L158">158</a><span class="code-text">        record for record in render_records</span></div>
+<div class="code-line" id="L159"><a class="ln" href="#L159">159</a><span class="code-text">        if int(record.get(&quot;candidate_count&quot;, 0)) &gt;= 2</span></div>
+<div class="code-line" id="L160"><a class="ln" href="#L160">160</a><span class="code-text">    ]</span></div>
+<div class="code-line" id="L161"><a class="ln" href="#L161">161</a><span class="code-text">    render_multi_display_success = sum(</span></div>
+<div class="code-line" id="L162"><a class="ln" href="#L162">162</a><span class="code-text">        1</span></div>
+<div class="code-line" id="L163"><a class="ln" href="#L163">163</a><span class="code-text">        for record in render_multi_candidate_frames</span></div>
+<div class="code-line" id="L164"><a class="ln" href="#L164">164</a><span class="code-text">        if _extract_count(record, &quot;display_track_count&quot;, &quot;display_tracks&quot;) &gt;= 2</span></div>
+<div class="code-line" id="L165"><a class="ln" href="#L165">165</a><span class="code-text">    )</span></div>
+<div class="code-line" id="L166"><a class="ln" href="#L166">166</a><span class="code-text"></span></div>
+<div class="code-line" id="L167"><a class="ln" href="#L167">167</a><span class="code-text">    summary = {</span></div>
+<div class="code-line" id="L168"><a class="ln" href="#L168">168</a><span class="code-text">        &quot;schema_version&quot;: 1,</span></div>
+<div class="code-line" id="L169"><a class="ln" href="#L169">169</a><span class="code-text">        &quot;summary_generated_at&quot;: datetime.now().isoformat(timespec=&quot;seconds&quot;),</span></div>
+<div class="code-line" id="L170"><a class="ln" href="#L170">170</a><span class="code-text">        &quot;session_dir&quot;: str(session_dir),</span></div>
+<div class="code-line" id="L171"><a class="ln" href="#L171">171</a><span class="code-text">        &quot;session_id&quot;: session_meta.get(&quot;session_id&quot;, session_dir.name),</span></div>
+<div class="code-line" id="L172"><a class="ln" href="#L172">172</a><span class="code-text">        &quot;session_meta&quot;: session_meta,</span></div>
+<div class="code-line" id="L173"><a class="ln" href="#L173">173</a><span class="code-text">        &quot;runtime_config_path&quot;: str(session_dir / &quot;runtime_config.json&quot;),</span></div>
+<div class="code-line" id="L174"><a class="ln" href="#L174">174</a><span class="code-text">        &quot;runtime_config&quot;: runtime_config,</span></div>
+<div class="code-line" id="L175"><a class="ln" href="#L175">175</a><span class="code-text">        &quot;log_files_present&quot;: {</span></div>
+<div class="code-line" id="L176"><a class="ln" href="#L176">176</a><span class="code-text">            &quot;processed_frames&quot;: processed_path.exists(),</span></div>
+<div class="code-line" id="L177"><a class="ln" href="#L177">177</a><span class="code-text">            &quot;render_frames&quot;: render_path.exists(),</span></div>
+<div class="code-line" id="L178"><a class="ln" href="#L178">178</a><span class="code-text">            &quot;event_log&quot;: (session_dir / &quot;event_log.jsonl&quot;).exists(),</span></div>
+<div class="code-line" id="L179"><a class="ln" href="#L179">179</a><span class="code-text">            &quot;legacy_status_log&quot;: legacy_render_path.exists(),</span></div>
+<div class="code-line" id="L180"><a class="ln" href="#L180">180</a><span class="code-text">        },</span></div>
+<div class="code-line" id="L181"><a class="ln" href="#L181">181</a><span class="code-text">        &quot;processed&quot;: {</span></div>
+<div class="code-line" id="L182"><a class="ln" href="#L182">182</a><span class="code-text">            &quot;frame_count&quot;: processed_frame_count,</span></div>
+<div class="code-line" id="L183"><a class="ln" href="#L183">183</a><span class="code-text">            &quot;first_frame_id&quot;: None if not processed_records else int(processed_records[0].get(&quot;frame_id&quot;, 0)),</span></div>
+<div class="code-line" id="L184"><a class="ln" href="#L184">184</a><span class="code-text">            &quot;last_frame_id&quot;: None if not processed_records else int(processed_records[-1].get(&quot;frame_id&quot;, 0)),</span></div>
+<div class="code-line" id="L185"><a class="ln" href="#L185">185</a><span class="code-text">            &quot;invalid_count&quot;: processed_invalid_count,</span></div>
+<div class="code-line" id="L186"><a class="ln" href="#L186">186</a><span class="code-text">            &quot;invalid_rate&quot;: _round_or_none(_safe_rate(processed_invalid_count, processed_frame_count)),</span></div>
+<div class="code-line" id="L187"><a class="ln" href="#L187">187</a><span class="code-text">            &quot;birth_block_count&quot;: processed_birth_block_count,</span></div>
+<div class="code-line" id="L188"><a class="ln" href="#L188">188</a><span class="code-text">            &quot;birth_block_rate&quot;: _round_or_none(</span></div>
+<div class="code-line" id="L189"><a class="ln" href="#L189">189</a><span class="code-text">                _safe_rate(processed_birth_block_count, processed_frame_count)</span></div>
+<div class="code-line" id="L190"><a class="ln" href="#L190">190</a><span class="code-text">            ),</span></div>
+<div class="code-line" id="L191"><a class="ln" href="#L191">191</a><span class="code-text">            &quot;capture_to_process_ms&quot;: _summarize_numeric(</span></div>
+<div class="code-line" id="L192"><a class="ln" href="#L192">192</a><span class="code-text">                [record.get(&quot;capture_to_process_ms&quot;) for record in processed_records],</span></div>
+<div class="code-line" id="L193"><a class="ln" href="#L193">193</a><span class="code-text">                digits=3,</span></div>
+<div class="code-line" id="L194"><a class="ln" href="#L194">194</a><span class="code-text">            ),</span></div>
+<div class="code-line" id="L195"><a class="ln" href="#L195">195</a><span class="code-text">            &quot;candidate_count&quot;: _summarize_numeric(processed_candidate_counts, digits=3),</span></div>
+<div class="code-line" id="L196"><a class="ln" href="#L196">196</a><span class="code-text">            &quot;tracker_input_count&quot;: _summarize_numeric(processed_tracker_input_counts, digits=3),</span></div>
+<div class="code-line" id="L197"><a class="ln" href="#L197">197</a><span class="code-text">            &quot;confirmed_track_count&quot;: _summarize_numeric(processed_confirmed_counts, digits=3),</span></div>
+<div class="code-line" id="L198"><a class="ln" href="#L198">198</a><span class="code-text">            &quot;tentative_track_count&quot;: _summarize_numeric(processed_tentative_counts, digits=3),</span></div>
+<div class="code-line" id="L199"><a class="ln" href="#L199">199</a><span class="code-text">            &quot;multi_candidate_frame_count&quot;: len(processed_multi_candidate_frames),</span></div>
+<div class="code-line" id="L200"><a class="ln" href="#L200">200</a><span class="code-text">            &quot;multi_confirmed_success_rate&quot;: _round_or_none(</span></div>
+<div class="code-line" id="L201"><a class="ln" href="#L201">201</a><span class="code-text">                _safe_rate(processed_multi_confirmed_success, len(processed_multi_candidate_frames))</span></div>
+<div class="code-line" id="L202"><a class="ln" href="#L202">202</a><span class="code-text">            ),</span></div>
+<div class="code-line" id="L203"><a class="ln" href="#L203">203</a><span class="code-text">        },</span></div>
+<div class="code-line" id="L204"><a class="ln" href="#L204">204</a><span class="code-text">        &quot;render&quot;: {</span></div>
+<div class="code-line" id="L205"><a class="ln" href="#L205">205</a><span class="code-text">            &quot;frame_count&quot;: render_frame_count,</span></div>
+<div class="code-line" id="L206"><a class="ln" href="#L206">206</a><span class="code-text">            &quot;first_frame_id&quot;: None if not render_records else int(render_records[0].get(&quot;frame_id&quot;, 0)),</span></div>
+<div class="code-line" id="L207"><a class="ln" href="#L207">207</a><span class="code-text">            &quot;last_frame_id&quot;: None if not render_records else int(render_records[-1].get(&quot;frame_id&quot;, 0)),</span></div>
+<div class="code-line" id="L208"><a class="ln" href="#L208">208</a><span class="code-text">            &quot;invalid_count&quot;: render_invalid_count,</span></div>
+<div class="code-line" id="L209"><a class="ln" href="#L209">209</a><span class="code-text">            &quot;invalid_rate&quot;: _round_or_none(_safe_rate(render_invalid_count, render_frame_count)),</span></div>
+<div class="code-line" id="L210"><a class="ln" href="#L210">210</a><span class="code-text">            &quot;capture_to_render_ms&quot;: _summarize_numeric(</span></div>
+<div class="code-line" id="L211"><a class="ln" href="#L211">211</a><span class="code-text">                [record.get(&quot;capture_to_render_ms&quot;) for record in render_records],</span></div>
+<div class="code-line" id="L212"><a class="ln" href="#L212">212</a><span class="code-text">                digits=3,</span></div>
+<div class="code-line" id="L213"><a class="ln" href="#L213">213</a><span class="code-text">            ),</span></div>
+<div class="code-line" id="L214"><a class="ln" href="#L214">214</a><span class="code-text">            &quot;process_to_render_ms&quot;: _summarize_numeric(</span></div>
+<div class="code-line" id="L215"><a class="ln" href="#L215">215</a><span class="code-text">                [record.get(&quot;process_to_render_ms&quot;) for record in render_records],</span></div>
+<div class="code-line" id="L216"><a class="ln" href="#L216">216</a><span class="code-text">                digits=3,</span></div>
+<div class="code-line" id="L217"><a class="ln" href="#L217">217</a><span class="code-text">            ),</span></div>
+<div class="code-line" id="L218"><a class="ln" href="#L218">218</a><span class="code-text">            &quot;display_track_count&quot;: _summarize_numeric(render_display_counts, digits=3),</span></div>
+<div class="code-line" id="L219"><a class="ln" href="#L219">219</a><span class="code-text">            &quot;tentative_display_track_count&quot;: _summarize_numeric(</span></div>
+<div class="code-line" id="L220"><a class="ln" href="#L220">220</a><span class="code-text">                render_tentative_display_counts,</span></div>
+<div class="code-line" id="L221"><a class="ln" href="#L221">221</a><span class="code-text">                digits=3,</span></div>
+<div class="code-line" id="L222"><a class="ln" href="#L222">222</a><span class="code-text">            ),</span></div>
+<div class="code-line" id="L223"><a class="ln" href="#L223">223</a><span class="code-text">            &quot;candidate_count&quot;: _summarize_numeric(render_candidate_counts, digits=3),</span></div>
+<div class="code-line" id="L224"><a class="ln" href="#L224">224</a><span class="code-text">            &quot;skipped_render_frames&quot;: {</span></div>
+<div class="code-line" id="L225"><a class="ln" href="#L225">225</a><span class="code-text">                &quot;total&quot;: sum(skipped_render_frames),</span></div>
+<div class="code-line" id="L226"><a class="ln" href="#L226">226</a><span class="code-text">                &quot;mean_per_render&quot;: _round_or_none(</span></div>
+<div class="code-line" id="L227"><a class="ln" href="#L227">227</a><span class="code-text">                    _safe_rate(sum(skipped_render_frames), render_frame_count),</span></div>
+<div class="code-line" id="L228"><a class="ln" href="#L228">228</a><span class="code-text">                    digits=3,</span></div>
+<div class="code-line" id="L229"><a class="ln" href="#L229">229</a><span class="code-text">                ),</span></div>
+<div class="code-line" id="L230"><a class="ln" href="#L230">230</a><span class="code-text">                &quot;max_single_render&quot;: max(skipped_render_frames) if skipped_render_frames else 0,</span></div>
+<div class="code-line" id="L231"><a class="ln" href="#L231">231</a><span class="code-text">            },</span></div>
+<div class="code-line" id="L232"><a class="ln" href="#L232">232</a><span class="code-text">            &quot;multi_candidate_frame_count&quot;: len(render_multi_candidate_frames),</span></div>
+<div class="code-line" id="L233"><a class="ln" href="#L233">233</a><span class="code-text">            &quot;multi_display_success_rate&quot;: _round_or_none(</span></div>
+<div class="code-line" id="L234"><a class="ln" href="#L234">234</a><span class="code-text">                _safe_rate(render_multi_display_success, len(render_multi_candidate_frames))</span></div>
+<div class="code-line" id="L235"><a class="ln" href="#L235">235</a><span class="code-text">            ),</span></div>
+<div class="code-line" id="L236"><a class="ln" href="#L236">236</a><span class="code-text">        },</span></div>
+<div class="code-line" id="L237"><a class="ln" href="#L237">237</a><span class="code-text">    }</span></div>
+<div class="code-line" id="L238"><a class="ln" href="#L238">238</a><span class="code-text">    return summary</span></div>
+<div class="code-line" id="L239"><a class="ln" href="#L239">239</a><span class="code-text"></span></div>
+<div class="code-line" id="L240"><a class="ln" href="#L240">240</a><span class="code-text"></span></div>
+<div class="code-line" id="L241"><a class="ln" href="#L241">241</a><span class="code-text">def main():</span></div>
+<div class="code-line" id="L242"><a class="ln" href="#L242">242</a><span class="code-text">    parser = argparse.ArgumentParser(</span></div>
+<div class="code-line" id="L243"><a class="ln" href="#L243">243</a><span class="code-text">        description=&quot;Build summary.json from a live_motion_viewer session directory.&quot;</span></div>
+<div class="code-line" id="L244"><a class="ln" href="#L244">244</a><span class="code-text">    )</span></div>
+<div class="code-line" id="L245"><a class="ln" href="#L245">245</a><span class="code-text">    parser.add_argument(&quot;session&quot;, help=&quot;Path to a session directory.&quot;)</span></div>
+<div class="code-line" id="L246"><a class="ln" href="#L246">246</a><span class="code-text">    parser.add_argument(</span></div>
+<div class="code-line" id="L247"><a class="ln" href="#L247">247</a><span class="code-text">        &quot;--output&quot;,</span></div>
+<div class="code-line" id="L248"><a class="ln" href="#L248">248</a><span class="code-text">        help=&quot;Optional output path. Defaults to &lt;session&gt;/summary.json&quot;,</span></div>
+<div class="code-line" id="L249"><a class="ln" href="#L249">249</a><span class="code-text">    )</span></div>
+<div class="code-line" id="L250"><a class="ln" href="#L250">250</a><span class="code-text">    args = parser.parse_args()</span></div>
+<div class="code-line" id="L251"><a class="ln" href="#L251">251</a><span class="code-text"></span></div>
+<div class="code-line" id="L252"><a class="ln" href="#L252">252</a><span class="code-text">    session_dir = _resolve_session_dir(args.session)</span></div>
+<div class="code-line" id="L253"><a class="ln" href="#L253">253</a><span class="code-text">    summary = build_summary(session_dir)</span></div>
+<div class="code-line" id="L254"><a class="ln" href="#L254">254</a><span class="code-text">    output_path = Path(args.output) if args.output else session_dir / &quot;summary.json&quot;</span></div>
+<div class="code-line" id="L255"><a class="ln" href="#L255">255</a><span class="code-text">    output_path.write_text(</span></div>
+<div class="code-line" id="L256"><a class="ln" href="#L256">256</a><span class="code-text">        json.dumps(summary, indent=2, ensure_ascii=False),</span></div>
+<div class="code-line" id="L257"><a class="ln" href="#L257">257</a><span class="code-text">        encoding=&quot;utf-8&quot;,</span></div>
+<div class="code-line" id="L258"><a class="ln" href="#L258">258</a><span class="code-text">    )</span></div>
+<div class="code-line" id="L259"><a class="ln" href="#L259">259</a><span class="code-text"></span></div>
+<div class="code-line" id="L260"><a class="ln" href="#L260">260</a><span class="code-text">    print(f&quot;Summary written to: {output_path}&quot;)</span></div>
+<div class="code-line" id="L261"><a class="ln" href="#L261">261</a><span class="code-text">    print(f&quot;Processed frames: {summary[&#x27;processed&#x27;][&#x27;frame_count&#x27;]}&quot;)</span></div>
+<div class="code-line" id="L262"><a class="ln" href="#L262">262</a><span class="code-text">    print(f&quot;Rendered frames: {summary[&#x27;render&#x27;][&#x27;frame_count&#x27;]}&quot;)</span></div>
+<div class="code-line" id="L263"><a class="ln" href="#L263">263</a><span class="code-text">    print(f&quot;Processed invalid rate: {summary[&#x27;processed&#x27;][&#x27;invalid_rate&#x27;]}&quot;)</span></div>
+<div class="code-line" id="L264"><a class="ln" href="#L264">264</a><span class="code-text">    print(f&quot;Render p95 latency: {summary[&#x27;render&#x27;][&#x27;capture_to_render_ms&#x27;][&#x27;p95&#x27;]} ms&quot;)</span></div>
+<div class="code-line" id="L265"><a class="ln" href="#L265">265</a><span class="code-text"></span></div>
+<div class="code-line" id="L266"><a class="ln" href="#L266">266</a><span class="code-text"></span></div>
+<div class="code-line" id="L267"><a class="ln" href="#L267">267</a><span class="code-text">if __name__ == &quot;__main__&quot;:</span></div>
+<div class="code-line" id="L268"><a class="ln" href="#L268">268</a><span class="code-text">    main()</span></div></div>
+        </div>
+      </section>
+
+      <div class="footer">Generated from source. 문서와 코드가 어긋나면 이 생성 스크립트를 다시 실행하면 된다.</div>
+    </div>
+    </body></html>

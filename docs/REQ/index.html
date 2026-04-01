@@ -1,0 +1,288 @@
+<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Radar Project Improvement REQ</title><style>
+    :root {
+      --bg: #f2f6f8;
+      --panel: rgba(255,255,255,.95);
+      --ink: #14222d;
+      --muted: #536d7b;
+      --line: #d8e2e8;
+      --brand: #0d6e6e;
+      --brand2: #153f68;
+      --accent: #ff7d32;
+      --shadow: 0 18px 50px rgba(18,39,56,.12);
+      --mono: "JetBrains Mono", Consolas, monospace;
+      --sans: "Pretendard Variable", "IBM Plex Sans KR", "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(13,110,110,.18), transparent 32%),
+        radial-gradient(circle at top right, rgba(21,63,104,.14), transparent 28%),
+        linear-gradient(180deg, #edf4f6 0%, #f8fbfc 28%, #eef3f5 100%);
+    }
+    a { color: inherit; }
+    .wrap { width: min(1320px, calc(100vw - 40px)); margin: 0 auto 60px; }
+    .topbar {
+      position: sticky; top: 0; z-index: 30; backdrop-filter: blur(18px);
+      background: rgba(242,246,248,.84); border-bottom: 1px solid rgba(20,34,45,.08);
+    }
+    .topbar-inner {
+      width: min(1320px, calc(100vw - 40px)); margin: 0 auto; padding: 16px 0;
+      display: flex; justify-content: space-between; align-items: center; gap: 16px;
+    }
+    .brand { display: flex; align-items: center; gap: 14px; font-weight: 700; }
+    .mark {
+      width: 44px; height: 44px; border-radius: 14px;
+      background: linear-gradient(135deg, var(--brand), #19a0a0 60%, var(--brand2));
+      box-shadow: var(--shadow); position: relative;
+    }
+    .mark::before, .mark::after {
+      content: ""; position: absolute; border: 2px solid rgba(255,255,255,.9); border-radius: 999px;
+    }
+    .mark::before { inset: 10px; }
+    .mark::after { inset: 18px; }
+    .nav { display: flex; gap: 10px; flex-wrap: wrap; }
+    .nav a {
+      text-decoration: none; color: var(--muted); font-size: 14px;
+      padding: 10px 14px; border-radius: 999px; background: rgba(255,255,255,.78);
+      border: 1px solid rgba(20,34,45,.06);
+    }
+    .hero {
+      margin-top: 28px; padding: 32px; border-radius: 32px; color: #f7fbfd;
+      background: linear-gradient(135deg, rgba(13,110,110,.94), rgba(21,63,104,.93));
+      box-shadow: var(--shadow); overflow: hidden; position: relative;
+    }
+    .hero::before {
+      content: ""; position: absolute; right: -80px; top: -60px; width: 240px; height: 240px;
+      border-radius: 50%; background: radial-gradient(circle, rgba(255,255,255,.18), transparent 68%);
+    }
+    .hero-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 24px; position: relative; z-index: 1; }
+    .eyebrow {
+      display: inline-block; margin-bottom: 18px; padding: 8px 12px; border-radius: 999px;
+      background: rgba(255,255,255,.12); font-size: 13px;
+    }
+    h1 { margin: 0 0 16px; font-size: clamp(32px, 4vw, 54px); line-height: 1.04; letter-spacing: -.04em; }
+    .hero p { margin: 0; line-height: 1.72; font-size: 16px; color: rgba(247,251,253,.92); }
+    .hero-meta { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+    .meta { padding: 18px; border-radius: 20px; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.12); }
+    .meta span { font-size: 13px; color: rgba(247,251,253,.76); }
+    .meta strong { display: block; margin-top: 10px; font-size: 28px; letter-spacing: -.04em; }
+    .section {
+      margin-top: 26px; padding: 28px; border-radius: 28px; background: var(--panel);
+      border: 1px solid rgba(20,34,45,.06); box-shadow: var(--shadow);
+    }
+    .section h2 { margin: 0 0 10px; font-size: 30px; letter-spacing: -.03em; }
+    .intro { margin: 0 0 24px; color: var(--muted); line-height: 1.72; font-size: 15px; }
+    .grid2, .grid3, .grid4 { display: grid; gap: 18px; }
+    .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .card, .flow-step, .table-wrap, .landmark, .metric, .note { background: #fff; border: 1px solid var(--line); border-radius: 20px; }
+    .card, .metric, .note, .flow-step { padding: 20px; }
+    .card h3, .metric h3, .note h3 { margin: 0 0 10px; font-size: 19px; letter-spacing: -.02em; }
+    .card p, .metric p, .note p, li, td, th { color: var(--muted); line-height: 1.72; font-size: 14px; }
+    .signal {
+      display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .08em; color: var(--brand); margin-bottom: 10px;
+    }
+    .signal::before {
+      content: ""; width: 10px; height: 10px; border-radius: 50%; background: currentColor;
+      box-shadow: 0 0 0 6px rgba(13,110,110,.12);
+    }
+    .pill-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .pill {
+      display: inline-flex; align-items: center; border-radius: 999px; padding: 8px 12px;
+      background: rgba(13,110,110,.08); color: var(--brand); font-size: 12px; font-weight: 700;
+      letter-spacing: .04em; text-transform: uppercase;
+    }
+    .flow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: stretch; }
+    .flow-step strong { display: block; margin-bottom: 10px; font-size: 18px; }
+    .flow-step span { display: inline-block; font-size: 12px; color: var(--brand); margin-bottom: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+    .landmark-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+    .landmark { padding: 18px; text-decoration: none; display: block; }
+    .landmark strong { display: block; font-size: 18px; margin-bottom: 8px; }
+    .landmark span { display: inline-block; font-size: 12px; color: var(--brand); font-weight: 700; margin-bottom: 10px; }
+    .landmark p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.65; }
+    .table-wrap { overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 14px 16px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { background: #f7fafb; color: var(--ink); font-size: 13px; text-transform: uppercase; letter-spacing: .06em; }
+    .link-card { text-decoration: none; color: inherit; display: block; }
+    .mini-card { height: 100%; }
+    .contract-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+    .contract-card { background: #fff; border: 1px solid var(--line); border-radius: 22px; padding: 20px; }
+    .contract-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+    .contract-top h3 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
+    .contract-tag {
+      display: inline-flex; align-items: center; border-radius: 999px; padding: 8px 12px;
+      background: rgba(21,63,104,.08); color: var(--brand2); font-size: 12px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .05em;
+    }
+    .contract-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
+    .contract-meta div { background: #f7fafb; border: 1px solid var(--line); border-radius: 14px; padding: 12px; }
+    .contract-meta span { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--brand); margin-bottom: 6px; font-weight: 700; }
+    .contract-meta strong { display: block; font-size: 13px; line-height: 1.5; color: var(--ink); }
+    .field-list { margin-top: 14px; padding-left: 18px; }
+    .field-list li { margin-bottom: 6px; }
+    details.accordion {
+      background: #fff; border: 1px solid var(--line); border-radius: 20px; overflow: hidden;
+    }
+    details.accordion + details.accordion { margin-top: 14px; }
+    details.accordion summary {
+      list-style: none; cursor: pointer; padding: 18px 20px;
+      display: flex; justify-content: space-between; align-items: center; gap: 16px;
+      font-weight: 700; color: var(--ink);
+    }
+    details.accordion summary::-webkit-details-marker { display: none; }
+    .summary-copy { display: flex; flex-direction: column; gap: 6px; }
+    .summary-copy small { color: var(--muted); font-weight: 500; font-size: 13px; }
+    .summary-tag {
+      display: inline-flex; align-items: center; border-radius: 999px; padding: 8px 12px;
+      background: rgba(13,110,110,.08); color: var(--brand); font-size: 12px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .05em;
+    }
+    .accordion-body { padding: 0 20px 20px; }
+    .handoff {
+      display: grid; grid-template-columns: 160px 1.4fr 1fr 1fr;
+      gap: 0; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; margin-top: 14px;
+    }
+    .handoff-cell {
+      padding: 14px 16px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
+      color: var(--muted); font-size: 14px; line-height: 1.68; background: #fff;
+    }
+    .handoff-cell:nth-child(4n) { border-right: 0; }
+    .handoff.head .handoff-cell {
+      background: #f7fafb; color: var(--ink); font-size: 12px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .06em;
+    }
+    .handoff .fn { font-family: var(--mono); color: var(--brand2); font-size: 13px; }
+    .pipeline-strip {
+      display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 12px; align-items: stretch;
+    }
+    .pipeline-node {
+      position: relative; background: #fff; border: 1px solid var(--line); border-radius: 22px; padding: 18px;
+      min-height: 200px;
+    }
+    .pipeline-node:not(:last-child)::after {
+      content: "→"; position: absolute; right: -18px; top: calc(50% - 14px); z-index: 2;
+      width: 28px; height: 28px; border-radius: 999px; background: var(--brand); color: #fff;
+      display: flex; align-items: center; justify-content: center; font-weight: 700;
+      box-shadow: 0 8px 20px rgba(13,110,110,.18);
+    }
+    .pipeline-node .stage { display: inline-flex; margin-bottom: 10px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--brand); font-weight: 800; }
+    .pipeline-node h3 { margin: 0 0 10px; font-size: 18px; letter-spacing: -.02em; }
+    .pipeline-node p { margin: 0 0 10px; color: var(--muted); line-height: 1.65; font-size: 14px; }
+    .pipeline-node .mono { font-family: var(--mono); color: var(--brand2); font-size: 12px; }
+    .code-shell { background: #0f1720; color: #ecf6fb; border-radius: 24px; overflow: hidden; border: 1px solid rgba(255,255,255,.06); }
+    .code-head {
+      display: flex; justify-content: space-between; align-items: center; gap: 16px;
+      padding: 16px 20px; background: rgba(255,255,255,.04); border-bottom: 1px solid rgba(255,255,255,.06);
+      font-family: var(--mono); font-size: 13px;
+    }
+    .code-body { max-height: 880px; overflow: auto; font-family: var(--mono); font-size: 13px; }
+    .code-line { display: grid; grid-template-columns: 72px 1fr; border-bottom: 1px solid rgba(255,255,255,.03); }
+    .ln {
+      display: block; text-decoration: none; color: #86b5d3; text-align: right; padding: 0 14px;
+      background: rgba(255,255,255,.02); border-right: 1px solid rgba(255,255,255,.05); line-height: 22px;
+    }
+    .code-text { display: block; white-space: pre; padding: 0 16px; line-height: 22px; }
+    ul { padding-left: 18px; margin: 0; }
+    .footer { margin-top: 28px; text-align: center; color: var(--muted); font-size: 13px; }
+    @media (max-width: 1080px) {
+      .hero-grid, .grid4, .grid3, .grid2, .flow, .landmark-grid, .contract-grid { grid-template-columns: 1fr 1fr; }
+      .pipeline-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .pipeline-node::after { display: none; }
+    }
+    @media (max-width: 760px) {
+      .wrap, .topbar-inner { width: min(100vw - 24px, 1320px); }
+      .hero-grid, .grid4, .grid3, .grid2, .flow, .landmark-grid, .hero-meta, .contract-grid, .contract-meta, .pipeline-strip { grid-template-columns: 1fr; }
+      .section { padding: 22px; }
+      .code-line { grid-template-columns: 58px 1fr; }
+      .handoff { grid-template-columns: 1fr; }
+      .handoff-cell { border-right: 0; }
+      .nav { display: none; }
+    }
+    </style></head><body>
+    <div class="topbar">
+      <div class="topbar-inner">
+        <div class="brand"><div class="mark"></div><div>Radar Project Improvement REQ</div></div>
+        <nav class="nav">
+          <a href="../project_analysis/index.html">메인 분석</a>
+          <a href="../project_analysis/code/index.html">코드 카탈로그</a>
+          <a href="#status">현재 상태</a>
+        </nav>
+      </div>
+    </div>
+    <div class="wrap">
+      <section class="hero">
+        <div class="hero-grid">
+          <div>
+            <span class="eyebrow">REQ / Improvement Spec</span>
+            <h1>실무형 리팩터링 요구사항</h1>
+            <p>이 문서는 지금 구조에서 무엇이 부족하고 무엇을 어떤 순서로 고쳐야 하는지 구현 관점에서 정리한 명세서다. 최근에는 로그 분리와 세션 리포트 생성이 반영되었고, 그 다음 단계도 함께 업데이트했다.</p>
+          </div>
+          <div class="hero-meta">
+            <div class="meta"><span>Overall</span><strong>74/100</strong></div>
+            <div class="meta"><span>Logging</span><strong>87/100</strong></div>
+            <div class="meta"><span>Active REQ</span><strong>5</strong></div>
+            <div class="meta"><span>Implemented</span><strong>Phase 1-2</strong></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="status">
+        <h2>현재 반영된 항목</h2>
+        <p class="intro">최근 업데이트로 관측성과 비교 자동화 기반은 실제 코드에 반영되었다.</p>
+        <div class="grid3">
+          <article class="card"><h3>완료 1</h3><p>processed_frames.jsonl, render_frames.jsonl, event_log.jsonl, session_meta.json 구조가 추가되었다.</p></article>
+          <article class="card"><h3>완료 2</h3><p>session_report.py가 세션 폴더에서 summary.json을 생성한다.</p></article>
+          <article class="card"><h3>완료 3</h3><p>session_compare.py가 before와 after 실험의 개선과 회귀를 정리한다.</p></article>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>남은 핵심 요구사항</h2>
+        <p class="intro">이제부터는 구조 분리, 재현 실험, 알고리즘 개선을 단계적으로 진행하는 것이 맞다.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>REQ</th><th>상태</th><th>목표</th><th>구현 포인트</th></tr></thead>
+            <tbody>
+              <tr><td>MotionViewer 책임 분리</td><td>Pending</td><td>UI, 앱 제어, 세션 로그 책임을 나눈다.</td><td>AppController / ViewRenderer / SessionLogger 분리</td></tr>
+              <tr><td>print 기반 로그 정리</td><td>Pending</td><td>장비 제어와 예외 로그도 구조화한다.</td><td>logging 모듈 또는 JSON logger 도입</td></tr>
+              <tr><td>Replay 입력 경로</td><td>Pending</td><td>같은 raw 입력으로 전후 비교 가능하게 만든다.</td><td>read_binfile.py 기반 session_replay 경로 추가</td></tr>
+              <tr><td>Regression Threshold</td><td>Pending</td><td>요약 비교 결과를 pass와 fail로 판정한다.</td><td>session_compare.py에 임계값 규칙 추가</td></tr>
+              <tr><td>Hybrid Capon PoC</td><td>Pending</td><td>각도 해상도를 개선하되 실시간성은 유지한다.</td><td>detection 후보 상위 N개에 angle refinement 적용</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>우선순위 상세</h2>
+        <p class="intro">현업 기준으로는 아래 순서가 가장 안전하다.</p>
+        <div class="grid2">
+          <article class="card"><h3>1. 구조 안정화</h3><p>현재는 live_motion_viewer.py에 앱 제어와 렌더와 로그 준비가 한곳에 몰려 있다. 먼저 SessionLogger와 AppController를 분리해 책임 경계를 만든다.</p></article>
+          <article class="card"><h3>2. 재현 실험 가능화</h3><p>실제 전후 비교는 동일 입력이 있어야 의미가 있다. read_binfile.py를 기반으로 replay 경로를 만들고 session_meta에 source_capture를 강제 기록한다.</p></article>
+          <article class="card"><h3>3. 비교 자동화 강화</h3><p>session_compare.py는 이미 delta를 내지만 아직 fail와 pass 정책은 없다. invalid_rate, latency p95, multi-target success 기준을 추가한다.</p></article>
+          <article class="card"><h3>4. 알고리즘 실험</h3><p>그 다음에야 Capon hybrid나 tracking 파라미터 튜닝을 실험하는 것이 맞다. 지금은 측정 기반이 생겼기 때문에 개선 여부를 더 신뢰할 수 있다.</p></article>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Definition of Done</h2>
+        <p class="intro">아래 기준이 충족되면 이 프로젝트는 PoC를 넘어 반복 실험 가능한 개발 상태에 들어간다.</p>
+        <div class="card">
+          <ul>
+            <li>live path와 replay path 모두 같은 summary schema를 만든다.</li>
+            <li>before와 after 비교가 scenario_id와 source_capture 기준으로 자동 묶인다.</li>
+            <li>구조상 UI, 처리, 로깅 책임이 분리되어 한 파일 집중도가 낮아진다.</li>
+            <li>tracking과 latency 지표에 최소 회귀 기준이 걸린다.</li>
+            <li>README와 docs만 읽어도 신규 인원이 실행 경로와 비교 경로를 이해할 수 있다.</li>
+          </ul>
+        </div>
+      </section>
+    </div>
+    </body></html>

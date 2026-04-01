@@ -1,0 +1,12 @@
+{
+  "config_path": "config/profile_3d.cfg",
+  "tuning_path": "config/live_motion_tuning.json",
+  "cli_port": "COM11",
+  "logging": {
+    "variant": "baseline",
+    "scenario_id": "",
+    "input_mode": "live",
+    "source_capture": "",
+    "notes": ""
+  }
+}

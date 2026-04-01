@@ -1,0 +1,449 @@
+<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>app_layout.py - Radar Project Code Explorer</title><style>
+    :root {
+      --bg: #f2f6f8;
+      --panel: rgba(255,255,255,.95);
+      --ink: #14222d;
+      --muted: #536d7b;
+      --line: #d8e2e8;
+      --brand: #0d6e6e;
+      --brand2: #153f68;
+      --accent: #ff7d32;
+      --shadow: 0 18px 50px rgba(18,39,56,.12);
+      --mono: "JetBrains Mono", Consolas, monospace;
+      --sans: "Pretendard Variable", "IBM Plex Sans KR", "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(13,110,110,.18), transparent 32%),
+        radial-gradient(circle at top right, rgba(21,63,104,.14), transparent 28%),
+        linear-gradient(180deg, #edf4f6 0%, #f8fbfc 28%, #eef3f5 100%);
+    }
+    a { color: inherit; }
+    .wrap { width: min(1320px, calc(100vw - 40px)); margin: 0 auto 60px; }
+    .topbar {
+      position: sticky; top: 0; z-index: 30; backdrop-filter: blur(18px);
+      background: rgba(242,246,248,.84); border-bottom: 1px solid rgba(20,34,45,.08);
+    }
+    .topbar-inner {
+      width: min(1320px, calc(100vw - 40px)); margin: 0 auto; padding: 16px 0;
+      display: flex; justify-content: space-between; align-items: center; gap: 16px;
+    }
+    .brand { display: flex; align-items: center; gap: 14px; font-weight: 700; }
+    .mark {
+      width: 44px; height: 44px; border-radius: 14px;
+      background: linear-gradient(135deg, var(--brand), #19a0a0 60%, var(--brand2));
+      box-shadow: var(--shadow); position: relative;
+    }
+    .mark::before, .mark::after {
+      content: ""; position: absolute; border: 2px solid rgba(255,255,255,.9); border-radius: 999px;
+    }
+    .mark::before { inset: 10px; }
+    .mark::after { inset: 18px; }
+    .nav { display: flex; gap: 10px; flex-wrap: wrap; }
+    .nav a {
+      text-decoration: none; color: var(--muted); font-size: 14px;
+      padding: 10px 14px; border-radius: 999px; background: rgba(255,255,255,.78);
+      border: 1px solid rgba(20,34,45,.06);
+    }
+    .hero {
+      margin-top: 28px; padding: 32px; border-radius: 32px; color: #f7fbfd;
+      background: linear-gradient(135deg, rgba(13,110,110,.94), rgba(21,63,104,.93));
+      box-shadow: var(--shadow); overflow: hidden; position: relative;
+    }
+    .hero::before {
+      content: ""; position: absolute; right: -80px; top: -60px; width: 240px; height: 240px;
+      border-radius: 50%; background: radial-gradient(circle, rgba(255,255,255,.18), transparent 68%);
+    }
+    .hero-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 24px; position: relative; z-index: 1; }
+    .eyebrow {
+      display: inline-block; margin-bottom: 18px; padding: 8px 12px; border-radius: 999px;
+      background: rgba(255,255,255,.12); font-size: 13px;
+    }
+    h1 { margin: 0 0 16px; font-size: clamp(32px, 4vw, 54px); line-height: 1.04; letter-spacing: -.04em; }
+    .hero p { margin: 0; line-height: 1.72; font-size: 16px; color: rgba(247,251,253,.92); }
+    .hero-meta { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+    .meta { padding: 18px; border-radius: 20px; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.12); }
+    .meta span { font-size: 13px; color: rgba(247,251,253,.76); }
+    .meta strong { display: block; margin-top: 10px; font-size: 28px; letter-spacing: -.04em; }
+    .section {
+      margin-top: 26px; padding: 28px; border-radius: 28px; background: var(--panel);
+      border: 1px solid rgba(20,34,45,.06); box-shadow: var(--shadow);
+    }
+    .section h2 { margin: 0 0 10px; font-size: 30px; letter-spacing: -.03em; }
+    .intro { margin: 0 0 24px; color: var(--muted); line-height: 1.72; font-size: 15px; }
+    .grid2, .grid3, .grid4 { display: grid; gap: 18px; }
+    .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .card, .flow-step, .table-wrap, .landmark, .metric, .note { background: #fff; border: 1px solid var(--line); border-radius: 20px; }
+    .card, .metric, .note, .flow-step { padding: 20px; }
+    .card h3, .metric h3, .note h3 { margin: 0 0 10px; font-size: 19px; letter-spacing: -.02em; }
+    .card p, .metric p, .note p, li, td, th { color: var(--muted); line-height: 1.72; font-size: 14px; }
+    .signal {
+      display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .08em; color: var(--brand); margin-bottom: 10px;
+    }
+    .signal::before {
+      content: ""; width: 10px; height: 10px; border-radius: 50%; background: currentColor;
+      box-shadow: 0 0 0 6px rgba(13,110,110,.12);
+    }
+    .pill-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .pill {
+      display: inline-flex; align-items: center; border-radius: 999px; padding: 8px 12px;
+      background: rgba(13,110,110,.08); color: var(--brand); font-size: 12px; font-weight: 700;
+      letter-spacing: .04em; text-transform: uppercase;
+    }
+    .flow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: stretch; }
+    .flow-step strong { display: block; margin-bottom: 10px; font-size: 18px; }
+    .flow-step span { display: inline-block; font-size: 12px; color: var(--brand); margin-bottom: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+    .landmark-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+    .landmark { padding: 18px; text-decoration: none; display: block; }
+    .landmark strong { display: block; font-size: 18px; margin-bottom: 8px; }
+    .landmark span { display: inline-block; font-size: 12px; color: var(--brand); font-weight: 700; margin-bottom: 10px; }
+    .landmark p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.65; }
+    .table-wrap { overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 14px 16px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { background: #f7fafb; color: var(--ink); font-size: 13px; text-transform: uppercase; letter-spacing: .06em; }
+    .link-card { text-decoration: none; color: inherit; display: block; }
+    .mini-card { height: 100%; }
+    .contract-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+    .contract-card { background: #fff; border: 1px solid var(--line); border-radius: 22px; padding: 20px; }
+    .contract-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+    .contract-top h3 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
+    .contract-tag {
+      display: inline-flex; align-items: center; border-radius: 999px; padding: 8px 12px;
+      background: rgba(21,63,104,.08); color: var(--brand2); font-size: 12px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .05em;
+    }
+    .contract-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
+    .contract-meta div { background: #f7fafb; border: 1px solid var(--line); border-radius: 14px; padding: 12px; }
+    .contract-meta span { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--brand); margin-bottom: 6px; font-weight: 700; }
+    .contract-meta strong { display: block; font-size: 13px; line-height: 1.5; color: var(--ink); }
+    .field-list { margin-top: 14px; padding-left: 18px; }
+    .field-list li { margin-bottom: 6px; }
+    details.accordion {
+      background: #fff; border: 1px solid var(--line); border-radius: 20px; overflow: hidden;
+    }
+    details.accordion + details.accordion { margin-top: 14px; }
+    details.accordion summary {
+      list-style: none; cursor: pointer; padding: 18px 20px;
+      display: flex; justify-content: space-between; align-items: center; gap: 16px;
+      font-weight: 700; color: var(--ink);
+    }
+    details.accordion summary::-webkit-details-marker { display: none; }
+    .summary-copy { display: flex; flex-direction: column; gap: 6px; }
+    .summary-copy small { color: var(--muted); font-weight: 500; font-size: 13px; }
+    .summary-tag {
+      display: inline-flex; align-items: center; border-radius: 999px; padding: 8px 12px;
+      background: rgba(13,110,110,.08); color: var(--brand); font-size: 12px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .05em;
+    }
+    .accordion-body { padding: 0 20px 20px; }
+    .handoff {
+      display: grid; grid-template-columns: 160px 1.4fr 1fr 1fr;
+      gap: 0; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; margin-top: 14px;
+    }
+    .handoff-cell {
+      padding: 14px 16px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
+      color: var(--muted); font-size: 14px; line-height: 1.68; background: #fff;
+    }
+    .handoff-cell:nth-child(4n) { border-right: 0; }
+    .handoff.head .handoff-cell {
+      background: #f7fafb; color: var(--ink); font-size: 12px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .06em;
+    }
+    .handoff .fn { font-family: var(--mono); color: var(--brand2); font-size: 13px; }
+    .pipeline-strip {
+      display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 12px; align-items: stretch;
+    }
+    .pipeline-node {
+      position: relative; background: #fff; border: 1px solid var(--line); border-radius: 22px; padding: 18px;
+      min-height: 200px;
+    }
+    .pipeline-node:not(:last-child)::after {
+      content: "→"; position: absolute; right: -18px; top: calc(50% - 14px); z-index: 2;
+      width: 28px; height: 28px; border-radius: 999px; background: var(--brand); color: #fff;
+      display: flex; align-items: center; justify-content: center; font-weight: 700;
+      box-shadow: 0 8px 20px rgba(13,110,110,.18);
+    }
+    .pipeline-node .stage { display: inline-flex; margin-bottom: 10px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--brand); font-weight: 800; }
+    .pipeline-node h3 { margin: 0 0 10px; font-size: 18px; letter-spacing: -.02em; }
+    .pipeline-node p { margin: 0 0 10px; color: var(--muted); line-height: 1.65; font-size: 14px; }
+    .pipeline-node .mono { font-family: var(--mono); color: var(--brand2); font-size: 12px; }
+    .code-shell { background: #0f1720; color: #ecf6fb; border-radius: 24px; overflow: hidden; border: 1px solid rgba(255,255,255,.06); }
+    .code-head {
+      display: flex; justify-content: space-between; align-items: center; gap: 16px;
+      padding: 16px 20px; background: rgba(255,255,255,.04); border-bottom: 1px solid rgba(255,255,255,.06);
+      font-family: var(--mono); font-size: 13px;
+    }
+    .code-body { max-height: 880px; overflow: auto; font-family: var(--mono); font-size: 13px; }
+    .code-line { display: grid; grid-template-columns: 72px 1fr; border-bottom: 1px solid rgba(255,255,255,.03); }
+    .ln {
+      display: block; text-decoration: none; color: #86b5d3; text-align: right; padding: 0 14px;
+      background: rgba(255,255,255,.02); border-right: 1px solid rgba(255,255,255,.05); line-height: 22px;
+    }
+    .code-text { display: block; white-space: pre; padding: 0 16px; line-height: 22px; }
+    ul { padding-left: 18px; margin: 0; }
+    .footer { margin-top: 28px; text-align: center; color: var(--muted); font-size: 13px; }
+    @media (max-width: 1080px) {
+      .hero-grid, .grid4, .grid3, .grid2, .flow, .landmark-grid, .contract-grid { grid-template-columns: 1fr 1fr; }
+      .pipeline-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .pipeline-node::after { display: none; }
+    }
+    @media (max-width: 760px) {
+      .wrap, .topbar-inner { width: min(100vw - 24px, 1320px); }
+      .hero-grid, .grid4, .grid3, .grid2, .flow, .landmark-grid, .hero-meta, .contract-grid, .contract-meta, .pipeline-strip { grid-template-columns: 1fr; }
+      .section { padding: 22px; }
+      .code-line { grid-template-columns: 58px 1fr; }
+      .handoff { grid-template-columns: 1fr; }
+      .handoff-cell { border-right: 0; }
+      .nav { display: none; }
+    }
+    </style></head><body>
+    <div class="topbar">
+      <div class="topbar-inner">
+        <div class="brand"><div class="mark"></div><div>Radar Project Code Explorer</div></div>
+        <nav class="nav">
+          <a href="../index.html">메인 분석</a>
+          <a href="index.html">코드 카탈로그</a>
+          <a href="../../REQ/index.html">REQ</a>
+          <a href="#code">전체 코드</a>
+        </nav>
+      </div>
+    </div>
+    <div class="wrap">
+      <section class="hero">
+        <div class="hero-grid">
+          <div>
+            <span class="eyebrow">UI Layout</span>
+            <h1>app_layout.py</h1>
+            <p>Qt Designer에서 생성된 UI 뼈대를 코드로 저장한 파일이다. 직접 로직은 많지 않지만 창 구조를 이해할 때 중요한 지도 역할을 한다. 어느 패널이 어디 있는지 여기서 보인다.</p>
+            <div class="pill-row"><span class="pill">UI</span></div>
+          </div>
+          <div class="hero-meta">
+            <div class="meta"><span>Source Path</span><strong>tools/runtime_core/app_layout.py</strong></div>
+            <div class="meta"><span>Line Count</span><strong>84</strong></div>
+            <div class="meta"><span>Before</span><strong>Qt Designer UI 설계</strong></div>
+            <div class="meta"><span>After</span><strong>live_motion_viewer.py</strong></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>이 파일이 맡는 역할</h2>
+        <p class="intro">위젯 배치와 이름이 이 파일에서 결정되므로 live_motion_viewer가 어떤 컴포넌트를 붙잡는지 이해하는 데 필요하다.</p>
+        <div class="flow">
+          <article class="flow-step"><span>Input Side</span><strong>Qt Designer UI 설계</strong><p>QMainWindow 인스턴스</p></article>
+          <article class="flow-step"><span>This File</span><strong>app_layout.py</strong><p>직접 로직은 많지 않지만 창 구조를 이해할 때 중요한 지도 역할을 한다. 어느 패널이 어디 있는지 여기서 보인다.</p></article>
+          <article class="flow-step"><span>Output Side</span><strong>live_motion_viewer.py</strong><p>위젯 트리와 이름</p></article>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>핵심 책임</h2>
+        <p class="intro">처음 보는 사람이 이 파일을 읽을 때 놓치면 안 되는 책임을 세 갈래로 나눴다.</p>
+        <div class="grid3"><article class="card"><h3>UI 골격</h3><p>메인 창과 패널 배치를 정의한다.</p></article>
+<article class="card"><h3>식별자 제공</h3><p>상위 코드가 참조할 object name을 제공한다.</p></article>
+<article class="card"><h3>디자인 분리</h3><p>레이아웃과 동작 로직을 나누는 출발점 역할을 한다.</p></article></div>
+      </section>
+
+      <section class="section">
+        <h2>쉽게 이해하는 모델</h2>
+        <p class="intro">처음 보는 사람이 이 파일을 딱 한 문장으로 붙잡아야 할 때의 설명이다.</p>
+        <div class="card"><p>이 파일은 빈 화면 골격이다. 로직은 거의 없고, 상위 컨트롤러가 붙잡아 쓸 위젯 구조를 만들어 준다.</p></div>
+      </section>
+
+      <section class="section">
+        <h2>입력에서 출력까지 단계별 설명</h2>
+        <p class="intro">초보자가 보기엔 코드 양이 적어 중요하지 않아 보일 수 있지만, 어떤 widget 이름을 상위 코드가 참조하는지 여기서 결정된다.</p>
+        <div class="contract-grid">
+            <article class="contract-card">
+              <div class="contract-top">
+                <div><h3>1. 메인 창과 패널을 만든다</h3></div>
+                <span class="contract-tag">Step</span>
+              </div>
+              <p>setupUi는 QMainWindow 안에 central widget, plot 영역, 버튼, 라벨을 배치한다.</p>
+              <div class="contract-meta">
+                <div><span>왜 필요한가</span><strong>실시간 앱은 먼저 표시 영역과 제어 버튼 골격이 있어야 한다.</strong></div>
+                <div><span>다음으로 넘기는 것</span><strong>위젯 트리</strong></div>
+              </div>
+            </article>
+            
+
+            <article class="contract-card">
+              <div class="contract-top">
+                <div><h3>2. objectName을 고정한다</h3></div>
+                <span class="contract-tag">Step</span>
+              </div>
+              <p>각 위젯의 이름이 지정되어 상위 코드가 해당 객체를 찾아 쓸 수 있게 된다.</p>
+              <div class="contract-meta">
+                <div><span>왜 필요한가</span><strong>UI 파일과 로직 파일이 분리되어 있을 때 objectName이 사실상 계약 역할을 한다.</strong></div>
+                <div><span>다음으로 넘기는 것</span><strong>live_motion_viewer가 참조할 UI 식별자</strong></div>
+              </div>
+            </article>
+            
+
+            <article class="contract-card">
+              <div class="contract-top">
+                <div><h3>3. 표시 텍스트를 채운다</h3></div>
+                <span class="contract-tag">Step</span>
+              </div>
+              <p>retranslateUi가 버튼과 레이블 텍스트를 최종 세팅한다.</p>
+              <div class="contract-meta">
+                <div><span>왜 필요한가</span><strong>다국어 대응이나 텍스트 변경도 구조와 분리해 두기 위해서다.</strong></div>
+                <div><span>다음으로 넘기는 것</span><strong>사용자에게 보이는 기본 UI 텍스트</strong></div>
+              </div>
+            </article>
+            </div>
+      </section>
+
+      <section class="section">
+        <h2>놓치기 쉬운 부분</h2>
+        <p class="intro">코드를 읽을 때 자주 헷갈리거나, 설명 없이 넘어가면 오해하기 쉬운 부분을 따로 정리했다.</p>
+        <div class="card"><ul><li>로직이 적다고 중요하지 않은 파일은 아니다. objectName이 바뀌면 상위 컨트롤러가 바로 깨질 수 있다.</li><li>Qt Designer generated file 성격이라 직접 수정한 내용은 재생성 때 덮일 수 있다.</li><li>이 파일은 데이터 처리 코드가 아니라 UI 계약 파일로 읽는 편이 좋다.</li><li>화면 문제를 디버깅할 때는 이 파일과 live_motion_viewer.py를 같이 봐야 한다.</li></ul></div>
+      </section>
+
+      <section class="section">
+        <h2>핵심 라인 바로가기</h2>
+        <p class="intro">실제 코드 기준으로 중요한 클래스와 함수를 직접 눌러 내려갈 수 있다.</p>
+        <div class="landmark-grid"><a class="landmark" href="#L14"><strong>Ui_MainWindow</strong><span>Line 14</span><p>디자이너 생성 UI 클래스다.</p></a>
+<a class="landmark" href="#L15"><strong>setupUi</strong><span>Line 15</span><p>실제 위젯을 생성하고 배치한다.</p></a>
+<a class="landmark" href="#L76"><strong>retranslateUi</strong><span>Line 76</span><p>UI 텍스트를 세팅한다.</p></a></div>
+      </section>
+
+      <section class="section">
+        <h2>해석 가이드</h2>
+        <p class="intro">입력, 출력, 디버깅 포인트를 같이 보면 이 파일 역할이 훨씬 빨리 정리된다.</p>
+        <div class="grid4">
+          <article class="note"><h3>입력</h3><p>QMainWindow 인스턴스</p></article>
+          <article class="note"><h3>출력</h3><p>위젯 트리와 이름</p></article>
+          <article class="note"><h3>디버깅 포인트</h3><p>위젯 objectName이 바뀌면 상위 코드가 깨질 수 있다.</p></article>
+          <article class="note"><h3>현업 메모</h3><p>UI 구조는 안정적으로 두고 상위 컨트롤러에서만 로직을 바꾸는 편이 좋다.</p></article>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>읽는 순서</h2>
+        <p class="intro">시간을 아끼려면 아래 순서대로 보면 된다.</p>
+        <div class="card"><ul><li>Ui_MainWindow를 보고 위젯 계층을 훑는다.</li><li>setupUi에서 패널과 레이블이 무엇인지 확인한다.</li><li>그 후 live_motion_viewer에서 어떤 위젯을 실제로 쓰는지 이어서 본다.</li></ul></div>
+      </section>
+
+      <section class="section">
+        <h2>중요 심볼 표</h2>
+        <p class="intro">코드 리뷰나 발표 자료용으로 바로 참고할 수 있는 함수와 클래스 요약이다.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>심볼</th><th>라인</th><th>설명</th></tr></thead>
+            <tbody><tr><td>Ui_MainWindow</td><td><a href="#L14">L14</a></td><td>디자이너 생성 UI 클래스다.</td></tr>
+<tr><td>setupUi</td><td><a href="#L15">L15</a></td><td>실제 위젯을 생성하고 배치한다.</td></tr>
+<tr><td>retranslateUi</td><td><a href="#L76">L76</a></td><td>UI 텍스트를 세팅한다.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>연관 파일</h2>
+        <p class="intro">이 파일 다음에 이어서 보면 좋은 코드들이다.</p>
+        <div class="grid4"><a class="link-card" href="live_motion_viewer.html"><article class="card mini-card"><div class="signal">Related</div><h3>live_motion_viewer.py</h3><p>실시간 데모를 구동하는 메인 앱이다. static/runtime/tuning 설정을 읽고, 장비 제어, 워커 시작, UI 렌더링, 세션 로그를 묶는다.</p></article></a></div>
+      </section>
+
+      <section class="section" id="code">
+        <h2>전체 코드</h2>
+        <p class="intro">UI는 유지한 채로 실제 코드 전문을 그대로 볼 수 있게 구성했다. 라인 번호를 누르면 해당 줄 링크를 쉽게 잡을 수 있다.</p>
+        <div class="code-shell">
+          <div class="code-head"><span>tools/runtime_core/app_layout.py</span><span>84 lines</span></div>
+          <div class="code-body"><div class="code-line" id="L1"><a class="ln" href="#L1">1</a><span class="code-text"># -*- coding: utf-8 -*-</span></div>
+<div class="code-line" id="L2"><a class="ln" href="#L2">2</a><span class="code-text"></span></div>
+<div class="code-line" id="L3"><a class="ln" href="#L3">3</a><span class="code-text"># Form implementation generated from reading ui file &#x27;D:\QT_design\QT_design.ui&#x27;</span></div>
+<div class="code-line" id="L4"><a class="ln" href="#L4">4</a><span class="code-text">#</span></div>
+<div class="code-line" id="L5"><a class="ln" href="#L5">5</a><span class="code-text"># Created by: PyQt5 UI code generator 5.15.1</span></div>
+<div class="code-line" id="L6"><a class="ln" href="#L6">6</a><span class="code-text">#</span></div>
+<div class="code-line" id="L7"><a class="ln" href="#L7">7</a><span class="code-text"># WARNING: Any manual changes made to this file will be lost when pyuic5 is</span></div>
+<div class="code-line" id="L8"><a class="ln" href="#L8">8</a><span class="code-text"># run again.  Do not edit this file unless you know what you are doing.</span></div>
+<div class="code-line" id="L9"><a class="ln" href="#L9">9</a><span class="code-text"></span></div>
+<div class="code-line" id="L10"><a class="ln" href="#L10">10</a><span class="code-text"></span></div>
+<div class="code-line" id="L11"><a class="ln" href="#L11">11</a><span class="code-text">from pyqtgraph.Qt import QtCore, QtGui, QtWidgets</span></div>
+<div class="code-line" id="L12"><a class="ln" href="#L12">12</a><span class="code-text">from pyqtgraph import GraphicsLayoutWidget</span></div>
+<div class="code-line" id="L13"><a class="ln" href="#L13">13</a><span class="code-text"></span></div>
+<div class="code-line" id="L14"><a class="ln" href="#L14">14</a><span class="code-text">class Ui_MainWindow(object):</span></div>
+<div class="code-line" id="L15"><a class="ln" href="#L15">15</a><span class="code-text"></span></div>
+<div class="code-line" id="L16"><a class="ln" href="#L16">16</a><span class="code-text">    def setupUi(self, MainWindow):</span></div>
+<div class="code-line" id="L17"><a class="ln" href="#L17">17</a><span class="code-text">        MainWindow.setObjectName(&quot;MainWindow&quot;)</span></div>
+<div class="code-line" id="L18"><a class="ln" href="#L18">18</a><span class="code-text">        MainWindow.resize(802, 468)</span></div>
+<div class="code-line" id="L19"><a class="ln" href="#L19">19</a><span class="code-text">        font = QtGui.QFont()</span></div>
+<div class="code-line" id="L20"><a class="ln" href="#L20">20</a><span class="code-text">        font.setFamily(&quot;MS Gothic&quot;)</span></div>
+<div class="code-line" id="L21"><a class="ln" href="#L21">21</a><span class="code-text">        font.setPointSize(10)</span></div>
+<div class="code-line" id="L22"><a class="ln" href="#L22">22</a><span class="code-text">        MainWindow.setFont(font)</span></div>
+<div class="code-line" id="L23"><a class="ln" href="#L23">23</a><span class="code-text">        MainWindow.setContextMenuPolicy(QtCore.Qt.NoContextMenu)</span></div>
+<div class="code-line" id="L24"><a class="ln" href="#L24">24</a><span class="code-text">        self.centralwidget = QtWidgets.QWidget(MainWindow)</span></div>
+<div class="code-line" id="L25"><a class="ln" href="#L25">25</a><span class="code-text">        self.centralwidget.setObjectName(&quot;centralwidget&quot;)</span></div>
+<div class="code-line" id="L26"><a class="ln" href="#L26">26</a><span class="code-text">        self.graphicsView = GraphicsLayoutWidget(self.centralwidget)</span></div>
+<div class="code-line" id="L27"><a class="ln" href="#L27">27</a><span class="code-text">        self.graphicsView.setGeometry(QtCore.QRect(30, 60, 361, 331))</span></div>
+<div class="code-line" id="L28"><a class="ln" href="#L28">28</a><span class="code-text">        self.graphicsView.setObjectName(&quot;graphicsView&quot;)</span></div>
+<div class="code-line" id="L29"><a class="ln" href="#L29">29</a><span class="code-text">        self.graphicsView_2 = GraphicsLayoutWidget(self.centralwidget)</span></div>
+<div class="code-line" id="L30"><a class="ln" href="#L30">30</a><span class="code-text">        self.graphicsView_2.setGeometry(QtCore.QRect(410, 60, 361, 331))</span></div>
+<div class="code-line" id="L31"><a class="ln" href="#L31">31</a><span class="code-text">        self.graphicsView_2.setObjectName(&quot;graphicsView_2&quot;)</span></div>
+<div class="code-line" id="L32"><a class="ln" href="#L32">32</a><span class="code-text">        self.label = QtWidgets.QLabel(self.centralwidget)</span></div>
+<div class="code-line" id="L33"><a class="ln" href="#L33">33</a><span class="code-text">        self.label.setGeometry(QtCore.QRect(110, 20, 211, 41))</span></div>
+<div class="code-line" id="L34"><a class="ln" href="#L34">34</a><span class="code-text">        font = QtGui.QFont()</span></div>
+<div class="code-line" id="L35"><a class="ln" href="#L35">35</a><span class="code-text">        font.setFamily(&quot;微軟正黑體 Light&quot;)</span></div>
+<div class="code-line" id="L36"><a class="ln" href="#L36">36</a><span class="code-text">        font.setPointSize(14)</span></div>
+<div class="code-line" id="L37"><a class="ln" href="#L37">37</a><span class="code-text">        font.setBold(True)</span></div>
+<div class="code-line" id="L38"><a class="ln" href="#L38">38</a><span class="code-text">        font.setWeight(75)</span></div>
+<div class="code-line" id="L39"><a class="ln" href="#L39">39</a><span class="code-text">        self.label.setFont(font)</span></div>
+<div class="code-line" id="L40"><a class="ln" href="#L40">40</a><span class="code-text">        self.label.setObjectName(&quot;label&quot;)</span></div>
+<div class="code-line" id="L41"><a class="ln" href="#L41">41</a><span class="code-text">        self.label_2 = QtWidgets.QLabel(self.centralwidget)</span></div>
+<div class="code-line" id="L42"><a class="ln" href="#L42">42</a><span class="code-text">        self.label_2.setGeometry(QtCore.QRect(500, 20, 211, 41))</span></div>
+<div class="code-line" id="L43"><a class="ln" href="#L43">43</a><span class="code-text">        font = QtGui.QFont()</span></div>
+<div class="code-line" id="L44"><a class="ln" href="#L44">44</a><span class="code-text">        font.setFamily(&quot;微軟正黑體 Light&quot;)</span></div>
+<div class="code-line" id="L45"><a class="ln" href="#L45">45</a><span class="code-text">        font.setPointSize(14)</span></div>
+<div class="code-line" id="L46"><a class="ln" href="#L46">46</a><span class="code-text">        font.setBold(True)</span></div>
+<div class="code-line" id="L47"><a class="ln" href="#L47">47</a><span class="code-text">        font.setWeight(75)</span></div>
+<div class="code-line" id="L48"><a class="ln" href="#L48">48</a><span class="code-text">        self.label_2.setFont(font)</span></div>
+<div class="code-line" id="L49"><a class="ln" href="#L49">49</a><span class="code-text">        self.label_2.setObjectName(&quot;label_2&quot;)</span></div>
+<div class="code-line" id="L50"><a class="ln" href="#L50">50</a><span class="code-text">        self.pushButton_exit = QtWidgets.QPushButton(self.centralwidget)</span></div>
+<div class="code-line" id="L51"><a class="ln" href="#L51">51</a><span class="code-text">        self.pushButton_exit.setGeometry(QtCore.QRect(680, 410, 91, 31))</span></div>
+<div class="code-line" id="L52"><a class="ln" href="#L52">52</a><span class="code-text">        font = QtGui.QFont()</span></div>
+<div class="code-line" id="L53"><a class="ln" href="#L53">53</a><span class="code-text">        font.setFamily(&quot;微軟正黑體 Light&quot;)</span></div>
+<div class="code-line" id="L54"><a class="ln" href="#L54">54</a><span class="code-text">        font.setBold(True)</span></div>
+<div class="code-line" id="L55"><a class="ln" href="#L55">55</a><span class="code-text">        font.setItalic(False)</span></div>
+<div class="code-line" id="L56"><a class="ln" href="#L56">56</a><span class="code-text">        font.setWeight(75)</span></div>
+<div class="code-line" id="L57"><a class="ln" href="#L57">57</a><span class="code-text">        self.pushButton_exit.setFont(font)</span></div>
+<div class="code-line" id="L58"><a class="ln" href="#L58">58</a><span class="code-text">        self.pushButton_exit.setObjectName(&quot;pushButton_exit&quot;)</span></div>
+<div class="code-line" id="L59"><a class="ln" href="#L59">59</a><span class="code-text"></span></div>
+<div class="code-line" id="L60"><a class="ln" href="#L60">60</a><span class="code-text">        self.pushButton_start = QtWidgets.QPushButton(self.centralwidget)</span></div>
+<div class="code-line" id="L61"><a class="ln" href="#L61">61</a><span class="code-text">        self.pushButton_start.setGeometry(QtCore.QRect(30, 410, 151, 31))</span></div>
+<div class="code-line" id="L62"><a class="ln" href="#L62">62</a><span class="code-text">        font = QtGui.QFont()</span></div>
+<div class="code-line" id="L63"><a class="ln" href="#L63">63</a><span class="code-text">        font.setFamily(&quot;微軟正黑體 Light&quot;)</span></div>
+<div class="code-line" id="L64"><a class="ln" href="#L64">64</a><span class="code-text">        font.setBold(True)</span></div>
+<div class="code-line" id="L65"><a class="ln" href="#L65">65</a><span class="code-text">        font.setItalic(False)</span></div>
+<div class="code-line" id="L66"><a class="ln" href="#L66">66</a><span class="code-text">        font.setWeight(75)</span></div>
+<div class="code-line" id="L67"><a class="ln" href="#L67">67</a><span class="code-text">        self.pushButton_start.setFont(font)</span></div>
+<div class="code-line" id="L68"><a class="ln" href="#L68">68</a><span class="code-text">        self.pushButton_start.setObjectName(&quot;pushButton_start&quot;)</span></div>
+<div class="code-line" id="L69"><a class="ln" href="#L69">69</a><span class="code-text">        MainWindow.setCentralWidget(self.centralwidget)</span></div>
+<div class="code-line" id="L70"><a class="ln" href="#L70">70</a><span class="code-text">        self.statusbar = QtWidgets.QStatusBar(MainWindow)</span></div>
+<div class="code-line" id="L71"><a class="ln" href="#L71">71</a><span class="code-text">        self.statusbar.setObjectName(&quot;statusbar&quot;)</span></div>
+<div class="code-line" id="L72"><a class="ln" href="#L72">72</a><span class="code-text">        MainWindow.setStatusBar(self.statusbar)</span></div>
+<div class="code-line" id="L73"><a class="ln" href="#L73">73</a><span class="code-text"></span></div>
+<div class="code-line" id="L74"><a class="ln" href="#L74">74</a><span class="code-text">        self.retranslateUi(MainWindow)</span></div>
+<div class="code-line" id="L75"><a class="ln" href="#L75">75</a><span class="code-text">        QtCore.QMetaObject.connectSlotsByName(MainWindow)</span></div>
+<div class="code-line" id="L76"><a class="ln" href="#L76">76</a><span class="code-text"></span></div>
+<div class="code-line" id="L77"><a class="ln" href="#L77">77</a><span class="code-text">    def retranslateUi(self, MainWindow):</span></div>
+<div class="code-line" id="L78"><a class="ln" href="#L78">78</a><span class="code-text">        _translate = QtCore.QCoreApplication.translate</span></div>
+<div class="code-line" id="L79"><a class="ln" href="#L79">79</a><span class="code-text">        MainWindow.setWindowTitle(_translate(&quot;MainWindow&quot;, &quot;Real-Time Radar&quot;))</span></div>
+<div class="code-line" id="L80"><a class="ln" href="#L80">80</a><span class="code-text">        self.label.setText(_translate(&quot;MainWindow&quot;, &quot;Range-Doppler Image&quot;))</span></div>
+<div class="code-line" id="L81"><a class="ln" href="#L81">81</a><span class="code-text">        self.label_2.setText(_translate(&quot;MainWindow&quot;, &quot;Range-Angle Image&quot;))</span></div>
+<div class="code-line" id="L82"><a class="ln" href="#L82">82</a><span class="code-text">        self.pushButton_exit.setText(_translate(&quot;MainWindow&quot;, &quot;Exit&quot;))</span></div>
+<div class="code-line" id="L83"><a class="ln" href="#L83">83</a><span class="code-text">        self.pushButton_start.setText(_translate(&quot;MainWindow&quot;, &quot;Send Radar Config&quot;))</span></div></div>
+        </div>
+      </section>
+
+      <div class="footer">Generated from source. 문서와 코드가 어긋나면 이 생성 스크립트를 다시 실행하면 된다.</div>
+    </div>
+    </body></html>

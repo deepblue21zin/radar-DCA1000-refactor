@@ -1,0 +1,522 @@
+<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>session_compare.py - Radar Project Code Explorer</title><style>
+    :root {
+      --bg: #f2f6f8;
+      --panel: rgba(255,255,255,.95);
+      --ink: #14222d;
+      --muted: #536d7b;
+      --line: #d8e2e8;
+      --brand: #0d6e6e;
+      --brand2: #153f68;
+      --accent: #ff7d32;
+      --shadow: 0 18px 50px rgba(18,39,56,.12);
+      --mono: "JetBrains Mono", Consolas, monospace;
+      --sans: "Pretendard Variable", "IBM Plex Sans KR", "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(13,110,110,.18), transparent 32%),
+        radial-gradient(circle at top right, rgba(21,63,104,.14), transparent 28%),
+        linear-gradient(180deg, #edf4f6 0%, #f8fbfc 28%, #eef3f5 100%);
+    }
+    a { color: inherit; }
+    .wrap { width: min(1320px, calc(100vw - 40px)); margin: 0 auto 60px; }
+    .topbar {
+      position: sticky; top: 0; z-index: 30; backdrop-filter: blur(18px);
+      background: rgba(242,246,248,.84); border-bottom: 1px solid rgba(20,34,45,.08);
+    }
+    .topbar-inner {
+      width: min(1320px, calc(100vw - 40px)); margin: 0 auto; padding: 16px 0;
+      display: flex; justify-content: space-between; align-items: center; gap: 16px;
+    }
+    .brand { display: flex; align-items: center; gap: 14px; font-weight: 700; }
+    .mark {
+      width: 44px; height: 44px; border-radius: 14px;
+      background: linear-gradient(135deg, var(--brand), #19a0a0 60%, var(--brand2));
+      box-shadow: var(--shadow); position: relative;
+    }
+    .mark::before, .mark::after {
+      content: ""; position: absolute; border: 2px solid rgba(255,255,255,.9); border-radius: 999px;
+    }
+    .mark::before { inset: 10px; }
+    .mark::after { inset: 18px; }
+    .nav { display: flex; gap: 10px; flex-wrap: wrap; }
+    .nav a {
+      text-decoration: none; color: var(--muted); font-size: 14px;
+      padding: 10px 14px; border-radius: 999px; background: rgba(255,255,255,.78);
+      border: 1px solid rgba(20,34,45,.06);
+    }
+    .hero {
+      margin-top: 28px; padding: 32px; border-radius: 32px; color: #f7fbfd;
+      background: linear-gradient(135deg, rgba(13,110,110,.94), rgba(21,63,104,.93));
+      box-shadow: var(--shadow); overflow: hidden; position: relative;
+    }
+    .hero::before {
+      content: ""; position: absolute; right: -80px; top: -60px; width: 240px; height: 240px;
+      border-radius: 50%; background: radial-gradient(circle, rgba(255,255,255,.18), transparent 68%);
+    }
+    .hero-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 24px; position: relative; z-index: 1; }
+    .eyebrow {
+      display: inline-block; margin-bottom: 18px; padding: 8px 12px; border-radius: 999px;
+      background: rgba(255,255,255,.12); font-size: 13px;
+    }
+    h1 { margin: 0 0 16px; font-size: clamp(32px, 4vw, 54px); line-height: 1.04; letter-spacing: -.04em; }
+    .hero p { margin: 0; line-height: 1.72; font-size: 16px; color: rgba(247,251,253,.92); }
+    .hero-meta { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+    .meta { padding: 18px; border-radius: 20px; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.12); }
+    .meta span { font-size: 13px; color: rgba(247,251,253,.76); }
+    .meta strong { display: block; margin-top: 10px; font-size: 28px; letter-spacing: -.04em; }
+    .section {
+      margin-top: 26px; padding: 28px; border-radius: 28px; background: var(--panel);
+      border: 1px solid rgba(20,34,45,.06); box-shadow: var(--shadow);
+    }
+    .section h2 { margin: 0 0 10px; font-size: 30px; letter-spacing: -.03em; }
+    .intro { margin: 0 0 24px; color: var(--muted); line-height: 1.72; font-size: 15px; }
+    .grid2, .grid3, .grid4 { display: grid; gap: 18px; }
+    .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .card, .flow-step, .table-wrap, .landmark, .metric, .note { background: #fff; border: 1px solid var(--line); border-radius: 20px; }
+    .card, .metric, .note, .flow-step { padding: 20px; }
+    .card h3, .metric h3, .note h3 { margin: 0 0 10px; font-size: 19px; letter-spacing: -.02em; }
+    .card p, .metric p, .note p, li, td, th { color: var(--muted); line-height: 1.72; font-size: 14px; }
+    .signal {
+      display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .08em; color: var(--brand); margin-bottom: 10px;
+    }
+    .signal::before {
+      content: ""; width: 10px; height: 10px; border-radius: 50%; background: currentColor;
+      box-shadow: 0 0 0 6px rgba(13,110,110,.12);
+    }
+    .pill-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .pill {
+      display: inline-flex; align-items: center; border-radius: 999px; padding: 8px 12px;
+      background: rgba(13,110,110,.08); color: var(--brand); font-size: 12px; font-weight: 700;
+      letter-spacing: .04em; text-transform: uppercase;
+    }
+    .flow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: stretch; }
+    .flow-step strong { display: block; margin-bottom: 10px; font-size: 18px; }
+    .flow-step span { display: inline-block; font-size: 12px; color: var(--brand); margin-bottom: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+    .landmark-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+    .landmark { padding: 18px; text-decoration: none; display: block; }
+    .landmark strong { display: block; font-size: 18px; margin-bottom: 8px; }
+    .landmark span { display: inline-block; font-size: 12px; color: var(--brand); font-weight: 700; margin-bottom: 10px; }
+    .landmark p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.65; }
+    .table-wrap { overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 14px 16px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { background: #f7fafb; color: var(--ink); font-size: 13px; text-transform: uppercase; letter-spacing: .06em; }
+    .link-card { text-decoration: none; color: inherit; display: block; }
+    .mini-card { height: 100%; }
+    .contract-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+    .contract-card { background: #fff; border: 1px solid var(--line); border-radius: 22px; padding: 20px; }
+    .contract-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+    .contract-top h3 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
+    .contract-tag {
+      display: inline-flex; align-items: center; border-radius: 999px; padding: 8px 12px;
+      background: rgba(21,63,104,.08); color: var(--brand2); font-size: 12px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .05em;
+    }
+    .contract-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
+    .contract-meta div { background: #f7fafb; border: 1px solid var(--line); border-radius: 14px; padding: 12px; }
+    .contract-meta span { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--brand); margin-bottom: 6px; font-weight: 700; }
+    .contract-meta strong { display: block; font-size: 13px; line-height: 1.5; color: var(--ink); }
+    .field-list { margin-top: 14px; padding-left: 18px; }
+    .field-list li { margin-bottom: 6px; }
+    details.accordion {
+      background: #fff; border: 1px solid var(--line); border-radius: 20px; overflow: hidden;
+    }
+    details.accordion + details.accordion { margin-top: 14px; }
+    details.accordion summary {
+      list-style: none; cursor: pointer; padding: 18px 20px;
+      display: flex; justify-content: space-between; align-items: center; gap: 16px;
+      font-weight: 700; color: var(--ink);
+    }
+    details.accordion summary::-webkit-details-marker { display: none; }
+    .summary-copy { display: flex; flex-direction: column; gap: 6px; }
+    .summary-copy small { color: var(--muted); font-weight: 500; font-size: 13px; }
+    .summary-tag {
+      display: inline-flex; align-items: center; border-radius: 999px; padding: 8px 12px;
+      background: rgba(13,110,110,.08); color: var(--brand); font-size: 12px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .05em;
+    }
+    .accordion-body { padding: 0 20px 20px; }
+    .handoff {
+      display: grid; grid-template-columns: 160px 1.4fr 1fr 1fr;
+      gap: 0; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; margin-top: 14px;
+    }
+    .handoff-cell {
+      padding: 14px 16px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line);
+      color: var(--muted); font-size: 14px; line-height: 1.68; background: #fff;
+    }
+    .handoff-cell:nth-child(4n) { border-right: 0; }
+    .handoff.head .handoff-cell {
+      background: #f7fafb; color: var(--ink); font-size: 12px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .06em;
+    }
+    .handoff .fn { font-family: var(--mono); color: var(--brand2); font-size: 13px; }
+    .pipeline-strip {
+      display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 12px; align-items: stretch;
+    }
+    .pipeline-node {
+      position: relative; background: #fff; border: 1px solid var(--line); border-radius: 22px; padding: 18px;
+      min-height: 200px;
+    }
+    .pipeline-node:not(:last-child)::after {
+      content: "→"; position: absolute; right: -18px; top: calc(50% - 14px); z-index: 2;
+      width: 28px; height: 28px; border-radius: 999px; background: var(--brand); color: #fff;
+      display: flex; align-items: center; justify-content: center; font-weight: 700;
+      box-shadow: 0 8px 20px rgba(13,110,110,.18);
+    }
+    .pipeline-node .stage { display: inline-flex; margin-bottom: 10px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--brand); font-weight: 800; }
+    .pipeline-node h3 { margin: 0 0 10px; font-size: 18px; letter-spacing: -.02em; }
+    .pipeline-node p { margin: 0 0 10px; color: var(--muted); line-height: 1.65; font-size: 14px; }
+    .pipeline-node .mono { font-family: var(--mono); color: var(--brand2); font-size: 12px; }
+    .code-shell { background: #0f1720; color: #ecf6fb; border-radius: 24px; overflow: hidden; border: 1px solid rgba(255,255,255,.06); }
+    .code-head {
+      display: flex; justify-content: space-between; align-items: center; gap: 16px;
+      padding: 16px 20px; background: rgba(255,255,255,.04); border-bottom: 1px solid rgba(255,255,255,.06);
+      font-family: var(--mono); font-size: 13px;
+    }
+    .code-body { max-height: 880px; overflow: auto; font-family: var(--mono); font-size: 13px; }
+    .code-line { display: grid; grid-template-columns: 72px 1fr; border-bottom: 1px solid rgba(255,255,255,.03); }
+    .ln {
+      display: block; text-decoration: none; color: #86b5d3; text-align: right; padding: 0 14px;
+      background: rgba(255,255,255,.02); border-right: 1px solid rgba(255,255,255,.05); line-height: 22px;
+    }
+    .code-text { display: block; white-space: pre; padding: 0 16px; line-height: 22px; }
+    ul { padding-left: 18px; margin: 0; }
+    .footer { margin-top: 28px; text-align: center; color: var(--muted); font-size: 13px; }
+    @media (max-width: 1080px) {
+      .hero-grid, .grid4, .grid3, .grid2, .flow, .landmark-grid, .contract-grid { grid-template-columns: 1fr 1fr; }
+      .pipeline-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .pipeline-node::after { display: none; }
+    }
+    @media (max-width: 760px) {
+      .wrap, .topbar-inner { width: min(100vw - 24px, 1320px); }
+      .hero-grid, .grid4, .grid3, .grid2, .flow, .landmark-grid, .hero-meta, .contract-grid, .contract-meta, .pipeline-strip { grid-template-columns: 1fr; }
+      .section { padding: 22px; }
+      .code-line { grid-template-columns: 58px 1fr; }
+      .handoff { grid-template-columns: 1fr; }
+      .handoff-cell { border-right: 0; }
+      .nav { display: none; }
+    }
+    </style></head><body>
+    <div class="topbar">
+      <div class="topbar-inner">
+        <div class="brand"><div class="mark"></div><div>Radar Project Code Explorer</div></div>
+        <nav class="nav">
+          <a href="../index.html">메인 분석</a>
+          <a href="index.html">코드 카탈로그</a>
+          <a href="../../REQ/index.html">REQ</a>
+          <a href="#code">전체 코드</a>
+        </nav>
+      </div>
+    </div>
+    <div class="wrap">
+      <section class="hero">
+        <div class="hero-grid">
+          <div>
+            <span class="eyebrow">Reporting</span>
+            <h1>session_compare.py</h1>
+            <p>before와 after 두 summary.json을 읽어 개선인지 회귀인지 판단하는 비교기다. 현업에서는 이런 비교기가 있어야 실험이 누적될수록 팀이 같은 언어로 의사결정을 할 수 있다.</p>
+            <div class="pill-row"><span class="pill">Reports</span></div>
+          </div>
+          <div class="hero-meta">
+            <div class="meta"><span>Source Path</span><strong>tools/diagnostics/session_compare.py</strong></div>
+            <div class="meta"><span>Line Count</span><strong>142</strong></div>
+            <div class="meta"><span>Before</span><strong>session_report.py</strong></div>
+            <div class="meta"><span>After</span><strong>comparison_vs_*.json, 향후 HTML 리포트</strong></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>이 파일이 맡는 역할</h2>
+        <p class="intro">실험이 늘어날수록 좋아진 느낌이 아니라 지표상 좋아졌는가를 자동으로 판단해야 하기 때문이다.</p>
+        <div class="flow">
+          <article class="flow-step"><span>Input Side</span><strong>session_report.py</strong><p>before와 after summary.json</p></article>
+          <article class="flow-step"><span>This File</span><strong>session_compare.py</strong><p>현업에서는 이런 비교기가 있어야 실험이 누적될수록 팀이 같은 언어로 의사결정을 할 수 있다.</p></article>
+          <article class="flow-step"><span>Output Side</span><strong>comparison_vs_*.json, 향후 HTML 리포트</strong><p>comparison json, 콘솔 비교 결과</p></article>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>핵심 책임</h2>
+        <p class="intro">처음 보는 사람이 이 파일을 읽을 때 놓치면 안 되는 책임을 세 갈래로 나눴다.</p>
+        <div class="grid3"><article class="card"><h3>A/B 비교</h3><p>baseline과 candidate 실험 결과를 같은 포맷으로 비교한다.</p></article>
+<article class="card"><h3>방향성 판단</h3><p>낮을수록 좋은 지표와 높을수록 좋은 지표를 구분한다.</p></article>
+<article class="card"><h3>회귀 감지</h3><p>개선과 회귀 여부를 빠르게 요약한다.</p></article></div>
+      </section>
+
+      <section class="section">
+        <h2>쉽게 이해하는 모델</h2>
+        <p class="intro">처음 보는 사람이 이 파일을 딱 한 문장으로 붙잡아야 할 때의 설명이다.</p>
+        <div class="card"><p>이 파일은 A/B 판정기다. 두 summary.json을 읽어 무엇이 좋아졌고 무엇이 나빠졌는지 방향까지 붙여 준다.</p></div>
+      </section>
+
+      <section class="section">
+        <h2>입력에서 출력까지 단계별 설명</h2>
+        <p class="intro">실험이 많아질수록 숫자만 나열하는 것보다, 어떤 지표는 낮을수록 좋고 어떤 지표는 높을수록 좋은지 자동으로 판정해 주는 도구가 필요하다.</p>
+        <div class="contract-grid">
+            <article class="contract-card">
+              <div class="contract-top">
+                <div><h3>1. 비교할 지표 목록을 정의한다</h3></div>
+                <span class="contract-tag">Step</span>
+              </div>
+              <p>METRICS는 어떤 key를 비교할지와 lower 또는 higher 방향을 미리 정해 둔다.</p>
+              <div class="contract-meta">
+                <div><span>왜 필요한가</span><strong>같은 delta라도 latency와 success rate는 해석 방향이 반대이기 때문이다.</strong></div>
+                <div><span>다음으로 넘기는 것</span><strong>비교 대상 metric spec</strong></div>
+              </div>
+            </article>
+            
+
+            <article class="contract-card">
+              <div class="contract-top">
+                <div><h3>2. before와 after summary를 읽는다</h3></div>
+                <span class="contract-tag">Step</span>
+              </div>
+              <p>_load_summary가 디렉터리 또는 summary.json 입력을 받아 실제 JSON을 로드한다.</p>
+              <div class="contract-meta">
+                <div><span>왜 필요한가</span><strong>CLI 사용성을 높이고 자동화 스크립트에서 재사용하기 쉽게 하기 위해서다.</strong></div>
+                <div><span>다음으로 넘기는 것</span><strong>before_summary, after_summary</strong></div>
+              </div>
+            </article>
+            
+
+            <article class="contract-card">
+              <div class="contract-top">
+                <div><h3>3. 값과 변화량을 계산한다</h3></div>
+                <span class="contract-tag">Step</span>
+              </div>
+              <p>_nested_get, _percent_change, _judgement가 값 추출, delta, 개선과 회귀 판정을 수행한다.</p>
+              <div class="contract-meta">
+                <div><span>왜 필요한가</span><strong>요약 스키마가 중첩 dict 구조라 dotted key 접근과 방향 해석이 필요하다.</strong></div>
+                <div><span>다음으로 넘기는 것</span><strong>metric별 comparison row</strong></div>
+              </div>
+            </article>
+            
+
+            <article class="contract-card">
+              <div class="contract-top">
+                <div><h3>4. 비교 결과를 저장하고 출력한다</h3></div>
+                <span class="contract-tag">Step</span>
+              </div>
+              <p>build_comparison과 main이 comparison json을 쓰고 콘솔에 핵심 결과를 표시한다.</p>
+              <div class="contract-meta">
+                <div><span>왜 필요한가</span><strong>사람이 바로 확인하는 용도와 후속 자동화가 읽는 용도를 동시에 만족해야 한다.</strong></div>
+                <div><span>다음으로 넘기는 것</span><strong>comparison_vs_*.json</strong></div>
+              </div>
+            </article>
+            </div>
+      </section>
+
+      <section class="section">
+        <h2>놓치기 쉬운 부분</h2>
+        <p class="intro">코드를 읽을 때 자주 헷갈리거나, 설명 없이 넘어가면 오해하기 쉬운 부분을 따로 정리했다.</p>
+        <div class="card"><ul><li>0으로 나누는 percent_change는 None으로 처리한다.</li><li>지표가 없거나 None이면 improved와 regressed 대신 n/a가 나온다.</li><li>이 파일은 아직 threshold 기반 pass와 fail보다 방향 판정 중심이다.</li><li>좋아졌다는 판단은 METRICS에 적힌 direction 정의에 전적으로 달려 있다.</li></ul></div>
+      </section>
+
+      <section class="section">
+        <h2>핵심 라인 바로가기</h2>
+        <p class="intro">실제 코드 기준으로 중요한 클래스와 함수를 직접 눌러 내려갈 수 있다.</p>
+        <div class="landmark-grid"><a class="landmark" href="#L8"><strong>METRICS</strong><span>Line 8</span><p>비교 대상 지표 목록이다.</p></a>
+<a class="landmark" href="#L67"><strong>build_comparison</strong><span>Line 67</span><p>비교 결과를 생성한다.</p></a>
+<a class="landmark" href="#L110"><strong>main</strong><span>Line 110</span><p>CLI entrypoint다.</p></a></div>
+      </section>
+
+      <section class="section">
+        <h2>해석 가이드</h2>
+        <p class="intro">입력, 출력, 디버깅 포인트를 같이 보면 이 파일 역할이 훨씬 빨리 정리된다.</p>
+        <div class="grid4">
+          <article class="note"><h3>입력</h3><p>before와 after summary.json</p></article>
+          <article class="note"><h3>출력</h3><p>comparison json, 콘솔 비교 결과</p></article>
+          <article class="note"><h3>디버깅 포인트</h3><p>metric direction, 0 division, None 값 처리 안전성을 확인해야 한다.</p></article>
+          <article class="note"><h3>현업 메모</h3><p>threshold 기반 fail와 pass를 붙이면 회귀 검증 자동화에 연결하기 좋다.</p></article>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>읽는 순서</h2>
+        <p class="intro">시간을 아끼려면 아래 순서대로 보면 된다.</p>
+        <div class="card"><ul><li>METRICS 목록으로 어떤 지표를 비교하는지 먼저 본다.</li><li>build_comparison에서 delta와 judgement 계산을 본다.</li><li>main에서 CLI 출력 형식을 확인한다.</li></ul></div>
+      </section>
+
+      <section class="section">
+        <h2>중요 심볼 표</h2>
+        <p class="intro">코드 리뷰나 발표 자료용으로 바로 참고할 수 있는 함수와 클래스 요약이다.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>심볼</th><th>라인</th><th>설명</th></tr></thead>
+            <tbody><tr><td>METRICS</td><td><a href="#L8">L8</a></td><td>비교 대상 지표 목록이다.</td></tr>
+<tr><td>build_comparison</td><td><a href="#L67">L67</a></td><td>비교 결과를 생성한다.</td></tr>
+<tr><td>main</td><td><a href="#L110">L110</a></td><td>CLI entrypoint다.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>연관 파일</h2>
+        <p class="intro">이 파일 다음에 이어서 보면 좋은 코드들이다.</p>
+        <div class="grid4"><a class="link-card" href="session_report.html"><article class="card mini-card"><div class="signal">Related</div><h3>session_report.py</h3><p>한 세션 폴더를 읽어 summary.json을 생성하는 리포트 빌더다.</p></article></a>
+<a class="link-card" href="runtime_settings.html"><article class="card mini-card"><div class="signal">Related</div><h3>runtime_settings.py</h3><p>프로젝트 전반에서 공통으로 쓰는 설정을 static, runtime, tuning 세 층으로 나눠 로드하고 병합하는 설정 계층이다.</p></article></a>
+<a class="link-card" href="live_motion_viewer.html"><article class="card mini-card"><div class="signal">Related</div><h3>live_motion_viewer.py</h3><p>실시간 데모를 구동하는 메인 앱이다. static/runtime/tuning 설정을 읽고, 장비 제어, 워커 시작, UI 렌더링, 세션 로그를 묶는다.</p></article></a></div>
+      </section>
+
+      <section class="section" id="code">
+        <h2>전체 코드</h2>
+        <p class="intro">UI는 유지한 채로 실제 코드 전문을 그대로 볼 수 있게 구성했다. 라인 번호를 누르면 해당 줄 링크를 쉽게 잡을 수 있다.</p>
+        <div class="code-shell">
+          <div class="code-head"><span>tools/diagnostics/session_compare.py</span><span>142 lines</span></div>
+          <div class="code-body"><div class="code-line" id="L1"><a class="ln" href="#L1">1</a><span class="code-text">from __future__ import annotations</span></div>
+<div class="code-line" id="L2"><a class="ln" href="#L2">2</a><span class="code-text"></span></div>
+<div class="code-line" id="L3"><a class="ln" href="#L3">3</a><span class="code-text">import argparse</span></div>
+<div class="code-line" id="L4"><a class="ln" href="#L4">4</a><span class="code-text">import json</span></div>
+<div class="code-line" id="L5"><a class="ln" href="#L5">5</a><span class="code-text">from pathlib import Path</span></div>
+<div class="code-line" id="L6"><a class="ln" href="#L6">6</a><span class="code-text"></span></div>
+<div class="code-line" id="L7"><a class="ln" href="#L7">7</a><span class="code-text"></span></div>
+<div class="code-line" id="L8"><a class="ln" href="#L8">8</a><span class="code-text">METRICS = [</span></div>
+<div class="code-line" id="L9"><a class="ln" href="#L9">9</a><span class="code-text">    (&quot;processed.invalid_rate&quot;, &quot;Processed invalid rate&quot;, &quot;lower&quot;),</span></div>
+<div class="code-line" id="L10"><a class="ln" href="#L10">10</a><span class="code-text">    (&quot;processed.capture_to_process_ms.mean&quot;, &quot;Processed latency mean&quot;, &quot;lower&quot;),</span></div>
+<div class="code-line" id="L11"><a class="ln" href="#L11">11</a><span class="code-text">    (&quot;processed.capture_to_process_ms.p95&quot;, &quot;Processed latency p95&quot;, &quot;lower&quot;),</span></div>
+<div class="code-line" id="L12"><a class="ln" href="#L12">12</a><span class="code-text">    (&quot;processed.confirmed_track_count.mean&quot;, &quot;Confirmed track mean&quot;, &quot;higher&quot;),</span></div>
+<div class="code-line" id="L13"><a class="ln" href="#L13">13</a><span class="code-text">    (&quot;processed.multi_confirmed_success_rate&quot;, &quot;Processed multi-target success&quot;, &quot;higher&quot;),</span></div>
+<div class="code-line" id="L14"><a class="ln" href="#L14">14</a><span class="code-text">    (&quot;render.capture_to_render_ms.mean&quot;, &quot;Render latency mean&quot;, &quot;lower&quot;),</span></div>
+<div class="code-line" id="L15"><a class="ln" href="#L15">15</a><span class="code-text">    (&quot;render.capture_to_render_ms.p95&quot;, &quot;Render latency p95&quot;, &quot;lower&quot;),</span></div>
+<div class="code-line" id="L16"><a class="ln" href="#L16">16</a><span class="code-text">    (&quot;render.display_track_count.mean&quot;, &quot;Display track mean&quot;, &quot;higher&quot;),</span></div>
+<div class="code-line" id="L17"><a class="ln" href="#L17">17</a><span class="code-text">    (&quot;render.multi_display_success_rate&quot;, &quot;Render multi-target success&quot;, &quot;higher&quot;),</span></div>
+<div class="code-line" id="L18"><a class="ln" href="#L18">18</a><span class="code-text">    (&quot;render.skipped_render_frames.mean_per_render&quot;, &quot;Skipped frames per render&quot;, &quot;lower&quot;),</span></div>
+<div class="code-line" id="L19"><a class="ln" href="#L19">19</a><span class="code-text">]</span></div>
+<div class="code-line" id="L20"><a class="ln" href="#L20">20</a><span class="code-text"></span></div>
+<div class="code-line" id="L21"><a class="ln" href="#L21">21</a><span class="code-text"></span></div>
+<div class="code-line" id="L22"><a class="ln" href="#L22">22</a><span class="code-text">def _resolve_summary_path(path_value: str) -&gt; Path:</span></div>
+<div class="code-line" id="L23"><a class="ln" href="#L23">23</a><span class="code-text">    path = Path(path_value)</span></div>
+<div class="code-line" id="L24"><a class="ln" href="#L24">24</a><span class="code-text">    if path.is_dir():</span></div>
+<div class="code-line" id="L25"><a class="ln" href="#L25">25</a><span class="code-text">        return path / &quot;summary.json&quot;</span></div>
+<div class="code-line" id="L26"><a class="ln" href="#L26">26</a><span class="code-text">    return path</span></div>
+<div class="code-line" id="L27"><a class="ln" href="#L27">27</a><span class="code-text"></span></div>
+<div class="code-line" id="L28"><a class="ln" href="#L28">28</a><span class="code-text"></span></div>
+<div class="code-line" id="L29"><a class="ln" href="#L29">29</a><span class="code-text">def _load_summary(path_value: str):</span></div>
+<div class="code-line" id="L30"><a class="ln" href="#L30">30</a><span class="code-text">    summary_path = _resolve_summary_path(path_value)</span></div>
+<div class="code-line" id="L31"><a class="ln" href="#L31">31</a><span class="code-text">    if not summary_path.exists():</span></div>
+<div class="code-line" id="L32"><a class="ln" href="#L32">32</a><span class="code-text">        raise FileNotFoundError(f&quot;Summary file not found: {summary_path}&quot;)</span></div>
+<div class="code-line" id="L33"><a class="ln" href="#L33">33</a><span class="code-text">    return json.loads(summary_path.read_text(encoding=&quot;utf-8&quot;)), summary_path</span></div>
+<div class="code-line" id="L34"><a class="ln" href="#L34">34</a><span class="code-text"></span></div>
+<div class="code-line" id="L35"><a class="ln" href="#L35">35</a><span class="code-text"></span></div>
+<div class="code-line" id="L36"><a class="ln" href="#L36">36</a><span class="code-text">def _nested_get(data, dotted_key: str):</span></div>
+<div class="code-line" id="L37"><a class="ln" href="#L37">37</a><span class="code-text">    current = data</span></div>
+<div class="code-line" id="L38"><a class="ln" href="#L38">38</a><span class="code-text">    for part in dotted_key.split(&quot;.&quot;):</span></div>
+<div class="code-line" id="L39"><a class="ln" href="#L39">39</a><span class="code-text">        if not isinstance(current, dict) or part not in current:</span></div>
+<div class="code-line" id="L40"><a class="ln" href="#L40">40</a><span class="code-text">            return None</span></div>
+<div class="code-line" id="L41"><a class="ln" href="#L41">41</a><span class="code-text">        current = current[part]</span></div>
+<div class="code-line" id="L42"><a class="ln" href="#L42">42</a><span class="code-text">    return current</span></div>
+<div class="code-line" id="L43"><a class="ln" href="#L43">43</a><span class="code-text"></span></div>
+<div class="code-line" id="L44"><a class="ln" href="#L44">44</a><span class="code-text"></span></div>
+<div class="code-line" id="L45"><a class="ln" href="#L45">45</a><span class="code-text">def _round_or_none(value, digits=4):</span></div>
+<div class="code-line" id="L46"><a class="ln" href="#L46">46</a><span class="code-text">    if value is None:</span></div>
+<div class="code-line" id="L47"><a class="ln" href="#L47">47</a><span class="code-text">        return None</span></div>
+<div class="code-line" id="L48"><a class="ln" href="#L48">48</a><span class="code-text">    return round(float(value), digits)</span></div>
+<div class="code-line" id="L49"><a class="ln" href="#L49">49</a><span class="code-text"></span></div>
+<div class="code-line" id="L50"><a class="ln" href="#L50">50</a><span class="code-text"></span></div>
+<div class="code-line" id="L51"><a class="ln" href="#L51">51</a><span class="code-text">def _percent_change(before_value, after_value):</span></div>
+<div class="code-line" id="L52"><a class="ln" href="#L52">52</a><span class="code-text">    if before_value in (None, 0) or after_value is None:</span></div>
+<div class="code-line" id="L53"><a class="ln" href="#L53">53</a><span class="code-text">        return None</span></div>
+<div class="code-line" id="L54"><a class="ln" href="#L54">54</a><span class="code-text">    return (after_value - before_value) / abs(before_value)</span></div>
+<div class="code-line" id="L55"><a class="ln" href="#L55">55</a><span class="code-text"></span></div>
+<div class="code-line" id="L56"><a class="ln" href="#L56">56</a><span class="code-text"></span></div>
+<div class="code-line" id="L57"><a class="ln" href="#L57">57</a><span class="code-text">def _judgement(direction: str, delta):</span></div>
+<div class="code-line" id="L58"><a class="ln" href="#L58">58</a><span class="code-text">    if delta is None:</span></div>
+<div class="code-line" id="L59"><a class="ln" href="#L59">59</a><span class="code-text">        return &quot;n/a&quot;</span></div>
+<div class="code-line" id="L60"><a class="ln" href="#L60">60</a><span class="code-text">    if abs(delta) &lt; 1e-12:</span></div>
+<div class="code-line" id="L61"><a class="ln" href="#L61">61</a><span class="code-text">        return &quot;same&quot;</span></div>
+<div class="code-line" id="L62"><a class="ln" href="#L62">62</a><span class="code-text">    if direction == &quot;lower&quot;:</span></div>
+<div class="code-line" id="L63"><a class="ln" href="#L63">63</a><span class="code-text">        return &quot;improved&quot; if delta &lt; 0 else &quot;regressed&quot;</span></div>
+<div class="code-line" id="L64"><a class="ln" href="#L64">64</a><span class="code-text">    return &quot;improved&quot; if delta &gt; 0 else &quot;regressed&quot;</span></div>
+<div class="code-line" id="L65"><a class="ln" href="#L65">65</a><span class="code-text"></span></div>
+<div class="code-line" id="L66"><a class="ln" href="#L66">66</a><span class="code-text"></span></div>
+<div class="code-line" id="L67"><a class="ln" href="#L67">67</a><span class="code-text">def build_comparison(before_summary, after_summary, before_path: Path, after_path: Path):</span></div>
+<div class="code-line" id="L68"><a class="ln" href="#L68">68</a><span class="code-text">    comparison = {</span></div>
+<div class="code-line" id="L69"><a class="ln" href="#L69">69</a><span class="code-text">        &quot;before&quot;: {</span></div>
+<div class="code-line" id="L70"><a class="ln" href="#L70">70</a><span class="code-text">            &quot;path&quot;: str(before_path),</span></div>
+<div class="code-line" id="L71"><a class="ln" href="#L71">71</a><span class="code-text">            &quot;session_id&quot;: before_summary.get(&quot;session_id&quot;),</span></div>
+<div class="code-line" id="L72"><a class="ln" href="#L72">72</a><span class="code-text">            &quot;variant&quot;: before_summary.get(&quot;session_meta&quot;, {}).get(&quot;variant&quot;),</span></div>
+<div class="code-line" id="L73"><a class="ln" href="#L73">73</a><span class="code-text">            &quot;scenario_id&quot;: before_summary.get(&quot;session_meta&quot;, {}).get(&quot;scenario_id&quot;),</span></div>
+<div class="code-line" id="L74"><a class="ln" href="#L74">74</a><span class="code-text">        },</span></div>
+<div class="code-line" id="L75"><a class="ln" href="#L75">75</a><span class="code-text">        &quot;after&quot;: {</span></div>
+<div class="code-line" id="L76"><a class="ln" href="#L76">76</a><span class="code-text">            &quot;path&quot;: str(after_path),</span></div>
+<div class="code-line" id="L77"><a class="ln" href="#L77">77</a><span class="code-text">            &quot;session_id&quot;: after_summary.get(&quot;session_id&quot;),</span></div>
+<div class="code-line" id="L78"><a class="ln" href="#L78">78</a><span class="code-text">            &quot;variant&quot;: after_summary.get(&quot;session_meta&quot;, {}).get(&quot;variant&quot;),</span></div>
+<div class="code-line" id="L79"><a class="ln" href="#L79">79</a><span class="code-text">            &quot;scenario_id&quot;: after_summary.get(&quot;session_meta&quot;, {}).get(&quot;scenario_id&quot;),</span></div>
+<div class="code-line" id="L80"><a class="ln" href="#L80">80</a><span class="code-text">        },</span></div>
+<div class="code-line" id="L81"><a class="ln" href="#L81">81</a><span class="code-text">        &quot;metrics&quot;: [],</span></div>
+<div class="code-line" id="L82"><a class="ln" href="#L82">82</a><span class="code-text">    }</span></div>
+<div class="code-line" id="L83"><a class="ln" href="#L83">83</a><span class="code-text"></span></div>
+<div class="code-line" id="L84"><a class="ln" href="#L84">84</a><span class="code-text">    for dotted_key, label, direction in METRICS:</span></div>
+<div class="code-line" id="L85"><a class="ln" href="#L85">85</a><span class="code-text">        before_value = _nested_get(before_summary, dotted_key)</span></div>
+<div class="code-line" id="L86"><a class="ln" href="#L86">86</a><span class="code-text">        after_value = _nested_get(after_summary, dotted_key)</span></div>
+<div class="code-line" id="L87"><a class="ln" href="#L87">87</a><span class="code-text">        if isinstance(before_value, (int, float)) and isinstance(after_value, (int, float)):</span></div>
+<div class="code-line" id="L88"><a class="ln" href="#L88">88</a><span class="code-text">            delta = after_value - before_value</span></div>
+<div class="code-line" id="L89"><a class="ln" href="#L89">89</a><span class="code-text">            pct_change = _percent_change(before_value, after_value)</span></div>
+<div class="code-line" id="L90"><a class="ln" href="#L90">90</a><span class="code-text">        else:</span></div>
+<div class="code-line" id="L91"><a class="ln" href="#L91">91</a><span class="code-text">            delta = None</span></div>
+<div class="code-line" id="L92"><a class="ln" href="#L92">92</a><span class="code-text">            pct_change = None</span></div>
+<div class="code-line" id="L93"><a class="ln" href="#L93">93</a><span class="code-text"></span></div>
+<div class="code-line" id="L94"><a class="ln" href="#L94">94</a><span class="code-text">        comparison[&quot;metrics&quot;].append(</span></div>
+<div class="code-line" id="L95"><a class="ln" href="#L95">95</a><span class="code-text">            {</span></div>
+<div class="code-line" id="L96"><a class="ln" href="#L96">96</a><span class="code-text">                &quot;key&quot;: dotted_key,</span></div>
+<div class="code-line" id="L97"><a class="ln" href="#L97">97</a><span class="code-text">                &quot;label&quot;: label,</span></div>
+<div class="code-line" id="L98"><a class="ln" href="#L98">98</a><span class="code-text">                &quot;direction&quot;: direction,</span></div>
+<div class="code-line" id="L99"><a class="ln" href="#L99">99</a><span class="code-text">                &quot;before&quot;: before_value,</span></div>
+<div class="code-line" id="L100"><a class="ln" href="#L100">100</a><span class="code-text">                &quot;after&quot;: after_value,</span></div>
+<div class="code-line" id="L101"><a class="ln" href="#L101">101</a><span class="code-text">                &quot;delta&quot;: _round_or_none(delta),</span></div>
+<div class="code-line" id="L102"><a class="ln" href="#L102">102</a><span class="code-text">                &quot;percent_change&quot;: _round_or_none(pct_change),</span></div>
+<div class="code-line" id="L103"><a class="ln" href="#L103">103</a><span class="code-text">                &quot;judgement&quot;: _judgement(direction, delta),</span></div>
+<div class="code-line" id="L104"><a class="ln" href="#L104">104</a><span class="code-text">            }</span></div>
+<div class="code-line" id="L105"><a class="ln" href="#L105">105</a><span class="code-text">        )</span></div>
+<div class="code-line" id="L106"><a class="ln" href="#L106">106</a><span class="code-text"></span></div>
+<div class="code-line" id="L107"><a class="ln" href="#L107">107</a><span class="code-text">    return comparison</span></div>
+<div class="code-line" id="L108"><a class="ln" href="#L108">108</a><span class="code-text"></span></div>
+<div class="code-line" id="L109"><a class="ln" href="#L109">109</a><span class="code-text"></span></div>
+<div class="code-line" id="L110"><a class="ln" href="#L110">110</a><span class="code-text">def main():</span></div>
+<div class="code-line" id="L111"><a class="ln" href="#L111">111</a><span class="code-text">    parser = argparse.ArgumentParser(</span></div>
+<div class="code-line" id="L112"><a class="ln" href="#L112">112</a><span class="code-text">        description=&quot;Compare two session summaries from live_motion_viewer logs.&quot;</span></div>
+<div class="code-line" id="L113"><a class="ln" href="#L113">113</a><span class="code-text">    )</span></div>
+<div class="code-line" id="L114"><a class="ln" href="#L114">114</a><span class="code-text">    parser.add_argument(&quot;before&quot;, help=&quot;Path to the baseline session directory or summary.json&quot;)</span></div>
+<div class="code-line" id="L115"><a class="ln" href="#L115">115</a><span class="code-text">    parser.add_argument(&quot;after&quot;, help=&quot;Path to the candidate session directory or summary.json&quot;)</span></div>
+<div class="code-line" id="L116"><a class="ln" href="#L116">116</a><span class="code-text">    parser.add_argument(</span></div>
+<div class="code-line" id="L117"><a class="ln" href="#L117">117</a><span class="code-text">        &quot;--output&quot;,</span></div>
+<div class="code-line" id="L118"><a class="ln" href="#L118">118</a><span class="code-text">        help=&quot;Optional output path for comparison json.&quot;,</span></div>
+<div class="code-line" id="L119"><a class="ln" href="#L119">119</a><span class="code-text">    )</span></div>
+<div class="code-line" id="L120"><a class="ln" href="#L120">120</a><span class="code-text">    args = parser.parse_args()</span></div>
+<div class="code-line" id="L121"><a class="ln" href="#L121">121</a><span class="code-text"></span></div>
+<div class="code-line" id="L122"><a class="ln" href="#L122">122</a><span class="code-text">    before_summary, before_path = _load_summary(args.before)</span></div>
+<div class="code-line" id="L123"><a class="ln" href="#L123">123</a><span class="code-text">    after_summary, after_path = _load_summary(args.after)</span></div>
+<div class="code-line" id="L124"><a class="ln" href="#L124">124</a><span class="code-text">    comparison = build_comparison(before_summary, after_summary, before_path, after_path)</span></div>
+<div class="code-line" id="L125"><a class="ln" href="#L125">125</a><span class="code-text"></span></div>
+<div class="code-line" id="L126"><a class="ln" href="#L126">126</a><span class="code-text">    output_path = Path(args.output) if args.output else after_path.parent / f&quot;comparison_vs_{before_path.parent.name}.json&quot;</span></div>
+<div class="code-line" id="L127"><a class="ln" href="#L127">127</a><span class="code-text">    output_path.write_text(</span></div>
+<div class="code-line" id="L128"><a class="ln" href="#L128">128</a><span class="code-text">        json.dumps(comparison, indent=2, ensure_ascii=False),</span></div>
+<div class="code-line" id="L129"><a class="ln" href="#L129">129</a><span class="code-text">        encoding=&quot;utf-8&quot;,</span></div>
+<div class="code-line" id="L130"><a class="ln" href="#L130">130</a><span class="code-text">    )</span></div>
+<div class="code-line" id="L131"><a class="ln" href="#L131">131</a><span class="code-text"></span></div>
+<div class="code-line" id="L132"><a class="ln" href="#L132">132</a><span class="code-text">    print(f&quot;Comparison written to: {output_path}&quot;)</span></div>
+<div class="code-line" id="L133"><a class="ln" href="#L133">133</a><span class="code-text">    for metric in comparison[&quot;metrics&quot;]:</span></div>
+<div class="code-line" id="L134"><a class="ln" href="#L134">134</a><span class="code-text">        print(</span></div>
+<div class="code-line" id="L135"><a class="ln" href="#L135">135</a><span class="code-text">            f&quot;{metric[&#x27;label&#x27;]}: before={metric[&#x27;before&#x27;]} &quot;</span></div>
+<div class="code-line" id="L136"><a class="ln" href="#L136">136</a><span class="code-text">            f&quot;after={metric[&#x27;after&#x27;]} delta={metric[&#x27;delta&#x27;]} ({metric[&#x27;judgement&#x27;]})&quot;</span></div>
+<div class="code-line" id="L137"><a class="ln" href="#L137">137</a><span class="code-text">        )</span></div>
+<div class="code-line" id="L138"><a class="ln" href="#L138">138</a><span class="code-text"></span></div>
+<div class="code-line" id="L139"><a class="ln" href="#L139">139</a><span class="code-text"></span></div>
+<div class="code-line" id="L140"><a class="ln" href="#L140">140</a><span class="code-text">if __name__ == &quot;__main__&quot;:</span></div>
+<div class="code-line" id="L141"><a class="ln" href="#L141">141</a><span class="code-text">    main()</span></div></div>
+        </div>
+      </section>
+
+      <div class="footer">Generated from source. 문서와 코드가 어긋나면 이 생성 스크립트를 다시 실행하면 된다.</div>
+    </div>
+    </body></html>

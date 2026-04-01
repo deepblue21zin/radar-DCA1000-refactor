@@ -1,0 +1,79 @@
+{
+  "processing": {
+    "remove_static": true,
+    "doppler_guard_bins": 2
+  },
+  "roi": {
+    "lateral_m": 1.5,
+    "forward_m": 3.0,
+    "min_forward_m": 0.25
+  },
+  "detection": {
+    "allow_strongest_fallback": false,
+    "max_targets": 6,
+    "display_min_confidence": 0.22,
+    "cluster_min_samples": 1,
+    "cluster_velocity_weight": 0.0,
+    "algorithm": {
+      "cfar_training_cells": [6, 6],
+      "cfar_guard_cells": [1, 1],
+      "cfar_scale": 5.0,
+      "global_quantile": 0.985,
+      "angle_quantile": 0.75,
+      "angle_contrast_scale": 1.35,
+      "min_cartesian_separation_m": 0.45
+    },
+    "dbscan_adaptive_eps_bands": [
+      {
+        "r_min": 0.25,
+        "r_max": 1.0,
+        "eps": 0.34,
+        "min_samples": 1
+      },
+      {
+        "r_min": 1.0,
+        "r_max": 2.0,
+        "eps": 0.44,
+        "min_samples": 1
+      },
+      {
+        "r_min": 2.0,
+        "r_max": 3.5,
+        "eps": 0.56,
+        "min_samples": 1
+      }
+    ]
+  },
+  "tracking": {
+    "confirm_hits": 3,
+    "max_misses": 4,
+    "process_var": 1.0,
+    "measurement_var": 0.43,
+    "range_measurement_scale": 0.5,
+    "confidence_measurement_scale": 0.35,
+    "association_gate": 5.99,
+    "doppler_zero_guard_bins": 3,
+    "doppler_gate_bins": 18,
+    "doppler_cost_weight": 0.65,
+    "report_miss_tolerance": 1,
+    "lost_gate_factor": 1.3,
+    "tentative_gate_factor": 0.65
+  },
+  "pipeline": {
+    "queue_size": 4,
+    "block_track_birth_on_invalid": true,
+    "invalid_policy": {
+      "birth_block_gap_threshold": 16,
+      "birth_block_out_of_sequence_threshold": 2,
+      "birth_block_byte_mismatch_threshold": 2,
+      "drop_gap_threshold": 140,
+      "drop_out_of_sequence_threshold": 6,
+      "drop_byte_mismatch_threshold": 6
+    }
+  },
+  "visualization": {
+    "show_tentative_tracks": true,
+    "tentative_min_confidence": 0.3,
+    "tentative_min_hits": 2
+  }
+}

@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>event_log.jsonl 해석 가이드</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --card: #ffffff;
+      --text: #142033;
+      --muted: #5b6b83;
+      --line: #d7deea;
+      --brand: #0f6cbd;
+      --brand-soft: #eaf3ff;
+      --warn: #b54708;
+      --warn-soft: #fff4e5;
+      --danger: #b42318;
+      --danger-soft: #fff0f0;
+      --good: #027a48;
+      --good-soft: #ecfdf3;
+      --shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+      background: linear-gradient(180deg, #eef4ff 0%, var(--bg) 220px);
+      color: var(--text);
+      line-height: 1.65;
+    }
+
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 40px 24px 80px;
+    }
+
+    .hero {
+      background: linear-gradient(135deg, #0f6cbd 0%, #0c4f8a 100%);
+      color: #fff;
+      border-radius: 24px;
+      padding: 34px 36px;
+      box-shadow: var(--shadow);
+    }
+
+    .hero h1 {
+      margin: 0 0 8px;
+      font-size: 2rem;
+      line-height: 1.2;
+    }
+
+    .hero p {
+      margin: 0;
+      max-width: 820px;
+      color: rgba(255, 255, 255, 0.9);
+    }
+
+    .nav {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 18px;
+    }
+
+    .nav a {
+      color: #fff;
+      text-decoration: none;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.14);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+
+    section { margin-top: 28px; }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 26px;
+      box-shadow: var(--shadow);
+    }
+
+    h2, h3 { margin-top: 0; }
+    h2 { font-size: 1.45rem; margin-bottom: 12px; }
+    h3 { font-size: 1.05rem; margin-bottom: 8px; }
+
+    .timeline {
+      position: relative;
+      margin-top: 18px;
+      padding-left: 22px;
+    }
+
+    .timeline::before {
+      content: "";
+      position: absolute;
+      left: 6px;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: var(--line);
+    }
+
+    .item {
+      position: relative;
+      margin-bottom: 18px;
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #fbfdff;
+    }
+
+    .item::before {
+      content: "";
+      position: absolute;
+      left: -21px;
+      top: 18px;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--brand);
+      border: 2px solid #fff;
+      box-shadow: 0 0 0 2px var(--brand-soft);
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: 0.92rem;
+      margin-top: 4px;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 700;
+    }
+
+    .danger { background: var(--danger-soft); color: var(--danger); }
+    .warn { background: var(--warn-soft); color: var(--warn); }
+    .good { background: var(--good-soft); color: var(--good); }
+    .brand { background: var(--brand-soft); color: var(--brand); }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+    }
+
+    th, td {
+      text-align: left;
+      vertical-align: top;
+      padding: 12px 10px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    th {
+      color: var(--muted);
+      font-size: 0.92rem;
+      font-weight: 700;
+    }
+
+    code, pre {
+      font-family: "Consolas", "Courier New", monospace;
+    }
+
+    pre {
+      margin: 0;
+      padding: 16px;
+      background: #0f172a;
+      color: #e2e8f0;
+      border-radius: 16px;
+      overflow: auto;
+      font-size: 0.9rem;
+    }
+
+    .note {
+      border-left: 4px solid var(--brand);
+      background: #f8fbff;
+      padding: 14px 16px;
+      border-radius: 12px;
+      color: var(--muted);
+    }
+
+    .steps {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .steps li + li { margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <h1>event_log.jsonl 해석 가이드</h1>
+      <p>
+        event 로그는 프레임 로그가 아니라 “세션 수명주기” 로그입니다.
+        하드웨어 초기화, DCA1000 제어, GUI 상태, 첫 렌더 여부, 종료 흐름을 시간순으로 추적할 때 가장 먼저 봅니다.
+      </p>
+      <nav class="nav">
+        <a href="./processed_frames_guide.html">processed 로그</a>
+        <a href="./render_frames_guide.html">render 로그</a>
+        <a href="./event_log_guide.html">event 로그</a>
+      </nav>
+    </header>
+
+    <section class="card">
+      <h2>이 로그를 언제 봐야 하나</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>질문</th>
+            <th>event 로그에서 확인할 것</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>프로그램이 정상 시작됐는가</td>
+            <td><code>session_prepared</code>, <code>workers_started</code></td>
+          </tr>
+          <tr>
+            <td>DCA1000 설정이 성공했는가</td>
+            <td><code>dca_config_start</code> 이후 <code>dca_command_ok</code>들이 끝까지 나오는지</td>
+          </tr>
+          <tr>
+            <td>레이더 CLI가 실제 시작됐는가</td>
+            <td><code>radar_open_start</code>, <code>radar_open_complete</code></td>
+          </tr>
+          <tr>
+            <td>첫 화면이 떴는가</td>
+            <td><code>first_rendered_frame</code></td>
+          </tr>
+          <tr>
+            <td>3D만 안 되는지, 전체가 안 되는지</td>
+            <td><code>opengl_unavailable</code> 존재 여부</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>이번 세션 타임라인 예시</h2>
+      <p>예시 세션: <code>logs/live_motion_viewer/20260402_015518/event_log.jsonl</code></p>
+      <div class="timeline">
+        <div class="item">
+          <strong>01:55:18.724 — <code>session_prepared</code></strong>
+          <div class="meta">세션 폴더와 로그 파일들이 준비됨</div>
+        </div>
+        <div class="item">
+          <strong>01:55:18.726 ~ 01:55:18.937 — <code>dca_config_start</code> → <code>dca_config_complete</code></strong>
+          <div class="meta">DCA1000 제어 명령은 성공적으로 끝남 <span class="pill good">정상</span></div>
+        </div>
+        <div class="item">
+          <strong>01:55:19.855 — <code>workers_started</code></strong>
+          <div class="meta">수집/처리 스레드 시작 <span class="pill good">정상</span></div>
+        </div>
+        <div class="item">
+          <strong>01:55:21.235 — <code>opengl_unavailable</code></strong>
+          <div class="meta">3D 뷰만 비활성화. 2D 처리 자체는 막지 않음 <span class="pill warn">부가 기능 문제</span></div>
+        </div>
+        <div class="item">
+          <strong>01:56:54.443 ~ 01:56:56.927 — <code>radar_open_start</code> → <code>radar_open_complete</code></strong>
+          <div class="meta">사용자가 Send Radar Config 버튼을 눌렀고 CLI 설정도 끝남 <span class="pill good">정상</span></div>
+        </div>
+        <div class="item">
+          <strong>01:56:57.084 — <code>first_rendered_frame</code></strong>
+          <div class="meta">첫 프레임은 실제로 화면에 그려졌음 <span class="pill good">중요</span></div>
+        </div>
+        <div class="item">
+          <strong>01:57:34.779 ~ 01:57:34.898 — <code>shutdown_start</code> → <code>shutdown_complete</code></strong>
+          <div class="meta">세션 정상 종료</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>이 로그로 이번 문제를 어떻게 읽어야 하나</h2>
+      <ol class="steps">
+        <li><strong>DCA1000 제어 실패는 아닙니다.</strong><br />설정 명령이 모두 <code>dca_command_ok</code>로 끝났습니다.</li>
+        <li><strong>레이더 CLI 실패도 아닙니다.</strong><br /><code>radar_open_complete</code>가 있으므로 COM 포트/CFG 적용은 진행됐습니다.</li>
+        <li><strong>첫 프레임도 들어왔습니다.</strong><br /><code>first_rendered_frame</code>가 있기 때문에 “아예 데이터가 안 온다”는 상황은 아닙니다.</li>
+        <li><strong>즉 진짜 병목은 세션 시작 실패가 아니라, 이후 프레임 품질입니다.</strong><br />이건 processed/render 로그에서 invalid rate가 높은 것으로 이어집니다.</li>
+      </ol>
+      <p class="note" style="margin-top:16px;">
+        현업에서 event 로그는 “문제가 어느 단계에서 시작됐는지”를 자르는 용도입니다.
+        이번 세션은 <strong>boot 문제 아님, transport/data quality 문제</strong>라고 빠르게 판단할 수 있습니다.
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>필드와 이벤트를 어떻게 해석하나</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>이벤트</th>
+            <th>뜻</th>
+            <th>이벤트가 없거나 실패하면 의심할 것</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>dca_config_complete</code></td>
+            <td>DCA1000 설정 성공</td>
+            <td>host IP, fpga IP, UDP config port, 방화벽</td>
+          </tr>
+          <tr>
+            <td><code>workers_started</code></td>
+            <td>수집/처리 스레드 시작</td>
+            <td>앱 시작 로직, 큐 초기화, 예외 발생</td>
+          </tr>
+          <tr>
+            <td><code>radar_open_complete</code></td>
+            <td>레이더 CLI cfg 적용 완료</td>
+            <td>CLI COM 포트, baudrate, cfg 파일 내용</td>
+          </tr>
+          <tr>
+            <td><code>first_rendered_frame</code></td>
+            <td>첫 프레임이 UI에 도달</td>
+            <td>LVDS 스트림, UDP 데이터 수신, frame assembly</td>
+          </tr>
+          <tr>
+            <td><code>opengl_unavailable</code></td>
+            <td>3D 뷰 비활성화</td>
+            <td>PyOpenGL 미설치. 다만 2D 실패 원인과는 별개일 수 있음</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>해결 우선순위</h2>
+      <ol class="steps">
+        <li><strong>event 로그로 시작 단계가 정상인지 먼저 확인</strong><br />이번 세션은 정상입니다.</li>
+        <li><strong>그 다음 processed 로그로 invalid 원인을 확인</strong><br />이번 세션은 UDP gap, byte mismatch, sequence 문제가 핵심입니다.</li>
+        <li><strong>마지막에 render 로그로 사용자 체감 결과를 본다</strong><br />display track이 왜 0이 되는지 확인합니다.</li>
+      </ol>
+      <pre>{
+  "핵심 결론": "세션 시작 실패가 아니라 데이터 무결성 문제",
+  "DCA1000 설정": "정상",
+  "레이더 CLI": "정상",
+  "첫 렌더": "정상",
+  "이후 품질": "비정상"
+}</pre>
+    </section>
+  </div>
+</body>
+</html>
