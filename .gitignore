@@ -1,4 +1,39 @@
-/venv/
+# Python
 __pycache__/
 *.py[cod]
 *.pyc.*
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# IDE / OS
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+
+# Runtime outputs
+/logs/
+
+# Keep shared project configuration in version control
+!/config/
+!/config/**/*.json
+!/config/**/*.cfg
+
+# Generated HTML docs and reports
+/docs/**/*.html
+!/docs/problem/
+!/docs/problem/**/*.html
+
+# Local change notes
+/docs/change/
+/docs/change/**/*.html
