@@ -3,8 +3,8 @@ from __future__ import annotations
 
 FILE_EXPLAINERS = {
     "live_motion_viewer": {
-        "summary": "실시간 데모를 구동하는 메인 앱이다. static/runtime/tuning 설정을 읽고, 장비 제어, 워커 시작, UI 렌더링, 세션 로그를 묶는다.",
-        "mentor": "겉으로는 화면 파일처럼 보이지만 실제로는 앱 감독자다. 어떤 설정으로 돌릴지 정하고, 처리 스레드를 붙이고, 최신 프레임만 골라 화면과 로그에 남긴다.",
+        "summary": "실시간 데모를 구동하는 메인 앱이다. static/runtime/tuning 설정을 읽고, 장비 제어, 워커 시작, UI 렌더링, SessionLogger 연계를 묶는다.",
+        "mentor": "겉으로는 화면 파일처럼 보이지만 실제로는 앱 감독자다. 어떤 설정으로 돌릴지 정하고, 처리 스레드를 붙이고, 최신 프레임만 골라 화면과 render/event 로그에 남긴다.",
         "read_order": [
             "MotionViewer.__init__에서 어떤 설정과 객체를 먼저 묶는지 본다.",
             "start_workers를 읽어 UdpListener, DataProcessor, MultiTargetTracker가 어떻게 연결되는지 본다.",
@@ -29,7 +29,7 @@ FILE_EXPLAINERS = {
             {"title": "3. 하드웨어와 워커를 연결한다", "summary": "configure_dca1000으로 DCA 설정을 적용하고 start_workers에서 UdpListener와 DataProcessor를 띄운다.", "reason": "센서 입력이 들어와도 처리 스레드가 없으면 화면과 로그로 이어지지 않는다.", "handoff": "실시간 FramePacket 스트림"},
             {"title": "4. 최신 프레임만 렌더링한다", "summary": "pull_latest_processed_frame는 큐에 쌓인 processed frame 중 가장 최신 것 하나만 소비하고 중간 프레임은 render 기준으로 건너뛴다.", "reason": "GUI가 늦어져도 화면이 최대한 최신 상태를 유지하게 만들기 위해서다.", "handoff": "렌더 대상 FramePacket과 skipped_render_frames 값"},
             {"title": "5. 화면용 overlay를 다시 계산한다", "summary": "update_detection_overlay에서 detection과 track을 RDI, RAI, 3D view 좌표로 바꿔 scatter와 레이블에 반영한다.", "reason": "알고리즘 결과는 숫자 구조체라서, 사용자가 보려면 좌표 변환과 표시 필터가 한 번 더 필요하다.", "handoff": "화면에 표시되는 detection 점, confirmed/tentative track"},
-            {"title": "6. render 로그와 종료 정리를 맡는다", "summary": "log_render_snapshot으로 실제로 그려진 프레임만 기록하고, shutdown에서 장비와 파일 핸들을 정리한다.", "reason": "사용자 체감 성능과 알고리즘 처리 성능을 분리해서 보기 위해 render 로그가 별도로 필요하다.", "handoff": "render_frames.jsonl, status_log.jsonl, event_log.jsonl"},
+            {"title": "6. render 로그와 종료 리포트를 맡는다", "summary": "log_render_snapshot으로 실제로 그려진 프레임만 기록하고, shutdown에서 SessionLogger를 통해 summary와 HTML 리포트 생성까지 이어진다.", "reason": "사용자 체감 성능과 알고리즘 처리 성능을 분리해서 보기 위해 render 로그가 별도로 필요하고, 세션 종료 후 자동 리포트도 중요해졌다.", "handoff": "render_frames.jsonl, event_log.jsonl, summary.json, ops_report.html"},
         ],
         "blind_spots": [
             "이 파일이 처리한 모든 프레임을 그리는 것은 아니다. 화면은 최신 프레임만 소비하므로 render 로그만 보면 처리 파이프라인 자체를 오해할 수 있다.",
@@ -39,21 +39,22 @@ FILE_EXPLAINERS = {
         ],
     },
     "real_time_process": {
-        "simple_model": "이 파일은 조립 라인이다. UDP 패킷을 받아 한 프레임으로 조립하고, DSP와 detection과 tracking을 거쳐 완성된 FramePacket으로 바꾼다.",
-        "explainer_intro": "입력은 잘게 쪼개진 UDP 패킷이고, 출력은 한 프레임 안에 health와 detection과 track이 모두 들어 있는 FramePacket이다.",
+        "simple_model": "이 파일은 조립 라인이다. UDP 패킷을 받아 한 프레임으로 조립하고, DSP와 detection과 tracking과 stage timing을 거쳐 완성된 FramePacket으로 바꾼다.",
+        "explainer_intro": "입력은 잘게 쪼개진 UDP 패킷이고, 출력은 한 프레임 안에 health와 detection과 track과 stage timing이 모두 들어 있는 FramePacket이다.",
         "explainer_steps": [
             {"title": "1. UDP 패킷을 검사하며 모은다", "summary": "UdpListener는 sequence와 byte count를 확인하며 payload를 모으고, 패킷 누락이나 순서 꼬임을 invalid 정보로 기록한다.", "reason": "레이더 입력이 깨졌는지 모르면 detection이 나빠진 원인이 알고리즘인지 네트워크인지 구분할 수 없다.", "handoff": "health 정보가 붙은 raw FramePacket"},
             {"title": "2. raw IQ를 radar cube로 바꾼다", "summary": "DataProcessor.run은 frame_to_radar_cube로 int16 IQ를 chirp/sample/channel 구조의 cube로 바꾼다.", "reason": "FFT와 detection은 의미 있는 축 구조를 가진 배열이 있어야 계산 가능하다.", "handoff": "radar cube"},
-            {"title": "3. DSP 결과를 만든다", "summary": "Range_Doppler와 Range_Angle을 돌리고, 채널 통합 RDI와 motion RAI를 만든다.", "reason": "detection은 raw IQ가 아니라 에너지 맵 위에서 후보를 찾는다.", "handoff": "RDI, RAI"},
+            {"title": "3. shared FFT 기반 DSP 결과를 만든다", "summary": "shared_range_doppler_fft를 한 번 계산하고, 그 결과를 RDI와 RAI 투영으로 나눠 쓴다.", "reason": "detection은 raw IQ가 아니라 에너지 맵 위에서 후보를 찾고, 중복 FFT를 줄여야 실시간성이 좋아진다.", "handoff": "RDI, RAI, shared FFT timing"},
             {"title": "4. detection과 tracking을 잇는다", "summary": "detect_targets로 후보를 만들고, invalid 정책에 따라 일부 프레임은 tracker 입력을 제한한다.", "reason": "입력이 불량한 프레임에서 새 track을 마구 태우면 추적 품질이 급격히 흔들린다.", "handoff": "tracker 입력 detection list, tracker policy"},
             {"title": "5. tracker를 갱신한다", "summary": "MultiTargetTracker.update를 호출해 confirmed와 tentative tracks를 갱신한다.", "reason": "프레임 단위 detection을 시간축 객체로 이어야 실시간 추적이 된다.", "handoff": "confirmed_tracks, tentative_tracks"},
-            {"title": "6. processed 기준 로그를 남긴다", "summary": "log_processed_frame은 모든 처리 프레임을 JSONL로 남기고, 완성된 FramePacket을 processed queue에 넣는다.", "reason": "GUI가 느려도 알고리즘 자체 성능은 별도로 측정해야 하므로 processed 로그가 필요하다.", "handoff": "processed_frames.jsonl, processed_frame_queue"},
+            {"title": "6. processed 기준 로그와 stage timing을 남긴다", "summary": "log_processed_frame은 모든 처리 프레임을 JSONL로 남기고, 완성된 FramePacket과 stage_timings_ms를 processed queue에 넣는다.", "reason": "GUI가 느려도 알고리즘 자체 성능과 병목 위치는 별도로 측정해야 하므로 processed 로그가 필요하다.", "handoff": "processed_frames.jsonl, processed_frame_queue, stage_timings_ms"},
         ],
         "blind_spots": [
             "FramePacket은 단순 데이터 덩어리가 아니라, 한 프레임의 입력 무결성과 알고리즘 결과를 같이 들고 다니는 계약이다.",
             "invalid 프레임이라고 해서 항상 드롭하는 것은 아니다. 정책에 따라 no_birth 또는 full 처리로 갈린다.",
             "processed queue는 최신 것 위주로 유지되도록 설계되어 있어, UI는 중간 프레임을 모두 보지 못할 수 있다.",
             "이 파일 로그는 모든 처리 프레임 기준이고, 화면 로그는 별도다.",
+            "이제는 capture_to_process_ms 하나만이 아니라 stage_timings_ms로 병목 위치까지 함께 봐야 한다.",
         ],
     },
     "radar_runtime": {
@@ -147,7 +148,7 @@ FILE_EXPLAINERS = {
     },
     "runtime_settings": {
         "summary": "프로젝트 전반에서 공통으로 쓰는 설정을 static, runtime, tuning 세 층으로 나눠 로드하고 병합하는 설정 계층이다.",
-        "mentor": "이 파일은 단순 JSON 로더가 아니라 설정 체계 설계 파일이다. 무엇을 거의 안 바꾸는지, 무엇을 세션마다 바꾸는지, 무엇을 튜닝하는지 경계를 만든다.",
+        "mentor": "이 파일은 단순 JSON 로더가 아니라 설정 체계 설계 파일이다. 무엇을 거의 안 바꾸는지, 무엇을 세션마다 바꾸는지, 무엇을 튜닝하는지, 어떤 logging 토글을 켤지를 함께 결정한다.",
         "before": "live_motion_static_settings.json / live_motion_runtime_settings.json / live_motion_tuning.json",
         "after": "live_motion_viewer.py, radar_runtime.py, real_time_process.py",
         "inputs": "세 개의 설정 JSON과 코드 기본값",
@@ -177,7 +178,7 @@ FILE_EXPLAINERS = {
         "explainer_steps": [
             {"title": "1. 코드 기본값을 층별로 정의한다", "summary": "static, runtime, tuning 기본값 dict를 따로 두고 build_default_settings에서 합친다.", "reason": "설정 파일이 빠져도 앱이 죽지 않게 하면서, 각 값의 역할을 코드에서 분리해 보여 주기 위해서다.", "handoff": "기본 settings dict"},
             {"title": "2. static 설정을 읽는다", "summary": "네트워크, DCA, 공간 뷰처럼 거의 안 바꾸는 값을 먼저 읽는다.", "reason": "하드웨어와 머신 성격 값은 튜닝 실험과 분리되어야 실수로 자주 건드리지 않게 된다.", "handoff": "static layer가 반영된 settings"},
-            {"title": "3. runtime 설정을 읽는다", "summary": "cfg 경로, CLI 포트, logging 메타데이터 같은 세션 실행값을 덮어쓴다.", "reason": "같은 머신에서도 세션마다 포트와 실험 태그는 바뀔 수 있기 때문이다.", "handoff": "runtime layer가 반영된 settings"},
+            {"title": "3. runtime 설정을 읽는다", "summary": "cfg 경로, CLI 포트, logging 메타데이터, payload/snapshot/stage timing 토글 같은 세션 실행값을 덮어쓴다.", "reason": "같은 머신에서도 세션마다 포트와 실험 태그와 logging 수준은 바뀔 수 있기 때문이다.", "handoff": "runtime layer가 반영된 settings"},
             {"title": "4. tuning 설정을 마지막에 덮어쓴다", "summary": "ROI, detection, tracking, pipeline 같은 최적화용 값을 tuning_path 기준으로 읽는다.", "reason": "실험할 때 가장 자주 바꾸는 값은 마지막 레이어에 두는 편이 이해하기 쉽고 안전하다.", "handoff": "최종 merged settings"},
             {"title": "5. snapshot과 절대 경로를 만든다", "summary": "static, runtime, tuning snapshot과 cfg 절대 경로를 만들어 앱과 세션 로그가 그대로 재사용하게 한다.", "reason": "나중에 어떤 설정으로 돌렸는지 회고할 수 있어야 실험 관리가 된다.", "handoff": "SETTINGS['static'], SETTINGS['runtime'], SETTINGS['tuning']"},
         ],
@@ -205,18 +206,18 @@ FILE_EXPLAINERS = {
         ],
     },
     "DSP": {
-        "simple_model": "이 파일은 기초 FFT 엔진이다. radar cube를 range-doppler와 range-angle 맵으로 바꿔 후단 검출이 쓸 수 있는 스펙트럼을 만든다.",
-        "explainer_intro": "현재 프로젝트의 기본 angle estimator는 FFT 기반이므로, 이 파일에서 나오는 맵 품질이 detection 품질의 바닥을 결정한다.",
+        "simple_model": "이 파일은 기초 FFT 엔진이다. radar cube를 공통 range-doppler FFT로 바꾼 뒤 RDI와 RAI로 갈라서 후단 검출이 쓸 스펙트럼을 만든다.",
+        "explainer_intro": "현재 프로젝트의 기본 angle estimator는 FFT 기반이므로, 이 파일에서 나오는 맵 품질과 FFT 비용이 detection 품질과 latency의 바닥을 결정한다.",
         "explainer_steps": [
-            {"title": "1. 입력 cube에 window를 건다", "summary": "Range_Doppler와 Range_Angle 모두 Hanning window를 chirp와 sample 축에 곱한다.", "reason": "FFT leakage를 줄여 peak가 더 날카롭게 보이게 하려는 기본 전처리다.", "handoff": "windowed radar cube"},
-            {"title": "2. range-doppler 2D FFT를 수행한다", "summary": "Range_Doppler는 chirp와 sample 축 2D FFT를 수행하고 mode에 따라 raw 또는 abs/shifted 출력을 만든다.", "reason": "움직임과 거리 정보는 먼저 range-doppler 평면에서 분리하는 것이 기본이다.", "handoff": "RDI cube"},
-            {"title": "3. angle FFT를 추가로 수행한다", "summary": "Range_Angle은 앞선 2D FFT 결과에 안테나 축 FFT를 적용해 angle 성분을 만든다.", "reason": "같은 거리와 속도에 있는 대상들을 각도 차이로 나누기 위해서다.", "handoff": "RAI cube"},
-            {"title": "4. 후단이 보기 쉬운 형태로 바꾼다", "summary": "mode=1이나 mode=2에서는 abs와 fftshift와 flip을 적용해 시각화와 detection에 편한 형태로 바꾼다.", "reason": "후단이 복소수 raw 스펙트럼을 직접 다루지 않고, 정렬된 magnitude 맵을 쓰기 때문이다.", "handoff": "시각화와 검출용 RDI, RAI magnitude map"},
+            {"title": "1. window를 캐시하고 broadcasting으로 곱한다", "summary": "_cached_range_doppler_window가 Hann window를 재사용하고, shared_range_doppler_fft가 채널 전체에 broadcasting으로 적용한다.", "reason": "프레임마다 같은 window를 다시 만들지 않아야 CPU 낭비가 줄어든다.", "handoff": "windowed radar cube"},
+            {"title": "2. 공통 range-doppler FFT를 한 번 계산한다", "summary": "shared_range_doppler_fft는 chirp와 sample 축 2D FFT를 한 번만 수행한다.", "reason": "움직임과 거리 정보는 먼저 range-doppler 평면에서 분리하고, 이 결과를 RDI와 RAI가 공유하도록 만드는 것이 현재 최적화 포인트다.", "handoff": "shared FFT cube"},
+            {"title": "3. RDI와 RAI 투영으로 나눈다", "summary": "range_doppler_from_fft는 공통 FFT를 RDI로, range_angle_from_fft는 같은 FFT를 angle 축 변환으로 RAI로 바꾼다.", "reason": "예전처럼 큰 FFT를 두 번 반복하지 않고 후단 map만 갈라서 쓰기 위해서다.", "handoff": "RDI cube, RAI cube"},
+            {"title": "4. wrapper로 기존 호출 호환성을 유지한다", "summary": "Range_Doppler와 Range_Angle은 내부적으로 shared path를 쓰면서도 기존 호출부 인터페이스는 유지한다.", "reason": "호출부를 전부 깨지 않으면서 최적화를 단계적으로 넣기 위해서다.", "handoff": "호환 가능한 RDI/RAI API"},
         ],
         "blind_spots": [
             "이 파일은 고급 beamforming이 아니라 baseline FFT angle estimator다.",
             "mode에 따라 반환 shape와 타입이 달라지므로, 호출부가 어떤 모드를 기대하는지 항상 같이 봐야 한다.",
-            "windowing이 입력 배열을 in-place로 바꾸기 때문에 copy를 넘기는 호출부 설계가 중요하다.",
+            "지금 핵심은 FFT를 한 번만 계산하는 shared path이며, wrapper 이름이 남아 있다고 해서 예전처럼 매번 중복 FFT를 하는 것은 아니다.",
             "축 순서와 transpose와 flip을 놓치면 화면은 그럴듯해 보여도 좌표 해석이 틀릴 수 있다.",
         ],
     },
@@ -258,21 +259,22 @@ FILE_EXPLAINERS = {
             {"title": "1. 세션 경로와 JSONL을 읽는다", "summary": "_resolve_session_dir, _load_json, _load_jsonl이 세션 폴더와 로그 파일을 안전하게 읽는다.", "reason": "옛 세션이나 일부 로그가 없는 세션도 최대한 읽혀야 실험 기록을 잃지 않는다.", "handoff": "processed_records, render_records, session_meta"},
             {"title": "2. 숫자 집계 함수를 준비한다", "summary": "_quantile, _safe_rate, _summarize_numeric가 mean과 p50과 p95와 rate 계산을 맡는다.", "reason": "세션마다 같은 스키마로 통계를 만들어야 before와 after 비교가 안정적이다.", "handoff": "재사용 가능한 통계 dict"},
             {"title": "3. processed와 render를 분리 집계한다", "summary": "build_summary는 processed_frames와 render_frames를 따로 세어 latency와 track count를 각각 계산한다.", "reason": "알고리즘 처리 성능과 사용자 체감 렌더 성능을 같은 값으로 섞으면 원인 분석이 어려워진다.", "handoff": "processed summary, render summary"},
-            {"title": "4. 다중 타깃 성공률을 계산한다", "summary": "candidate가 2개 이상인 프레임에서 confirmed 또는 display track이 2개 이상인지 따로 센다.", "reason": "이 프로젝트의 핵심 문제 중 하나가 multi-target 분리이기 때문이다.", "handoff": "multi-target success metrics"},
-            {"title": "5. summary.json으로 저장한다", "summary": "main은 최종 summary dict를 파일로 써서 다음 비교 단계에 넘긴다.", "reason": "실험 비교는 raw JSONL이 아니라 요약 스키마 기준으로 굴리는 편이 안정적이다.", "handoff": "summary.json"},
+            {"title": "4. stage timing과 환경 정보를 합친다", "summary": "_summarize_stage_timings와 _build_system_summary가 slow stage와 system snapshot을 summary 안에 넣는다.", "reason": "같은 코드인데 성능이 흔들릴 때 stage 병목과 환경 요인을 함께 봐야 정확하다.", "handoff": "diagnostics, system summary"},
+            {"title": "5. 운영 점수까지 만든다", "summary": "operational_assessment가 latency, integrity, visibility, readiness를 종합해 점수와 권고를 만든다.", "reason": "현업에서는 평균 latency 하나보다 운영 수준 평가가 더 설명력이 크다.", "handoff": "assessment"},
+            {"title": "6. summary.json으로 저장한다", "summary": "main은 최종 summary dict를 파일로 써서 다음 비교 단계와 HTML 리포트 단계에 넘긴다.", "reason": "실험 비교는 raw JSONL이 아니라 요약 스키마 기준으로 굴리는 편이 안정적이다.", "handoff": "summary.json"},
         ],
         "blind_spots": [
             "render 로그가 없으면 legacy status_log.jsonl을 fallback으로 읽는다.",
             "이 파일이 계산하는 success rate는 label 없는 운영 지표이지 정답 기반 accuracy 지표는 아니다.",
             "processed와 render를 분리해 보는 것이 이 파일의 가장 중요한 가치다.",
-            "summary schema가 바뀌면 session_compare와 장기 추세 분석도 함께 손봐야 한다.",
+            "summary schema가 바뀌면 session_compare와 HTML 리포트도 함께 손봐야 한다.",
         ],
     },
     "session_compare": {
         "simple_model": "이 파일은 A/B 판정기다. 두 summary.json을 읽어 무엇이 좋아졌고 무엇이 나빠졌는지 방향까지 붙여 준다.",
         "explainer_intro": "실험이 많아질수록 숫자만 나열하는 것보다, 어떤 지표는 낮을수록 좋고 어떤 지표는 높을수록 좋은지 자동으로 판정해 주는 도구가 필요하다.",
         "explainer_steps": [
-            {"title": "1. 비교할 지표 목록을 정의한다", "summary": "METRICS는 어떤 key를 비교할지와 lower 또는 higher 방향을 미리 정해 둔다.", "reason": "같은 delta라도 latency와 success rate는 해석 방향이 반대이기 때문이다.", "handoff": "비교 대상 metric spec"},
+            {"title": "1. 비교할 지표 목록을 정의한다", "summary": "METRICS는 어떤 key를 비교할지와 lower 또는 higher 방향을 미리 정해 둔다. 최근에는 operational score도 이 목록에 포함된다.", "reason": "같은 delta라도 latency와 success rate는 해석 방향이 반대이고, 운영 점수 변화도 함께 봐야 하기 때문이다.", "handoff": "비교 대상 metric spec"},
             {"title": "2. before와 after summary를 읽는다", "summary": "_load_summary가 디렉터리 또는 summary.json 입력을 받아 실제 JSON을 로드한다.", "reason": "CLI 사용성을 높이고 자동화 스크립트에서 재사용하기 쉽게 하기 위해서다.", "handoff": "before_summary, after_summary"},
             {"title": "3. 값과 변화량을 계산한다", "summary": "_nested_get, _percent_change, _judgement가 값 추출, delta, 개선과 회귀 판정을 수행한다.", "reason": "요약 스키마가 중첩 dict 구조라 dotted key 접근과 방향 해석이 필요하다.", "handoff": "metric별 comparison row"},
             {"title": "4. 비교 결과를 저장하고 출력한다", "summary": "build_comparison과 main이 comparison json을 쓰고 콘솔에 핵심 결과를 표시한다.", "reason": "사람이 바로 확인하는 용도와 후속 자동화가 읽는 용도를 동시에 만족해야 한다.", "handoff": "comparison_vs_*.json"},

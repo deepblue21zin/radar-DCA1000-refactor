@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>재실험 계획서</title>
+  <style>
+    :root {
+      --bg: #f3f6f8;
+      --panel: rgba(255,255,255,0.96);
+      --ink: #182530;
+      --muted: #617585;
+      --line: #d6e0e8;
+      --brand: #176a78;
+      --navy: #1f466d;
+      --orange: #f08a35;
+      --good: #1b7c50;
+      --warn: #b87410;
+      --danger: #c34739;
+      --shadow: 0 20px 46px rgba(18, 32, 43, 0.1);
+      --sans: "Pretendard Variable", "IBM Plex Sans KR", "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: var(--sans);
+      background:
+        radial-gradient(circle at top right, rgba(23, 106, 120, 0.14), transparent 24%),
+        linear-gradient(180deg, #eef4f7 0%, #fafcfd 28%, #eef2f5 100%);
+    }
+    a { color: inherit; }
+    code, pre { font-family: var(--mono); }
+    code {
+      background: rgba(31, 70, 109, 0.08);
+      padding: 2px 6px;
+      border-radius: 8px;
+    }
+    .wrap {
+      width: min(1180px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 28px 0 56px;
+    }
+    .hero, .section {
+      background: var(--panel);
+      border: 1px solid rgba(24, 37, 48, 0.06);
+      border-radius: 28px;
+      box-shadow: var(--shadow);
+    }
+    .hero {
+      padding: 32px;
+      color: #f8fbfc;
+      background: linear-gradient(135deg, rgba(31, 70, 109, 0.97), rgba(23, 106, 120, 0.96));
+    }
+    .eyebrow {
+      display: inline-block;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.12);
+      margin-bottom: 16px;
+      font-size: 13px;
+    }
+    h1 {
+      margin: 0 0 14px;
+      font-size: clamp(34px, 4vw, 50px);
+      letter-spacing: -0.04em;
+      line-height: 1.04;
+    }
+    .hero p {
+      margin: 0;
+      max-width: 860px;
+      line-height: 1.72;
+      color: rgba(248,251,252,0.92);
+    }
+    .nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
+    .nav a {
+      text-decoration: none;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.16);
+      background: rgba(255,255,255,0.14);
+      color: #fff;
+    }
+    .section {
+      margin-top: 22px;
+      padding: 26px;
+    }
+    h2 {
+      margin: 0 0 10px;
+      font-size: 28px;
+      letter-spacing: -0.03em;
+    }
+    p, li, td, th {
+      color: var(--muted);
+      line-height: 1.74;
+      font-size: 15px;
+    }
+    .intro { margin: 0 0 18px; }
+    .grid2, .grid3, .grid4 {
+      display: grid;
+      gap: 16px;
+    }
+    .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .card, .metric {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      padding: 18px;
+    }
+    .metric span {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .metric strong {
+      display: block;
+      font-size: 28px;
+      letter-spacing: -0.04em;
+      color: var(--ink);
+    }
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+    .badge {
+      padding: 8px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .badge.good { background: rgba(27, 124, 80, 0.1); color: var(--good); }
+    .badge.warn { background: rgba(184, 116, 16, 0.12); color: var(--warn); }
+    .badge.danger { background: rgba(195, 71, 57, 0.1); color: var(--danger); }
+    .badge.brand { background: rgba(31, 70, 109, 0.08); color: var(--navy); }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      overflow: hidden;
+      background: #fff;
+    }
+    th, td {
+      padding: 14px 16px;
+      text-align: left;
+      vertical-align: top;
+      border-bottom: 1px solid var(--line);
+    }
+    th {
+      background: #f8fafc;
+      color: var(--ink);
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    tr:last-child td { border-bottom: 0; }
+    pre {
+      margin: 0;
+      padding: 16px;
+      border-radius: 18px;
+      overflow-x: auto;
+      background: #12202a;
+      color: #e8f0f5;
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .steps {
+      display: grid;
+      gap: 14px;
+    }
+    .step {
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: #fff;
+      padding: 18px;
+    }
+    .step strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 18px;
+      color: var(--ink);
+    }
+    @media (max-width: 900px) {
+      .grid2, .grid3, .grid4 { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <div class="eyebrow">재실험 계획서</div>
+      <h1>logging, power mode, network 상태를 분리해서 다시 측정하는 방법</h1>
+      <p>
+        지금 필요한 것은 "체감상 좀 느린 것 같다"를 넘어서,
+        어떤 조건이 실제 성능 회귀를 만드는지 분리해서 보는 것이다.
+        이 문서는 <code>logging on/off</code>, <code>high-performance mode</code>,
+        <code>network check</code>를 축으로 다시 실험하는 계획서다.
+      </p>
+      <div class="nav">
+        <a href="./index.html">문제 명세서</a>
+        <a href="./environment_checklist.html">환경 체크리스트</a>
+        <a href="../log_guides/processed_frames_guide.html">processed 가이드</a>
+        <a href="../project_analysis/index.html">프로젝트 분석</a>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>실험 목표</h2>
+      <div class="grid4">
+        <article class="metric">
+          <span>Goal 1</span>
+          <strong>로그 영향 분리</strong>
+          full logging과 minimal logging의 차이를 본다.
+        </article>
+        <article class="metric">
+          <span>Goal 2</span>
+          <strong>전원 모드 분리</strong>
+          균형 조정과 고성능 모드 차이를 본다.
+        </article>
+        <article class="metric">
+          <span>Goal 3</span>
+          <strong>네트워크 영향 분리</strong>
+          host IP, NIC 상태, 케이블 상태가 invalid에 미치는 영향을 본다.
+        </article>
+        <article class="metric">
+          <span>Goal 4</span>
+          <strong>재현성 확보</strong>
+          같은 조건에서 3회 반복해 흔들림 자체를 측정한다.
+        </article>
+      </div>
+      <div class="badge-row">
+        <span class="badge danger">한 번만 재면 우연일 수 있음</span>
+        <span class="badge warn">같은 장면, 같은 시간, 같은 설정 유지</span>
+        <span class="badge brand">이름 규칙을 통일해서 비교 가능하게 만들기</span>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>실험 전 공통 고정 조건</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>항목</th>
+            <th>고정 방법</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>레이더 설정</td>
+            <td><code>config/profile_3d.cfg</code>, tuning JSON, static/runtime settings를 그대로 유지한다.</td>
+          </tr>
+          <tr>
+            <td>장면</td>
+            <td>같은 실험 위치, 같은 타깃 수, 같은 거리 범위를 유지한다.</td>
+          </tr>
+          <tr>
+            <td>측정 시간</td>
+            <td>세션당 최소 30초 이상, 가능하면 45초 내외로 맞춘다.</td>
+          </tr>
+          <tr>
+            <td>실행 순서</td>
+            <td>매 조건을 3회 반복하고, 조건 순서는 <strong>baseline → minimal logging → high performance → network checked</strong>로 맞춘다.</td>
+          </tr>
+          <tr>
+            <td>백그라운드 앱</td>
+            <td>브라우저, 동영상, 불필요한 IDE 작업, 백신 검사 등은 정리한다.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>runtime logging 설정 예시</h2>
+      <p class="intro">
+        이번 코드 변경으로 <code>config/live_motion_runtime_settings.json</code>에서 로그 수준을 조절할 수 있다.
+        가장 많이 쓸 값은 아래 두 가지다.
+      </p>
+      <div class="grid2">
+        <article class="card">
+          <h3>1. Full Logging</h3>
+          <pre><code>{
+  "logging": {
+    "enabled": true,
+    "write_processed_frames": true,
+    "write_render_frames": true,
+    "write_status_log": true,
+    "write_event_log": true,
+    "include_payloads": true,
+    "capture_system_snapshot": true,
+    "capture_stage_timing": true
+  }
+}</code></pre>
+          <p>모든 분석용 데이터를 남긴다. 점수와 리포트를 가장 풍부하게 볼 수 있다.</p>
+        </article>
+        <article class="card">
+          <h3>2. Minimal Logging</h3>
+          <pre><code>{
+  "logging": {
+    "enabled": true,
+    "write_processed_frames": true,
+    "write_render_frames": true,
+    "write_status_log": false,
+    "write_event_log": true,
+    "include_payloads": false,
+    "capture_system_snapshot": true,
+    "capture_stage_timing": true
+  }
+}</code></pre>
+          <p>payload 배열은 줄이고 stage timing과 system snapshot은 남긴다. "로그 영향"을 볼 때 가장 유용하다.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>실험 매트릭스</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>실험명</th>
+            <th>전원 모드</th>
+            <th>네트워크 확인</th>
+            <th>로그 설정</th>
+            <th>목적</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Baseline</td>
+            <td>현재 상태</td>
+            <td>기본 확인만</td>
+            <td>Full logging</td>
+            <td>비교 기준 세션 확보</td>
+          </tr>
+          <tr>
+            <td>Logging-Min</td>
+            <td>현재 상태</td>
+            <td>기본 확인만</td>
+            <td>Minimal logging</td>
+            <td>payload logging이 p95에 주는 영향 분리</td>
+          </tr>
+          <tr>
+            <td>Power-High</td>
+            <td>High performance</td>
+            <td>기본 확인만</td>
+            <td>Full logging</td>
+            <td>전원 모드가 지연과 점수에 주는 영향 분리</td>
+          </tr>
+          <tr>
+            <td>Power-High-Net-Checked</td>
+            <td>High performance</td>
+            <td>host IP / NIC / 케이블 / 방화벽 모두 점검</td>
+            <td>Minimal logging</td>
+            <td>운영에 가장 가까운 안정 조건에서 최고 성능 확인</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>세션 이름 규칙</h2>
+      <p class="intro">
+        나중에 로그를 비교하기 쉽게, 세션 이름과 메모를 반드시 통일한다.
+      </p>
+      <div class="grid3">
+        <article class="card">
+          <h3><code>variant</code></h3>
+          <p><code>baseline</code>, <code>logging-min</code>, <code>power-high</code>, <code>power-high-net-checked</code>처럼 조건 이름을 적는다.</p>
+        </article>
+        <article class="card">
+          <h3><code>scenario_id</code></h3>
+          <p><code>roomA-run1</code>, <code>roomA-run2</code>처럼 반복 번호를 넣는다.</p>
+        </article>
+        <article class="card">
+          <h3><code>notes</code></h3>
+          <p><code>same target placement</code>, <code>new cable</code>처럼 조건 차이를 짧게 적는다.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>실행 절차</h2>
+      <div class="steps">
+        <article class="step">
+          <strong>1. 환경 체크리스트 먼저 수행</strong>
+          <p><code>environment_checklist.html</code> 문서를 보고 전원 모드, host IP, NIC, 케이블, 방화벽, Python 환경을 먼저 확인한다.</p>
+        </article>
+        <article class="step">
+          <strong>2. logging 설정을 바꾼다</strong>
+          <p><code>config/live_motion_runtime_settings.json</code>의 <code>logging</code> 블록을 해당 실험 조건에 맞게 바꾼다.</p>
+        </article>
+        <article class="step">
+          <strong>3. 같은 장면에서 최소 30초 세션을 3회 반복한다</strong>
+          <p>한 번만 재면 운이 들어가므로 <strong>반드시 3회 반복</strong>한다.</p>
+        </article>
+        <article class="step">
+          <strong>4. 각 세션의 점수와 stage timing을 기록한다</strong>
+          <p><code>ops_report.html</code>에서 operational score, slowest stage, power plan, host IP match를 확인한다.</p>
+        </article>
+        <article class="step">
+          <strong>5. 비교는 평균뿐 아니라 p95와 invalid rate까지 본다</strong>
+          <p>현업에서는 평균값보다 <strong>지연 꼬리</strong>와 <strong>무결성</strong>이 더 중요하다.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>반드시 비교할 지표</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>지표</th>
+            <th>왜 보나</th>
+            <th>좋은 방향</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Operational Score</td>
+            <td>현업 관점의 종합 상태를 빠르게 비교하기 쉽다.</td>
+            <td>높을수록 좋다.</td>
+          </tr>
+          <tr>
+            <td>Processed P95</td>
+            <td>처리 파이프라인 병목 개선 여부를 직접 본다.</td>
+            <td>낮을수록 좋다.</td>
+          </tr>
+          <tr>
+            <td>Render P95</td>
+            <td>사용자 체감 지연이 실제로 줄었는지 본다.</td>
+            <td>낮을수록 좋다.</td>
+          </tr>
+          <tr>
+            <td>Render Invalid Rate</td>
+            <td>NIC / 케이블 / UDP 품질 문제가 줄었는지 본다.</td>
+            <td>낮을수록 좋다.</td>
+          </tr>
+          <tr>
+            <td>Slowest Stage P95</td>
+            <td>정확히 어느 단계가 병목인지 본다.</td>
+            <td>낮아져야 한다.</td>
+          </tr>
+          <tr>
+            <td>Power Plan / Host IP Match</td>
+            <td>환경이 정말 의도한 상태였는지 증거를 남긴다.</td>
+            <td>권장 상태여야 한다.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>판정 기준 예시</h2>
+      <div class="grid2">
+        <article class="card">
+          <h3>좋은 개선</h3>
+          <ul>
+            <li><code>render p95</code>가 15ms 이상 내려감</li>
+            <li><code>processed p95</code>가 10ms 이상 내려감</li>
+            <li><code>render invalid rate</code>가 유지되거나 감소</li>
+            <li>가장 느린 stage의 <code>p95</code>가 함께 감소</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>주의할 개선</h3>
+          <ul>
+            <li>평균은 좋아졌는데 <code>p95</code>는 비슷함</li>
+            <li>점수는 올랐는데 invalid rate가 나빠짐</li>
+            <li>logging을 줄여 빨라졌지만 power/network 조건이 달라 비교가 공정하지 않음</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>실험 기록 템플릿</h2>
+      <pre><code>| Variant | Run | Score | Processed P95 | Render P95 | Invalid Rate | Slowest Stage | Stage P95 | Power Plan | Host IP Match | Notes |
+|---------|-----|-------|---------------|------------|--------------|---------------|-----------|------------|---------------|-------|
+| baseline | 1 | 59 | 203.4 ms | 236.4 ms | 1.73% | range_angle_ms | 88.1 ms | Balanced | match | current state |
+| logging-min | 1 | ... | ... | ... | ... | ... | ... | Balanced | match | payload off |
+| power-high | 1 | ... | ... | ... | ... | ... | ... | High performance | match | power mode changed |
+| power-high-net-checked | 1 | ... | ... | ... | ... | ... | ... | High performance | match | cable rechecked |</code></pre>
+      <p class="intro">
+        핵심은 <strong>같은 장면, 같은 설정, 3회 반복</strong>이다.
+        이 조건만 지켜도 "로그 때문인지", "전원 모드 때문인지", "네트워크 상태 때문인지"를 훨씬 자신 있게 말할 수 있다.
+      </p>
+    </section>
+  </main>
+</body>
+</html>

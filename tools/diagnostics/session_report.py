@@ -6,6 +6,8 @@ import json
 import math
 from pathlib import Path
 
+from .operational_assessment import build_event_summary, build_operational_assessment
+
 
 def _load_json(path: Path, default):
     if not path.exists():
@@ -100,18 +102,150 @@ def _extract_count(record, explicit_key: str, list_key: str):
     return 0
 
 
+def _invalid_reason_counts(records):
+    counts = {}
+    for record in records:
+        reason = str(record.get("invalid_reason") or "").strip()
+        if not reason:
+            continue
+        counts[reason] = counts.get(reason, 0) + 1
+    return counts
+
+
+def _summarize_stage_timings(records, digits=3):
+    timing_buckets = {}
+    frame_count_with_timings = 0
+    for record in records:
+        stage_timings = record.get("stage_timings_ms")
+        if not isinstance(stage_timings, dict) or not stage_timings:
+            continue
+        frame_count_with_timings += 1
+        for stage_name, raw_value in stage_timings.items():
+            if raw_value is None:
+                continue
+            timing_buckets.setdefault(stage_name, []).append(float(raw_value))
+
+    timing_summary = {
+        stage_name: _summarize_numeric(values, digits=digits)
+        for stage_name, values in sorted(timing_buckets.items())
+    }
+    slowest_stage = None
+    slowest_score = None
+    for stage_name, stats in timing_summary.items():
+        candidate_score = stats.get("p95")
+        if candidate_score is None:
+            candidate_score = stats.get("mean")
+        if candidate_score is None:
+            continue
+        if slowest_score is None or candidate_score > slowest_score:
+            slowest_score = candidate_score
+            slowest_stage = {
+                "name": stage_name,
+                "p95_ms": stats.get("p95"),
+                "mean_ms": stats.get("mean"),
+            }
+
+    return {
+        "frame_count_with_timings": frame_count_with_timings,
+        "timings": timing_summary,
+        "slowest_stage": slowest_stage,
+    }
+
+
+def _preferred_stage_timing_summary(processed_summary, render_summary):
+    def summary_score(stage_summary):
+        if not isinstance(stage_summary, dict):
+            return -1
+        timings = stage_summary.get("timings") or {}
+        return (len(timings), int(stage_summary.get("frame_count_with_timings") or 0))
+
+    render_score = summary_score(render_summary)
+    processed_score = summary_score(processed_summary)
+    if render_score >= processed_score:
+        selected = dict(render_summary or {})
+        selected["source"] = "render"
+        return selected
+
+    selected = dict(processed_summary or {})
+    selected["source"] = "processed"
+    return selected
+
+
+def _build_system_summary(session_dir: Path, runtime_config: dict, system_snapshot: dict):
+    static_snapshot = runtime_config.get("static_snapshot") or {}
+    network_config = static_snapshot.get("network") or {}
+    expected_host_ip = network_config.get("host_ip")
+
+    if not system_snapshot:
+        return {
+            "snapshot_present": False,
+            "snapshot_path": str(session_dir / "system_snapshot.json"),
+            "expected_host_ip": expected_host_ip,
+            "host_ip_present": None,
+            "ipv4_addresses": [],
+            "power_plan_name": None,
+            "power_plan_recommended": None,
+            "process_priority_class": None,
+            "enabled_firewall_profiles": [],
+            "up_adapter_count": 0,
+        }
+
+    power = system_snapshot.get("power") or {}
+    network = system_snapshot.get("network") or {}
+    process = system_snapshot.get("process") or {}
+    adapters = network.get("adapters") or []
+    firewall_profiles = network.get("firewall_profiles") or []
+    up_adapter_count = sum(
+        1
+        for adapter in adapters
+        if str((adapter or {}).get("Status") or "").strip().lower() == "up"
+    )
+    enabled_firewall_profiles = [
+        profile.get("Name")
+        for profile in firewall_profiles
+        if profile.get("Enabled") is True
+    ]
+    ipv4_addresses = [str(address) for address in (network.get("ipv4_addresses") or []) if address]
+    host_ip_present = network.get("host_ip_present")
+    if host_ip_present is None and expected_host_ip:
+        host_ip_present = expected_host_ip in ipv4_addresses
+
+    return {
+        "snapshot_present": True,
+        "snapshot_path": str(session_dir / "system_snapshot.json"),
+        "captured_at": system_snapshot.get("captured_at"),
+        "expected_host_ip": expected_host_ip,
+        "host_ip_present": host_ip_present,
+        "ipv4_addresses": ipv4_addresses,
+        "power_plan_name": power.get("active_scheme_name"),
+        "power_plan_guid": power.get("active_scheme_guid"),
+        "power_plan_recommended": power.get("recommended_for_benchmarking"),
+        "process_priority_class": process.get("priority_class"),
+        "process_priority_class_code": process.get("priority_class_code"),
+        "enabled_firewall_profiles": enabled_firewall_profiles,
+        "up_adapter_count": up_adapter_count,
+        "adapter_count": len(adapters),
+        "numpy_version": (system_snapshot.get("python") or {}).get("numpy_version"),
+        "thread_env": system_snapshot.get("env") or {},
+    }
+
+
 def build_summary(session_dir: Path):
     processed_path = session_dir / "processed_frames.jsonl"
     render_path = session_dir / "render_frames.jsonl"
     legacy_render_path = session_dir / "status_log.jsonl"
+    event_log_path = session_dir / "event_log.jsonl"
+    system_snapshot_path = session_dir / "system_snapshot.json"
 
     processed_records = _load_jsonl(processed_path)
     render_records = _load_jsonl(render_path)
     if not render_records and legacy_render_path.exists():
         render_records = _load_jsonl(legacy_render_path)
+    events = _load_jsonl(event_log_path)
 
     session_meta = _load_json(session_dir / "session_meta.json", {})
     runtime_config = _load_json(session_dir / "runtime_config.json", {})
+    system_snapshot = _load_json(system_snapshot_path, {})
 
     processed_frame_count = len(processed_records)
     render_frame_count = len(render_records)
@@ -164,8 +298,15 @@ def build_summary(session_dir: Path):
         if _extract_count(record, "display_track_count", "display_tracks") >= 2
     )
 
+    processed_stage_timings = _summarize_stage_timings(processed_records, digits=3)
+    render_stage_timings = _summarize_stage_timings(render_records, digits=3)
+    preferred_stage_timings = _preferred_stage_timing_summary(
+        processed_stage_timings,
+        render_stage_timings,
+    )
+
     summary = {
-        "schema_version": 1,
+        "schema_version": 3,
         "summary_generated_at": datetime.now().isoformat(timespec="seconds"),
         "session_dir": str(session_dir),
         "session_id": session_meta.get("session_id", session_dir.name),
@@ -177,6 +318,7 @@ def build_summary(session_dir: Path):
             "render_frames": render_path.exists(),
             "event_log": (session_dir / "event_log.jsonl").exists(),
             "legacy_status_log": legacy_render_path.exists(),
+            "system_snapshot": system_snapshot_path.exists(),
         },
         "processed": {
             "frame_count": processed_frame_count,
@@ -184,9 +326,19 @@ def build_summary(session_dir: Path):
             "last_frame_id": None if not processed_records else int(processed_records[-1].get("frame_id", 0)),
             "invalid_count": processed_invalid_count,
             "invalid_rate": _round_or_none(_safe_rate(processed_invalid_count, processed_frame_count)),
+            "invalid_reason_counts": _invalid_reason_counts(processed_records),
             "birth_block_count": processed_birth_block_count,
             "birth_block_rate": _round_or_none(
                 _safe_rate(processed_birth_block_count, processed_frame_count)
+            ),
+            "max_udp_gap_count": max((int(record.get("udp_gap_count", 0)) for record in processed_records), default=0),
+            "max_out_of_sequence_count": max(
+                (int(record.get("out_of_sequence_count", 0)) for record in processed_records),
+                default=0,
+            ),
+            "max_byte_mismatch_count": max(
+                (int(record.get("byte_mismatch_count", 0)) for record in processed_records),
+                default=0,
             ),
             "capture_to_process_ms": _summarize_numeric(
                 [record.get("capture_to_process_ms") for record in processed_records],
@@ -200,6 +352,7 @@ def build_summary(session_dir: Path):
             "multi_confirmed_success_rate": _round_or_none(
                 _safe_rate(processed_multi_confirmed_success, len(processed_multi_candidate_frames))
             ),
+            "stage_timings_ms": processed_stage_timings,
         },
         "render": {
             "frame_count": render_frame_count,
@@ -207,6 +360,16 @@ def build_summary(session_dir: Path):
             "last_frame_id": None if not render_records else int(render_records[-1].get("frame_id", 0)),
             "invalid_count": render_invalid_count,
             "invalid_rate": _round_or_none(_safe_rate(render_invalid_count, render_frame_count)),
+            "invalid_reason_counts": _invalid_reason_counts(render_records),
+            "max_udp_gap_count": max((int(record.get("udp_gap_count", 0)) for record in render_records), default=0),
+            "max_out_of_sequence_count": max(
+                (int(record.get("out_of_sequence_count", 0)) for record in render_records),
+                default=0,
+            ),
+            "max_byte_mismatch_count": max(
+                (int(record.get("byte_mismatch_count", 0)) for record in render_records),
+                default=0,
+            ),
             "capture_to_render_ms": _summarize_numeric(
                 [record.get("capture_to_render_ms") for record in render_records],
                 digits=3,
@@ -233,8 +396,15 @@ def build_summary(session_dir: Path):
             "multi_display_success_rate": _round_or_none(
                 _safe_rate(render_multi_display_success, len(render_multi_candidate_frames))
             ),
+            "stage_timings_ms": render_stage_timings,
+        },
+        "system": _build_system_summary(session_dir, runtime_config, system_snapshot),
+        "diagnostics": {
+            "preferred_stage_timings_ms": preferred_stage_timings,
         },
     }
+    summary["event"] = build_event_summary(events)
+    summary["assessment"] = build_operational_assessment(summary, summary["event"])
     return summary
 
 

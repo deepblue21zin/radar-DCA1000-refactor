@@ -32,11 +32,20 @@ DEFAULT_RUNTIME_SETTINGS = {
     "tuning_path": "config/live_motion_tuning.json",
     "cli_port": "COM11",
     "logging": {
+        "enabled": True,
         "variant": "baseline",
         "scenario_id": "",
         "input_mode": "live",
         "source_capture": "",
         "notes": "",
+        "write_processed_frames": True,
+        "write_render_frames": True,
+        "write_status_log": True,
+        "write_event_log": True,
+        "include_payloads": True,
+        "capture_system_snapshot": True,
+        "capture_stage_timing": True,
+        "report_generation_mode": "deferred",
     },
 }
 
@@ -64,6 +73,11 @@ DEFAULT_TUNING_SETTINGS = {
             "angle_quantile": 0.75,
             "angle_contrast_scale": 1.35,
             "min_cartesian_separation_m": 0.45,
+            "angle_centroid_radius_bands": [
+                {"r_min": 0.0, "r_max": 1.5, "radius": 1},
+                {"r_min": 1.5, "r_max": 3.0, "radius": 2},
+                {"r_min": 3.0, "r_max": None, "radius": 3},
+            ],
         },
         "dbscan_adaptive_eps_bands": [
             {"r_min": 0.25, "r_max": 1.0, "eps": 0.34, "min_samples": 1},

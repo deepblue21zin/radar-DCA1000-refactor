@@ -48,6 +48,7 @@ class FramePacket:
     tracker_policy: str = "full"
     confirmed_tracks: tuple = field(default_factory=tuple)
     tentative_tracks: tuple = field(default_factory=tuple)
+    stage_timings_ms: dict = field(default_factory=dict)
 
 
 def _serialize_detection(detection):
@@ -91,6 +92,14 @@ def _append_jsonl(log_path, record):
     log_path = Path(log_path)
     with log_path.open("a", encoding="utf-8") as log_file:
         log_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _round_stage_timings(stage_timings_ms):
+    return {
+        key: round(float(value), 3)
+        for key, value in (stage_timings_ms or {}).items()
+        if value is not None
+    }
 
 
 def _put_latest(queue_object, item):
@@ -299,6 +308,9 @@ class DataProcessor(th.Thread):
         invalid_policy=None,
         processed_frame_log_path=None,
         detection_params=None,
+        write_processed_frames=True,
+        include_payloads=True,
+        capture_stage_timing=True,
     ):
         """
         :param name: str
@@ -329,6 +341,9 @@ class DataProcessor(th.Thread):
             else None
         )
         self.detection_params = dict(detection_params or {})
+        self.write_processed_frames = bool(write_processed_frames)
+        self.include_payloads = bool(include_payloads)
+        self.capture_stage_timing = bool(capture_stage_timing)
 
     def select_tracker_input(self, frame_packet, detections):
         policy_name = "full"
@@ -365,7 +380,7 @@ class DataProcessor(th.Thread):
 
         return tracker_detections, allow_track_birth, policy_name
 
-    def log_processed_frame(self, frame_packet):
+    def build_processed_record(self, frame_packet):
         capture_to_process_ms = None
         if frame_packet.processed_ts is not None:
             capture_to_process_ms = max(
@@ -400,52 +415,85 @@ class DataProcessor(th.Thread):
             "tracker_input_count": int(frame_packet.tracker_input_count),
             "confirmed_track_count": len(frame_packet.confirmed_tracks),
             "tentative_track_count": len(frame_packet.tentative_tracks),
-            "detections": [
+        }
+        if frame_packet.stage_timings_ms:
+            record["stage_timings_ms"] = _round_stage_timings(frame_packet.stage_timings_ms)
+        if self.include_payloads:
+            record["detections"] = [
                 _serialize_detection(detection)
                 for detection in frame_packet.detections
-            ],
-            "confirmed_tracks": [
+            ]
+            record["confirmed_tracks"] = [
                 _serialize_track(track)
                 for track in frame_packet.confirmed_tracks
-            ],
-            "tentative_tracks": [
+            ]
+            record["tentative_tracks"] = [
                 _serialize_track(track)
                 for track in frame_packet.tentative_tracks
-            ],
-        }
+            ]
+        return record
+
+    def log_processed_frame(self, frame_packet):
+        if not self.write_processed_frames:
+            return
+        record = self.build_processed_record(frame_packet)
         _append_jsonl(self.processed_frame_log_path, record)
 
     def run(self):
         frame_count = 0
         while True:
             raw_frame = self.raw_frame_queue.get()
+            loop_started = time.perf_counter()
+            stage_timings_ms = {}
+
+            stage_started = time.perf_counter()
             radar_cube = frame_to_radar_cube(raw_frame.iq, self.runtime_config)
+            stage_timings_ms["cube_ms"] = (time.perf_counter() - stage_started) * 1000.0
             if self.runtime_config.remove_static:
+                stage_started = time.perf_counter()
                 radar_cube = remove_static_clutter(radar_cube)
+                stage_timings_ms["static_ms"] = (time.perf_counter() - stage_started) * 1000.0
+            else:
+                stage_timings_ms["static_ms"] = 0.0
 
             frame_count += 1
-            rdi_cube = DSP.Range_Doppler(
-                np.array(radar_cube, copy=True),
-                mode=1,
+            stage_started = time.perf_counter()
+            shared_range_doppler_fft = DSP.shared_range_doppler_fft(
+                radar_cube,
                 padding_size=[
                     self.runtime_config.doppler_fft_size,
                     self.runtime_config.range_fft_size,
                 ],
             )
-            rai_cube = DSP.Range_Angle(
-                np.array(radar_cube, copy=True),
+            stage_timings_ms["shared_fft2_ms"] = (time.perf_counter() - stage_started) * 1000.0
+
+            stage_started = time.perf_counter()
+            rdi_cube = DSP.range_doppler_from_fft(
+                shared_range_doppler_fft,
                 mode=1,
-                padding_size=[
-                    self.runtime_config.doppler_fft_size,
-                    self.runtime_config.range_fft_size,
-                    self.runtime_config.angle_fft_size,
-                ],
             )
+            stage_timings_ms["range_doppler_project_ms"] = (time.perf_counter() - stage_started) * 1000.0
+
+            stage_started = time.perf_counter()
+            rai_cube = DSP.range_angle_from_fft(
+                shared_range_doppler_fft,
+                mode=1,
+                angle_fft_size=self.runtime_config.angle_fft_size,
+            )
+            stage_timings_ms["range_angle_project_ms"] = (time.perf_counter() - stage_started) * 1000.0
+
+            stage_started = time.perf_counter()
             rdi = integrate_rdi_channels(rdi_cube)
+            stage_timings_ms["integrate_rdi_ms"] = (time.perf_counter() - stage_started) * 1000.0
+
+            stage_started = time.perf_counter()
             rai = collapse_motion_rai(
                 rai_cube,
                 guard_bins=self.runtime_config.doppler_guard_bins,
             )
+            stage_timings_ms["collapse_rai_ms"] = (time.perf_counter() - stage_started) * 1000.0
+
+            stage_started = time.perf_counter()
             detections = detect_targets(
                 rdi,
                 rai,
@@ -455,16 +503,25 @@ class DataProcessor(th.Thread):
                 self.detection_region,
                 **self.detection_params,
             )
+            stage_timings_ms["detect_ms"] = (time.perf_counter() - stage_started) * 1000.0
+
+            stage_started = time.perf_counter()
             tracker_detections, allow_track_birth, tracker_policy = self.select_tracker_input(raw_frame, detections)
+            stage_timings_ms["tracker_gate_ms"] = (time.perf_counter() - stage_started) * 1000.0
+
+            stage_started = time.perf_counter()
             confirmed_tracks, tentative_tracks = self.tracker.update(
                 tracker_detections,
                 frame_ts=raw_frame.capture_ts,
                 allow_track_birth=allow_track_birth,
             )
+            stage_timings_ms["track_ms"] = (time.perf_counter() - stage_started) * 1000.0
+            processed_ts = time.perf_counter()
+            stage_timings_ms["compute_total_ms"] = (processed_ts - loop_started) * 1000.0
 
             processed_frame = replace(
                 raw_frame,
-                processed_ts=time.perf_counter(),
+                processed_ts=processed_ts,
                 rdi=rdi,
                 rai=rai,
                 detections=tuple(detections),
@@ -473,11 +530,29 @@ class DataProcessor(th.Thread):
                 tracker_policy=tracker_policy,
                 confirmed_tracks=tuple(confirmed_tracks),
                 tentative_tracks=tuple(tentative_tracks),
+                stage_timings_ms=_round_stage_timings(stage_timings_ms) if self.capture_stage_timing else {},
             )
 
             if frame_count == 1:
                 print("Generated first processed RDI/RAI frame")
                 print(f"Initial detection candidates: {len(detections)}")
 
-            self.log_processed_frame(processed_frame)
+            log_write_ms = 0.0
+            if self.write_processed_frames:
+                log_started = time.perf_counter()
+                self.log_processed_frame(processed_frame)
+                log_write_ms = (time.perf_counter() - log_started) * 1000.0
+
+            if self.capture_stage_timing:
+                updated_stage_timings = dict(processed_frame.stage_timings_ms)
+                updated_stage_timings["log_write_ms"] = round(log_write_ms, 3)
+                updated_stage_timings["pipeline_total_ms"] = round(
+                    (time.perf_counter() - loop_started) * 1000.0,
+                    3,
+                )
+                processed_frame = replace(
+                    processed_frame,
+                    stage_timings_ms=updated_stage_timings,
+                )
+
             _put_latest(self.processed_frame_queue, processed_frame)

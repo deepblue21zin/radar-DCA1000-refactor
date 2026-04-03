@@ -89,6 +89,7 @@ DETECTION_TUNING = {
     'angle_quantile': float(DETECTION_ALGORITHM['angle_quantile']),
     'angle_contrast_scale': float(DETECTION_ALGORITHM['angle_contrast_scale']),
     'min_cartesian_separation_m': float(DETECTION_ALGORITHM['min_cartesian_separation_m']),
+    'angle_centroid_radius_bands': list(DETECTION_ALGORITHM.get('angle_centroid_radius_bands', [])),
 }
 LOG_ROOT = PROJECT_ROOT / 'logs' / 'live_motion_viewer'
 SPATIAL_VIEW_HEIGHT = int(STATIC['spatial_view']['height'])
@@ -103,6 +104,15 @@ LOG_SCENARIO_ID = str(RUNTIME['logging']['scenario_id'])
 LOG_INPUT_MODE = str(RUNTIME['logging']['input_mode'])
 LOG_SOURCE_CAPTURE = str(RUNTIME['logging']['source_capture'])
 LOG_NOTES = str(RUNTIME['logging']['notes'])
+LOG_ENABLED = bool(RUNTIME['logging'].get('enabled', True))
+LOG_WRITE_PROCESSED_FRAMES = bool(RUNTIME['logging'].get('write_processed_frames', True))
+LOG_WRITE_RENDER_FRAMES = bool(RUNTIME['logging'].get('write_render_frames', True))
+LOG_WRITE_STATUS_LOG = bool(RUNTIME['logging'].get('write_status_log', True))
+LOG_WRITE_EVENT_LOG = bool(RUNTIME['logging'].get('write_event_log', True))
+LOG_INCLUDE_PAYLOADS = bool(RUNTIME['logging'].get('include_payloads', True))
+LOG_CAPTURE_SYSTEM_SNAPSHOT = bool(RUNTIME['logging'].get('capture_system_snapshot', True))
+LOG_CAPTURE_STAGE_TIMING = bool(RUNTIME['logging'].get('capture_stage_timing', True))
+LOG_REPORT_GENERATION_MODE = str(RUNTIME['logging'].get('report_generation_mode', 'deferred'))
 
 class MotionViewer:
     def __init__(self):
@@ -111,6 +121,7 @@ class MotionViewer:
             remove_static=REMOVE_STATIC,
             doppler_guard_bins=DOPPLER_GUARD_BINS,
         )
+        self.track_angle_resolution_rad = self.estimate_track_angle_resolution_rad()
         self.raw_frame_queue = Queue(maxsize=PIPELINE_QUEUE_SIZE)
         self.processed_frame_queue = Queue(maxsize=PIPELINE_QUEUE_SIZE)
         self.radar_ctrl = None
@@ -168,8 +179,20 @@ class MotionViewer:
             input_mode=LOG_INPUT_MODE,
             source_capture=LOG_SOURCE_CAPTURE,
             notes=LOG_NOTES,
+            enabled=LOG_ENABLED,
+            write_processed_frames=LOG_WRITE_PROCESSED_FRAMES,
+            write_render_frames=LOG_WRITE_RENDER_FRAMES,
+            write_status_log=LOG_WRITE_STATUS_LOG,
+            write_event_log=LOG_WRITE_EVENT_LOG,
+            include_payloads=LOG_INCLUDE_PAYLOADS,
+            capture_system_snapshot_enabled=LOG_CAPTURE_SYSTEM_SNAPSHOT,
+            report_generation_mode=LOG_REPORT_GENERATION_MODE,
         )
-        self.processed_log_path = self.session_logger.processed_log_path
+        self.processed_log_path = (
+            self.session_logger.processed_log_path
+            if LOG_ENABLED and LOG_WRITE_PROCESSED_FRAMES
+            else None
+        )
         self.session_logger.prepare(self.runtime_summary())
 
     def runtime_summary(self):
@@ -202,6 +225,7 @@ class MotionViewer:
             'track_measurement_var': TRACK_MEASUREMENT_VAR,
             'track_range_measurement_scale': TRACK_RANGE_MEASUREMENT_SCALE,
             'track_confidence_measurement_scale': TRACK_CONFIDENCE_MEASUREMENT_SCALE,
+            'track_angle_resolution_deg': round(float(np.degrees(self.track_angle_resolution_rad)), 3),
             'track_association_gate': TRACK_ASSOCIATION_GATE,
             'track_doppler_zero_guard_bins': TRACK_DOPPLER_ZERO_GUARD_BINS,
             'track_doppler_gate_bins': TRACK_DOPPLER_GATE_BINS,
@@ -219,6 +243,15 @@ class MotionViewer:
             'log_input_mode': LOG_INPUT_MODE,
             'log_source_capture': LOG_SOURCE_CAPTURE,
             'log_notes': LOG_NOTES,
+            'log_enabled': LOG_ENABLED,
+            'log_write_processed_frames': LOG_WRITE_PROCESSED_FRAMES,
+            'log_write_render_frames': LOG_WRITE_RENDER_FRAMES,
+            'log_write_status_log': LOG_WRITE_STATUS_LOG,
+            'log_write_event_log': LOG_WRITE_EVENT_LOG,
+            'log_include_payloads': LOG_INCLUDE_PAYLOADS,
+            'log_capture_system_snapshot': LOG_CAPTURE_SYSTEM_SNAPSHOT,
+            'log_capture_stage_timing': LOG_CAPTURE_STAGE_TIMING,
+            'log_report_generation_mode': LOG_REPORT_GENERATION_MODE,
         }
 
     def log_event(self, event_type, **payload):
@@ -325,11 +358,18 @@ class MotionViewer:
             'display_track_count': len(display_tracks),
             'tentative_track_count': len(tentative_tracks),
             'tentative_display_track_count': len(tentative_display_tracks),
-            'detections': [self.serialize_detection(detection) for detection in detections],
-            'display_tracks': [self.serialize_track(track) for track in display_tracks],
-            'tentative_tracks': [self.serialize_track(track) for track in tentative_tracks],
-            'tentative_display_tracks': [self.serialize_track(track) for track in tentative_display_tracks],
         }
+        if frame_packet.stage_timings_ms:
+            record['stage_timings_ms'] = {
+                key: round(float(value), 3)
+                for key, value in frame_packet.stage_timings_ms.items()
+                if value is not None
+            }
+        if LOG_INCLUDE_PAYLOADS:
+            record['detections'] = [self.serialize_detection(detection) for detection in detections]
+            record['display_tracks'] = [self.serialize_track(track) for track in display_tracks]
+            record['tentative_tracks'] = [self.serialize_track(track) for track in tentative_tracks]
+            record['tentative_display_tracks'] = [self.serialize_track(track) for track in tentative_display_tracks]
         self.session_logger.write_render_record(record)
 
     def log_status_snapshot(
@@ -400,6 +440,7 @@ class MotionViewer:
                 measurement_var=TRACK_MEASUREMENT_VAR,
                 range_measurement_scale=TRACK_RANGE_MEASUREMENT_SCALE,
                 confidence_measurement_scale=TRACK_CONFIDENCE_MEASUREMENT_SCALE,
+                angle_resolution_rad=self.track_angle_resolution_rad,
                 association_gate=TRACK_ASSOCIATION_GATE,
                 doppler_center_bin=self.runtime_config.doppler_fft_size // 2,
                 doppler_zero_guard_bins=TRACK_DOPPLER_ZERO_GUARD_BINS,
@@ -415,6 +456,9 @@ class MotionViewer:
             invalid_policy=INVALID_POLICY,
             processed_frame_log_path=self.processed_log_path,
             detection_params=DETECTION_TUNING,
+            write_processed_frames=LOG_ENABLED and LOG_WRITE_PROCESSED_FRAMES,
+            include_payloads=LOG_INCLUDE_PAYLOADS,
+            capture_stage_timing=LOG_CAPTURE_STAGE_TIMING,
         )
         self.collector.daemon = True
         self.processor.daemon = True
@@ -423,7 +467,10 @@ class MotionViewer:
         self.log_event(
             'workers_started',
             queue_size=PIPELINE_QUEUE_SIZE,
-            processed_log=str(self.processed_log_path.name),
+            processed_log=None if self.processed_log_path is None else str(self.processed_log_path.name),
+            logging_enabled=LOG_ENABLED,
+            include_payloads=LOG_INCLUDE_PAYLOADS,
+            capture_stage_timing=LOG_CAPTURE_STAGE_TIMING,
         )
 
     def open_radar(self):
@@ -646,6 +693,19 @@ class MotionViewer:
                 self.runtime_config.angle_fft_size - 1,
             )
         )
+
+    def estimate_track_angle_resolution_rad(self):
+        angle_axis = np.asarray(self.runtime_config.angle_axis_rad, dtype=np.float64)
+        if angle_axis.size < 2:
+            return 0.0
+        diffs = np.abs(np.diff(angle_axis))
+        finite_diffs = diffs[np.isfinite(diffs) & (diffs > 0.0)]
+        if finite_diffs.size == 0:
+            return 0.0
+        center_start = max((finite_diffs.size // 2) - 2, 0)
+        center_end = min(center_start + 4, finite_diffs.size)
+        center_diffs = finite_diffs[center_start:center_end]
+        return float(np.mean(center_diffs))
 
     def build_window(self):
         self.app = QtWidgets.QApplication(sys.argv)

@@ -221,6 +221,9 @@ class MultiTargetTracker:
         measurement_var=0.4,
         range_measurement_scale=0.0,
         confidence_measurement_scale=0.0,
+        angle_resolution_rad=0.0,
+        lateral_measurement_scale=1.0,
+        forward_measurement_scale=1.0,
         association_gate=5.99,
         doppler_center_bin=None,
         doppler_zero_guard_bins=2,
@@ -240,6 +243,12 @@ class MultiTargetTracker:
             raise ValueError("range_measurement_scale must be non-negative.")
         if confidence_measurement_scale < 0:
             raise ValueError("confidence_measurement_scale must be non-negative.")
+        if angle_resolution_rad < 0:
+            raise ValueError("angle_resolution_rad must be non-negative.")
+        if lateral_measurement_scale < 0:
+            raise ValueError("lateral_measurement_scale must be non-negative.")
+        if forward_measurement_scale <= 0:
+            raise ValueError("forward_measurement_scale must be positive.")
         if association_gate <= 0:
             raise ValueError("association_gate must be positive.")
         if doppler_zero_guard_bins < 0:
@@ -265,6 +274,9 @@ class MultiTargetTracker:
         self.measurement_var = float(measurement_var)
         self.range_measurement_scale = float(range_measurement_scale)
         self.confidence_measurement_scale = float(confidence_measurement_scale)
+        self.angle_resolution_rad = float(angle_resolution_rad)
+        self.lateral_measurement_scale = float(lateral_measurement_scale)
+        self.forward_measurement_scale = float(forward_measurement_scale)
         self.association_gate = float(association_gate)
         self.doppler_center_bin = None if doppler_center_bin is None else int(doppler_center_bin)
         self.doppler_zero_guard_bins = int(doppler_zero_guard_bins)
@@ -288,7 +300,15 @@ class MultiTargetTracker:
             1.0 - (self.confidence_measurement_scale * confidence),
         )
         variance = self.measurement_var * min(extra_scale, 4.0) * confidence_scale
-        return np.eye(2, dtype=float) * variance
+        lateral_variance = float(variance)
+        if self.angle_resolution_rad > 0.0:
+            lateral_step_m = max(float(range_m), 0.5) * self.angle_resolution_rad
+            lateral_scale = 1.0 + (
+                self.lateral_measurement_scale * min(lateral_step_m / 0.04, 5.0)
+            )
+            lateral_variance *= lateral_scale
+        forward_variance = float(variance) * self.forward_measurement_scale
+        return np.diag(np.asarray([lateral_variance, forward_variance], dtype=float))
 
     def _build_kf(self, measurement: dict):
         kf = self._KalmanFilter(dim_x=4, dim_z=2)

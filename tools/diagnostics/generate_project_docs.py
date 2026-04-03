@@ -15,11 +15,11 @@ CODE_DIR = PROJECT_DIR / "code"
 REQ_DIR = DOCS_DIR / "REQ"
 
 CURRENT_STATE = {
-    "score_overall": "74/100",
-    "score_structure": "79/100",
-    "score_logging": "87/100",
-    "code_files": 14,
-    "log_artifacts": 6,
+    "score_overall": "82/100",
+    "score_structure": "80/100",
+    "score_logging": "93/100",
+    "code_files": 18,
+    "log_artifacts": 9,
 }
 
 
@@ -30,36 +30,38 @@ FILES = [
         "title": "live_motion_viewer.py",
         "category": "UI / Orchestration",
         "stages": ["Settings", "Control", "UI", "Logging"],
-        "summary": "실시간 데모를 실제로 구동하는 메인 앱이다. 장비 연결, 워커 시작, PyQt 창 구성, 3D 표시, 세션 로그 준비를 한 곳에서 묶는다.",
-        "why": "이 프로젝트를 실행하면 가장 먼저 통과하는 진입점이다. 지금 구조에서 가장 많은 책임이 모여 있는 파일이라 리팩터링 우선순위도 가장 높다.",
-        "mentor": "초보자가 볼 때는 화면 파일 같지만 실제로는 앱 컨트롤러에 가깝다. 장비 제어, 워커 연결, 최신 프레임 선택, 세션 로그 개시까지 모두 이 파일에서 시작한다.",
+        "summary": "실시간 데모를 실제로 구동하는 메인 앱이다. 장비 연결, 워커 시작, PyQt 창 구성, 최신 프레임 렌더, SessionLogger 연계를 한 곳에서 조율한다.",
+        "why": "이 프로젝트를 실행하면 가장 먼저 통과하는 진입점이다. 지금도 가장 많은 책임이 모여 있지만, 최근에는 SessionLogger와 stage timing 연계까지 포함해 운영 허브 역할이 더 분명해졌다.",
+        "mentor": "초보자가 볼 때는 화면 파일 같지만 실제로는 앱 컨트롤러에 가깝다. 장비 제어, 워커 연결, 최신 프레임 선택, render 로그 기록, 종료 시 HTML 리포트 트리거까지 모두 이 파일에서 시작한다.",
         "before": "runtime_settings.py, radar_config.py",
         "after": "real_time_process.py, app_layout.py",
         "inputs": "런타임 설정, DCA 제어 명령, 처리 큐의 FramePacket, UI 이벤트",
-        "outputs": "렌더링된 화면, session_meta.json, render_frames.jsonl, event_log.jsonl",
-        "debug": "프레임 스킵, 워커 종료 순서, 세션 로그 파일 생성 여부를 먼저 본다.",
-        "ops": "현업에서는 AppController, SessionLogger, ViewRenderer로 분리하는 편이 안전하다.",
+        "outputs": "렌더링된 화면, render_frames.jsonl, event_log.jsonl, runtime_config.json, 세션 종료 후 HTML 리포트",
+        "debug": "최신 프레임만 소비하는 구조라 render 큐 스킵, OpenGL fallback, stage_timings_ms 전달 여부를 먼저 본다.",
+        "ops": "현업에서는 AppController, SessionLogger, ViewRenderer로 더 나누는 편이 안전하지만, 현재도 세션 기록 책임 일부는 SessionLogger로 빠져 이전보다 낫다.",
         "read_order": [
             "앱 시작 시 어떤 객체를 만들고 어떤 워커를 붙이는지 본다.",
-            "build_session_metadata와 prepare_logging을 읽어 세션 폴더 구조를 이해한다.",
-            "log_render_snapshot과 shutdown을 읽으면 운영 관점 흐름이 보인다.",
+            "__init__와 start_workers를 읽어 설정, tracker, 처리 스레드 wiring을 이해한다.",
+            "log_render_snapshot을 읽어 render 기준 latency와 stage timing이 어떻게 남는지 본다.",
+            "shutdown을 읽으면 세션 종료 후 report 생성 흐름이 보인다.",
         ],
         "roles": [
             ("앱 진입점", "PyQt 창과 장비 제어 흐름을 묶어 실제 데모를 시작한다."),
             ("실시간 조정자", "처리 스레드 결과를 UI가 소비할 수 있는 속도로 맞춘다."),
-            ("세션 기록기", "render/event 로그와 메타데이터를 세션 단위로 남긴다."),
+            ("렌더 계측 지점", "사용자가 실제로 본 프레임 기준 latency와 표시 결과를 남긴다."),
         ],
         "landmarks": [
             ("MotionViewer", r"^class MotionViewer:", "앱의 메인 컨트롤러 클래스다."),
-            ("build_session_metadata", r"^\s*def build_session_metadata", "세션 메타데이터를 구성한다."),
-            ("prepare_logging", r"^\s*def prepare_logging", "세션 폴더와 로그 파일을 연다."),
+            ("__init__", r"^\s*def __init__", "설정, SessionLogger, UI 상태를 준비한다."),
             ("log_event", r"^\s*def log_event", "이벤트 로그를 남긴다."),
             ("log_render_snapshot", r"^\s*def log_render_snapshot", "실제로 그린 프레임 기준 로그를 기록한다."),
+            ("configure_dca1000", r"^\s*def configure_dca1000", "DCA1000 네트워크 설정을 적용한다."),
             ("start_workers", r"^\s*def start_workers", "UDP 수신/처리 워커를 시작한다."),
+            ("pull_latest_processed_frame", r"^\s*def pull_latest_processed_frame", "렌더할 최신 FramePacket 하나를 고른다."),
             ("build_window", r"^\s*def build_window", "PyQt 창을 조립한다."),
             ("shutdown", r"^\s*def shutdown", "워커와 로그 핸들을 정리한다."),
         ],
-        "related": ["real_time_process", "app_layout", "runtime_settings", "session_report"],
+        "related": ["real_time_process", "app_layout", "runtime_settings", "session_logging"],
     },
     {
         "slug": "real_time_process",
@@ -67,27 +69,29 @@ FILES = [
         "title": "real_time_process.py",
         "category": "Capture / Processing",
         "stages": ["Capture", "DSP", "Detection", "Tracking", "Logging"],
-        "summary": "UDP 패킷을 프레임으로 조립하고 DSP, detection, tracking까지 이어 붙이는 실시간 처리 파이프라인이다.",
-        "why": "invalid rate, latency, track 품질이 모두 여기에 직접 연결된다.",
-        "mentor": "프로젝트의 심장이라고 보면 된다. 입력은 raw packet이고 출력은 FramePacket이며, 그 안에 health, detection, tracking 결과가 함께 들어간다.",
+        "summary": "UDP 패킷을 프레임으로 조립하고 DSP, detection, tracking까지 이어 붙이는 실시간 처리 파이프라인이다. 최근에는 stage timing과 shared FFT 기반 최적화가 함께 들어갔다.",
+        "why": "invalid rate, latency, track 품질, stage별 병목이 모두 여기에 직접 연결된다.",
+        "mentor": "프로젝트의 심장이라고 보면 된다. 입력은 raw packet이고 출력은 FramePacket이며, 그 안에 health, detection, tracking 결과와 stage timing이 함께 들어간다.",
         "before": "radar_runtime.py, detection.py, tracking.py",
         "after": "live_motion_viewer.py",
         "inputs": "DCA1000 UDP payload, runtime config, tracker 파라미터",
         "outputs": "FramePacket, processed_frames.jsonl, 처리 큐",
-        "debug": "packet health, capture_to_process_ms, candidate와 confirmed track 사이 손실을 본다.",
-        "ops": "capture, assembly, feature extraction, tracker update를 나누면 유지보수가 쉬워진다.",
+        "debug": "packet health, capture_to_process_ms, shared_fft2_ms, detect_ms, candidate와 confirmed track 사이 손실을 함께 본다.",
+        "ops": "assembly, DSP, detection, tracking이 아직 한 hot path에 직렬로 묶여 있어서, 계측을 본 뒤 단계별 경량화를 계속하는 것이 맞다.",
         "read_order": [
             "FramePacket 구조를 먼저 읽고 어떤 데이터가 흘러가는지 본다.",
             "UdpListener가 패킷을 어떻게 모으는지 본다.",
-            "DataProcessor.run과 log_processed_frame을 읽으면 처리 로그 지점이 보인다.",
+            "_round_stage_timings와 log_processed_frame을 읽어 processed 로그 schema를 본다.",
+            "DataProcessor.run을 읽으면 shared FFT 이후 detection, tracking까지 한 프레임 처리 흐름이 보인다.",
         ],
         "roles": [
             ("프레임 계약", "한 프레임의 입력, 중간 결과, 추적 결과를 한 구조로 묶는다."),
             ("실시간 처리", "RDI, RAI, detection, tracking을 한 루프에서 계산한다."),
-            ("처리 로그 생성", "UI와 무관하게 모든 처리 프레임을 JSONL로 남긴다."),
+            ("처리 계측", "stage_timings_ms와 packet health를 함께 남겨 병목을 추적한다."),
         ],
         "landmarks": [
             ("FramePacket", r"^class FramePacket:", "프레임 단위 데이터 컨테이너다."),
+            ("_round_stage_timings", r"^def _round_stage_timings", "stage timing dict를 로그용으로 정리한다."),
             ("_serialize_detection", r"^def _serialize_detection", "detection 결과를 로그용 dict로 바꾼다."),
             ("UdpListener", r"^class UdpListener", "UDP payload를 수집하는 스레드다."),
             ("DataProcessor", r"^class DataProcessor", "DSP부터 tracker까지 잇는 처리 스레드다."),
@@ -102,19 +106,20 @@ FILES = [
         "title": "radar_runtime.py",
         "category": "DSP / Geometry",
         "stages": ["Settings", "DSP", "Detection"],
-        "summary": "raw IQ를 radar cube와 시각화용 맵으로 바꾸는 수학 계층이다. 축 정의, clutter 제거, ROI 적용을 담당한다.",
-        "why": "여기서 shape와 axis가 틀리면 뒤 단계가 모두 어긋난다.",
-        "mentor": "이 파일은 파이프라인의 공통 언어를 만든다. detection과 tracking은 이 파일이 만든 좌표계와 배열 구조를 믿고 움직인다.",
+        "summary": "raw IQ를 radar cube와 시각화용 맵으로 바꾸는 수학 계층이다. 축 정의, clutter 제거, ROI 적용, 벡터화된 shape 변환을 담당한다.",
+        "why": "여기서 shape와 axis가 틀리면 뒤 단계가 모두 어긋나고, 여기서 copy가 많으면 DSP 전체가 느려진다.",
+        "mentor": "이 파일은 파이프라인의 공통 언어를 만든다. detection과 tracking은 이 파일이 만든 좌표계와 배열 구조를 믿고 움직이며, 최근에는 reshape와 motion collapse도 더 가볍게 정리됐다.",
         "before": "runtime_settings.py, DSP.py",
         "after": "detection.py, real_time_process.py",
         "inputs": "runtime config, raw complex IQ frame",
         "outputs": "radar cube, integrated RDI, motion RAI, ROI mask 정보",
-        "debug": "shape mismatch, axis 길이, clutter 제거 전후 에너지 분포를 확인한다.",
-        "ops": "Capon 같은 angle estimator를 넣을 때도 이 파일의 axis model 이해가 먼저다.",
+        "debug": "shape mismatch, axis 길이, dtype, clutter 제거 전후 에너지 분포를 확인한다.",
+        "ops": "Capon 같은 angle estimator를 넣을 때도 이 파일의 axis model 이해가 먼저고, 실시간성 개선은 보통 여기 reshape/collapse 비용부터 줄인다.",
         "read_order": [
             "RadarRuntimeConfig로 축과 해상도 정의를 먼저 본다.",
-            "frame_to_radar_cube와 integrate_rdi_channels로 raw 데이터를 맵으로 바꾸는 순서를 본다.",
-            "collapse_motion_rai와 apply_cartesian_roi_to_rai로 detection 입력 정제를 본다.",
+            "frame_to_radar_cube와 remove_static_clutter로 raw 데이터를 처리용 cube로 바꾸는 순서를 본다.",
+            "integrate_rdi_channels와 collapse_motion_rai로 detection 입력 맵을 어떻게 줄이는지 본다.",
+            "apply_cartesian_roi_to_rai로 관심 영역만 남기는 과정을 본다.",
         ],
         "roles": [
             ("형태 변환", "수신 버퍼를 처리용 cube 구조로 바꾼다."),
@@ -240,16 +245,16 @@ FILES = [
         "stages": ["Settings", "Logging"],
         "summary": "프로젝트 전반에서 공통으로 쓰는 런타임 설정을 로드하고 병합하는 설정 계층이다.",
         "why": "환경이 달라도 코드 수정 없이 값을 바꾸게 해 주는 중심점이다.",
-        "mentor": "실험을 반복할수록 설정 파일 품질이 중요해진다. ROI, tracker, logging variant를 분리한 것은 현업적으로 좋은 방향이다.",
+        "mentor": "실험을 반복할수록 설정 파일 품질이 중요해진다. ROI, tracker뿐 아니라 logging on/off, payload 포함 여부, system snapshot 수집 여부까지 설정에서 제어하게 된 점이 현업적으로 좋다.",
         "before": "외부 runtime_settings.json",
         "after": "live_motion_viewer.py, radar_runtime.py, real_time_process.py",
         "inputs": "기본값 dict, 사용자 JSON override",
         "outputs": "병합된 runtime settings, 프로젝트 기준 절대 경로",
         "debug": "설정 누락 시 기본값이 안전한지, logging 섹션이 비어 있어도 동작하는지 확인한다.",
-        "ops": "variant, scenario_id, source_capture를 설정에서 뺀 것은 A/B 테스트 자동화에 유리하다.",
+        "ops": "logging 토글이 설정 파일로 빠지면 full logging과 minimal logging 재실험을 코드 수정 없이 돌릴 수 있어 운영 실험이 쉬워진다.",
         "read_order": [
             "DEFAULT_RUNTIME_SETTINGS를 훑어 전체 실험 파라미터 범위를 본다.",
-            "logging 섹션을 확인해 세션 메타데이터가 어떻게 주입되는지 본다.",
+            "logging 섹션을 확인해 payload, stage timing, system snapshot 토글이 어떻게 들어가는지 본다.",
             "load_runtime_settings와 resolve_project_path를 읽으면 실제 사용 흐름이 보인다.",
         ],
         "roles": [
@@ -259,7 +264,7 @@ FILES = [
         ],
         "landmarks": [
             ("DEFAULT_RUNTIME_SETTINGS", r"^DEFAULT_RUNTIME_SETTINGS\s*=", "프로젝트 기본 설정 dict다."),
-            ("logging section", r'"logging"\s*:', "variant, scenario, source_capture 메타데이터가 들어간다."),
+            ("logging section", r'"logging"\s*:', "variant와 source_capture뿐 아니라 payload, snapshot, stage timing 토글이 들어간다."),
             ("_deep_merge", r"^def _deep_merge", "중첩 설정 병합 함수다."),
             ("load_runtime_settings", r"^def load_runtime_settings", "설정 파일 로딩 진입점이다."),
             ("resolve_project_path", r"^def resolve_project_path", "프로젝트 기준 절대 경로를 계산한다."),
@@ -304,25 +309,30 @@ FILES = [
         "title": "DSP.py",
         "category": "DSP",
         "stages": ["DSP"],
-        "summary": "Range-Doppler, Range-Angle FFT를 계산하는 기초 DSP 함수 모음이다.",
-        "why": "지금 프로젝트의 기본 angle estimator는 FFT 기반이라 이 결과가 detection 품질에 직접 들어간다.",
-        "mentor": "고전적인 신호 처리 레이어다. 후단 detection과 tracking이 아무리 좋아도 출발점인 스펙트럼 품질이 낮으면 전체가 흔들린다.",
+        "summary": "Range-Doppler, Range-Angle FFT를 계산하는 기초 DSP 함수 모음이다. 최근에는 공통 FFT를 한 번만 수행하는 shared path와 cached window가 추가됐다.",
+        "why": "지금 프로젝트의 기본 angle estimator는 FFT 기반이라 이 결과가 detection 품질과 처리 지연에 직접 들어간다.",
+        "mentor": "고전적인 신호 처리 레이어다. 후단 detection과 tracking이 아무리 좋아도 출발점인 스펙트럼 품질이 낮으면 전체가 흔들리고, 여기 중복 FFT가 있으면 latency가 바로 튄다.",
         "before": "raw radar cube",
         "after": "radar_runtime.py, detection.py",
         "inputs": "complex radar cube",
         "outputs": "RDI, RAI magnitude map",
-        "debug": "FFT 축 순서, normalization, channel ordering이 맞는지 반드시 확인해야 한다.",
-        "ops": "Capon을 시험하더라도 baseline으로 이 FFT 구현은 계속 남겨 두는 편이 좋다.",
+        "debug": "FFT 축 순서, normalization, channel ordering, shared FFT 결과 재사용이 맞는지 반드시 확인해야 한다.",
+        "ops": "Capon을 시험하더라도 baseline으로 이 FFT 구현은 계속 남겨 두는 편이 좋고, 실시간성은 shared FFT와 broadcasting에서 먼저 챙기는 게 맞다.",
         "read_order": [
-            "Range_Doppler가 range-doppler map을 어떻게 만드는지 본다.",
-            "Range_Angle에서 angle FFT 축과 채널 사용 방식을 확인한다.",
+            "_cached_range_doppler_window와 shared_range_doppler_fft를 읽어 공통 전처리와 FFT를 이해한다.",
+            "range_doppler_from_fft와 range_angle_from_fft를 읽어 shared 결과가 어떻게 갈라지는지 본다.",
+            "마지막에 Range_Doppler와 Range_Angle wrapper로 기존 호출 호환성을 확인한다.",
         ],
         "roles": [
-            ("기본 스펙트럼 생성", "실시간 처리의 첫 번째 시각화 가능한 맵을 만든다."),
+            ("공통 FFT 생성", "range-doppler 축 FFT를 한 번만 계산해 후단이 공유하게 한다."),
             ("채널 정렬", "안테나 축을 활용해 각도 정보를 드러낸다."),
             ("비교 기준", "향후 고급 기법과 비교할 baseline 역할을 한다."),
         ],
         "landmarks": [
+            ("_cached_range_doppler_window", r"^def _cached_range_doppler_window", "window를 캐시해 프레임마다 다시 만들지 않게 한다."),
+            ("shared_range_doppler_fft", r"^def shared_range_doppler_fft", "공통 range-doppler FFT 계산 함수다."),
+            ("range_doppler_from_fft", r"^def range_doppler_from_fft", "공통 FFT 결과를 RDI로 투영한다."),
+            ("range_angle_from_fft", r"^def range_angle_from_fft", "공통 FFT 결과를 RAI로 투영한다."),
             ("Range_Doppler", r"^def Range_Doppler", "range-doppler FFT 계산 함수다."),
             ("Range_Angle", r"^def Range_Angle", "range-angle FFT 계산 함수다."),
         ],
@@ -398,32 +408,35 @@ FILES = [
         "title": "session_report.py",
         "category": "Reporting",
         "stages": ["Logging", "Reports"],
-        "summary": "한 세션 폴더를 읽어 summary.json을 생성하는 리포트 빌더다.",
-        "why": "로그가 남는 것만으로 끝나지 않고, 사람이 바로 비교 가능한 숫자로 정리해야 하기 때문이다.",
-        "mentor": "processed 로그와 render 로그를 왜 나눴는지 가장 잘 보여 주는 파일이다. 알고리즘 성능과 UI 체감 성능을 같은 세션 안에서도 분리해서 본다.",
-        "before": "session_meta.json, processed_frames.jsonl, render_frames.jsonl",
+        "summary": "한 세션 폴더를 읽어 summary.json을 생성하는 리포트 빌더다. processed/render 집계뿐 아니라 system snapshot, stage timing, operational assessment까지 묶는다.",
+        "why": "로그가 남는 것만으로 끝나지 않고, 사람이 바로 비교 가능한 숫자와 운영 점수로 정리해야 하기 때문이다.",
+        "mentor": "processed 로그와 render 로그를 왜 나눴는지 가장 잘 보여 주는 파일이다. 이제는 알고리즘 성능과 UI 체감 성능뿐 아니라 환경 상태와 stage별 병목까지 같은 세션 안에서 묶어 본다.",
+        "before": "session_meta.json, processed_frames.jsonl, render_frames.jsonl, system_snapshot.json",
         "after": "summary.json, session_compare.py",
         "inputs": "세션 디렉터리의 JSON과 JSONL 로그",
         "outputs": "summary.json",
-        "debug": "legacy status_log만 있는 옛 세션도 읽히는지, missing log에서 안전한지 확인한다.",
-        "ops": "리포트 스키마를 고정해 두어야 장기 추세 비교가 편하다.",
+        "debug": "legacy status_log만 있는 옛 세션도 읽히는지, stage_timings_ms와 system_snapshot이 빠져도 안전한지 확인한다.",
+        "ops": "리포트 스키마를 고정해 두어야 장기 추세 비교가 편하고, 운영 점수와 환경 진단이 summary에 같이 들어가야 현장 판단이 빨라진다.",
         "read_order": [
             "_load_jsonl과 _summarize_numeric로 집계 기본기를 본다.",
-            "build_summary에서 processed와 render를 어떻게 나눠 계산하는지 확인한다.",
+            "_summarize_stage_timings와 _build_system_summary로 새 진단 축을 본다.",
+            "build_summary에서 processed와 render와 assessment를 어떻게 합치는지 확인한다.",
             "main으로 실제 CLI 사용 흐름을 본다.",
         ],
         "roles": [
             ("세션 요약", "프레임 로그를 사람이 읽기 쉬운 summary.json으로 압축한다."),
             ("지표 표준화", "invalid rate, latency, track count 같은 지표를 일관된 구조로 만든다."),
-            ("비교 준비", "session_compare가 바로 사용할 수 있는 입력 포맷을 제공한다."),
+            ("운영 진단", "system snapshot과 stage timing을 요약해 현업형 판단 재료를 만든다."),
         ],
         "landmarks": [
             ("_load_jsonl", r"^def _load_jsonl", "JSONL 로더다."),
             ("_summarize_numeric", r"^def _summarize_numeric", "평균, p50, p95를 계산한다."),
+            ("_summarize_stage_timings", r"^def _summarize_stage_timings", "stage timing 분포를 요약한다."),
+            ("_build_system_summary", r"^def _build_system_summary", "system_snapshot.json을 리포트용 구조로 정리한다."),
             ("build_summary", r"^def build_summary", "리포트 핵심 집계 함수다."),
             ("main", r"^def main", "CLI entrypoint다."),
         ],
-        "related": ["session_compare", "live_motion_viewer", "real_time_process"],
+        "related": ["session_compare", "operational_assessment", "log_html_reports", "real_time_process"],
     },
     {
         "slug": "session_compare",
@@ -431,17 +444,17 @@ FILES = [
         "title": "session_compare.py",
         "category": "Reporting",
         "stages": ["Reports"],
-        "summary": "before와 after 두 summary.json을 읽어 개선인지 회귀인지 판단하는 비교기다.",
+        "summary": "before와 after 두 summary.json을 읽어 개선인지 회귀인지 판단하는 비교기다. 최근에는 operational score도 기본 비교 항목에 들어간다.",
         "why": "실험이 늘어날수록 좋아진 느낌이 아니라 지표상 좋아졌는가를 자동으로 판단해야 하기 때문이다.",
         "mentor": "현업에서는 이런 비교기가 있어야 실험이 누적될수록 팀이 같은 언어로 의사결정을 할 수 있다.",
         "before": "session_report.py",
-        "after": "comparison_vs_*.json, 향후 HTML 리포트",
+        "after": "comparison_vs_*.json, HTML 비교 리포트 원본 데이터",
         "inputs": "before와 after summary.json",
         "outputs": "comparison json, 콘솔 비교 결과",
-        "debug": "metric direction, 0 division, None 값 처리 안전성을 확인해야 한다.",
-        "ops": "threshold 기반 fail와 pass를 붙이면 회귀 검증 자동화에 연결하기 좋다.",
+        "debug": "metric direction, 0 division, None 값 처리, legacy session의 missing metric을 안전하게 다루는지 확인해야 한다.",
+        "ops": "threshold 기반 fail와 pass를 붙이면 회귀 검증 자동화에 연결하기 좋고, operational score를 같이 보면 현업 설명이 쉬워진다.",
         "read_order": [
-            "METRICS 목록으로 어떤 지표를 비교하는지 먼저 본다.",
+            "METRICS 목록으로 operational score와 latency가 어떤 순서로 비교되는지 먼저 본다.",
             "build_comparison에서 delta와 judgement 계산을 본다.",
             "main에서 CLI 출력 형식을 확인한다.",
         ],
@@ -455,7 +468,140 @@ FILES = [
             ("build_comparison", r"^def build_comparison", "비교 결과를 생성한다."),
             ("main", r"^def main", "CLI entrypoint다."),
         ],
-        "related": ["session_report", "runtime_settings", "live_motion_viewer"],
+        "related": ["session_report", "operational_assessment", "log_html_reports"],
+    },
+    {
+        "slug": "session_logging",
+        "source": "real-time/session_logging.py",
+        "title": "session_logging.py",
+        "category": "Logging / Orchestration",
+        "stages": ["Logging", "Reports"],
+        "summary": "세션 폴더 생성, 메타데이터 기록, event/render 로그 파일 핸들 관리, 종료 시 HTML 리포트 생성을 맡는 로깅 허브다.",
+        "why": "live_motion_viewer.py에서 세션 준비와 종료 보고를 분리해 운영 책임 경계를 만든 핵심 파일이다.",
+        "mentor": "예전에는 앱 파일이 로그 준비까지 거의 다 들고 있었다. 지금은 SessionLogger가 세션 폴더 구조와 system snapshot, report generation을 묶어 주는 전용 계층이 됐다.",
+        "before": "live_motion_viewer.py, runtime_settings.py",
+        "after": "session_meta.json, event_log.jsonl, render_frames.jsonl, summary.json, ops_report.html",
+        "inputs": "세션 메타데이터, runtime summary, logging 토글",
+        "outputs": "세션 디렉터리와 로그/리포트 파일",
+        "debug": "enabled 토글, 파일 핸들 생명주기, system snapshot 수집 실패 시 degrade gracefully 되는지 확인한다.",
+        "ops": "세션 경계가 파일 단위로 명확해지면 현장 장애 대응과 로그 보존 정책을 다루기 쉬워진다.",
+        "read_order": [
+            "__init__로 어떤 파일을 여는지 본다.",
+            "build_session_metadata와 prepare를 읽어 세션 시작 시점 작업을 이해한다.",
+            "close를 읽으면 summary와 HTML 리포트 생성까지 끝 흐름이 보인다.",
+        ],
+        "roles": [
+            ("세션 경계 정의", "한 번 실행한 로그와 메타데이터를 한 폴더에 묶는다."),
+            ("이벤트 로깅", "render/event/status 로그 파일 쓰기를 표준화한다."),
+            ("종료 후 정리", "summary와 HTML 리포트를 자동 생성한다."),
+        ],
+        "landmarks": [
+            ("SessionLogger", r"^class SessionLogger:", "세션 로깅 메인 클래스다."),
+            ("build_session_metadata", r"^\s*def build_session_metadata", "git 정보와 logging 토글을 메타데이터로 정리한다."),
+            ("prepare", r"^\s*def prepare", "세션 폴더, 로그 파일, system snapshot을 준비한다."),
+            ("log_event", r"^\s*def log_event", "이벤트 로그를 남긴다."),
+            ("write_render_record", r"^\s*def write_render_record", "render/status 로그 레코드를 기록한다."),
+            ("close", r"^\s*def close", "로그 파일을 닫고 HTML 리포트를 생성한다."),
+        ],
+        "related": ["live_motion_viewer", "session_report", "log_html_reports", "system_snapshot"],
+    },
+    {
+        "slug": "system_snapshot",
+        "source": "tools/diagnostics/system_snapshot.py",
+        "title": "system_snapshot.py",
+        "category": "Diagnostics",
+        "stages": ["Logging", "Reports"],
+        "summary": "세션 시작 시 전원 계획, NIC/IP 상태, 방화벽 프로필, 프로세스 우선순위, NumPy/스레드 환경을 저장하는 환경 진단 유틸리티다.",
+        "why": "코드 변화가 거의 없는데도 성능이 달라질 때, 실행 환경이 원인인지 확인할 수 있게 해 준다.",
+        "mentor": "현업에서는 같은 코드라도 전원 모드, NIC 상태, 방화벽, CPU priority 때문에 결과가 흔들린다. 그걸 세션 단위로 남기는 역할이 이 파일이다.",
+        "before": "SessionLogger.prepare",
+        "after": "system_snapshot.json, session_report.py",
+        "inputs": "expected host IP, 현재 프로세스 환경",
+        "outputs": "system_snapshot.json 구조체",
+        "debug": "PowerShell 호출 실패 시 None 처리, expected_host_ip 비교, priority class 해석이 안전한지 본다.",
+        "ops": "실험 환경을 로그와 함께 묶어 두면 '왜 오늘만 느린가' 같은 질문에 훨씬 빨리 답할 수 있다.",
+        "read_order": [
+            "_run_command와 _run_powershell_json으로 외부 정보 수집 방식을 본다.",
+            "_parse_power_scheme와 _build_windows_runtime_snapshot으로 핵심 필드를 이해한다.",
+            "capture_system_snapshot으로 최종 JSON schema를 확인한다.",
+        ],
+        "roles": [
+            ("환경 수집", "전원 계획, NIC, 방화벽, 프로세스 priority를 읽는다."),
+            ("운영 진단", "host_ip_present 같은 현업형 점검 항목을 계산한다."),
+            ("리포트 원본 제공", "session_report와 ops_report가 쓰는 환경 스냅샷을 만든다."),
+        ],
+        "landmarks": [
+            ("_run_powershell_json", r"^def _run_powershell_json", "PowerShell JSON 결과를 읽는다."),
+            ("_parse_power_scheme", r"^def _parse_power_scheme", "활성 전원 계획을 해석한다."),
+            ("_build_windows_runtime_snapshot", r"^def _build_windows_runtime_snapshot", "Windows 네트워크와 방화벽 상태를 수집한다."),
+            ("capture_system_snapshot", r"^def capture_system_snapshot", "최종 environment snapshot을 만든다."),
+        ],
+        "related": ["session_logging", "session_report", "log_html_reports"],
+    },
+    {
+        "slug": "operational_assessment",
+        "source": "tools/diagnostics/operational_assessment.py",
+        "title": "operational_assessment.py",
+        "category": "Diagnostics",
+        "stages": ["Reports"],
+        "summary": "세션 summary와 event 요약을 받아 현업형 점수, 등급, 강점/문제/권고를 계산하는 평가 엔진이다.",
+        "why": "평균 latency 하나만으로는 운영 수준을 설명하기 어렵기 때문에, 무결성, 가시성, 준비도를 함께 점수화한다.",
+        "mentor": "이 파일 덕분에 '좋아 보인다'가 아니라 '몇 점짜리 시스템인가'를 같은 기준으로 말할 수 있다.",
+        "before": "session_report.py",
+        "after": "summary.json.assessment, ops_report.html",
+        "inputs": "summary dict, event summary",
+        "outputs": "assessment dict, strengths, issues, recommendations",
+        "debug": "missing metric이 많을 때도 점수가 과도하게 깨지지 않는지, threshold 방향이 맞는지 확인한다.",
+        "ops": "팀 내부 루브릭을 코드로 묶으면 세션 비교와 발표 자료가 훨씬 일관돼진다.",
+        "read_order": [
+            "GRADE_BANDS로 등급 체계를 본다.",
+            "build_event_summary로 세션 수명주기 요약을 이해한다.",
+            "build_operational_assessment에서 점수 합산과 권고 생성을 읽는다.",
+        ],
+        "roles": [
+            ("점수화", "latency, integrity, visibility, readiness를 한 점수로 합친다."),
+            ("등급 부여", "A~F와 현업 해석 라벨을 붙인다."),
+            ("설명 생성", "strengths, issues, recommendations를 문장으로 만든다."),
+        ],
+        "landmarks": [
+            ("GRADE_BANDS", r"^GRADE_BANDS\s*=", "등급 컷오프 테이블이다."),
+            ("build_event_summary", r"^def build_event_summary", "event 로그를 운영 관점 요약으로 바꾼다."),
+            ("build_operational_assessment", r"^def build_operational_assessment", "점수와 권고를 계산한다."),
+        ],
+        "related": ["session_report", "session_compare", "log_html_reports"],
+    },
+    {
+        "slug": "log_html_reports",
+        "source": "tools/diagnostics/log_html_reports.py",
+        "title": "log_html_reports.py",
+        "category": "Reporting",
+        "stages": ["Reports"],
+        "summary": "summary.json과 comparison 결과를 읽어 세션 index, ops_report, 루트 대시보드까지 HTML로 생성하는 리포트 렌더러다.",
+        "why": "JSON만 있으면 숫자는 남지만, 회의나 현장 설명에서는 한눈에 보이는 HTML 리포트가 훨씬 빠르다.",
+        "mentor": "이 파일은 숫자를 전달 가능한 화면으로 바꾸는 마지막 계층이다. stage timing, system snapshot, operational score를 실제 문서로 보여 주는 역할을 한다.",
+        "before": "session_report.py, session_compare.py, operational_assessment.py",
+        "after": "index.html, ops_report.html, 비교용 루트 dashboard",
+        "inputs": "summary.json, comparison json, event summary",
+        "outputs": "세션별/루트 HTML 리포트",
+        "debug": "legacy session처럼 일부 로그가 비어 있어도 HTML이 깨지지 않는지, 링크가 올바른지 확인한다.",
+        "ops": "현업에서는 팀이 동일한 리포트를 보고 이야기할 수 있어야 하므로, HTML 레이어 품질도 꽤 중요하다.",
+        "read_order": [
+            "COMMON_STYLE과 COMMON_SCRIPT로 리포트 공통 뼈대를 본다.",
+            "_build_session_html과 _build_ops_html에서 세션 페이지 구성을 읽는다.",
+            "generate_reports로 실제 파일 생성 흐름을 확인한다.",
+        ],
+        "roles": [
+            ("세션 대시보드 생성", "한 세션의 핵심 지표를 index.html로 만든다."),
+            ("운영 평가 시각화", "ops_report.html로 점수와 권고를 보여 준다."),
+            ("루트 비교 허브", "여러 세션을 한눈에 비교하는 상위 index를 만든다."),
+        ],
+        "landmarks": [
+            ("_collect_session_rows", r"^def _collect_session_rows", "루트 대시보드용 세션 목록을 모은다."),
+            ("_build_ops_html", r"^def _build_ops_html", "현업 평가 리포트를 만든다."),
+            ("generate_reports", r"^def generate_reports", "세션/루트 HTML 생성 진입점이다."),
+            ("main", r"^def main", "CLI entrypoint다."),
+        ],
+        "related": ["session_report", "session_compare", "operational_assessment", "session_logging"],
     },
     {
         "slug": "read_binfile",
@@ -508,24 +654,25 @@ FLOW_DETAILS = {
         ("StopRadar", "실험 종료 시 레이다 구동을 멈추고 포트를 정리한다.", "정지된 장비 상태", "shutdown 흐름"),
     ],
     "live_motion_viewer": [
-        ("MotionViewer.__init__", "static/runtime/tuning 설정을 읽고 detection region, spatial view, session logger를 묶는다.", "앱 초기 상태와 세션 로그 경로", "start_workers / build_window"),
+        ("MotionViewer.__init__", "static/runtime/tuning 설정을 읽고 detection region, spatial view, SessionLogger를 묶는다.", "앱 초기 상태와 세션 로그 경로", "start_workers / build_window"),
         ("start_workers", "runtime settings와 tuning 파라미터를 바탕으로 UdpListener, DataProcessor, MultiTargetTracker를 만든다.", "실시간 처리 큐", "real_time_process.py"),
         ("configure_dca1000", "DCA1000 패킷 크기와 지연 설정을 하드웨어에 적용한다.", "DCA 설정 완료 상태", "open_radar"),
         ("pull_latest_processed_frame", "큐에 쌓인 FramePacket 중 최신 프레임 하나를 꺼낸다.", "렌더 대상 FramePacket", "overlay 업데이트 / log_render_snapshot"),
-        ("log_render_snapshot", "실제로 화면에 표시한 프레임 기준 정보를 JSONL로 남긴다.", "render_frames.jsonl", "session_report.py"),
+        ("log_render_snapshot", "실제로 화면에 표시한 프레임 기준 정보와 stage timing을 JSONL로 남긴다.", "render_frames.jsonl", "session_report.py"),
     ],
     "real_time_process": [
         ("UdpListener.run", "UDP packet stream을 받아 패킷 순서와 누락 상태를 포함해 프레임 재료를 모은다.", "packet queue", "DataProcessor.run"),
-        ("DataProcessor.run", "packet queue를 소비해 raw IQ -> radar cube -> RDI/RAI -> detections -> tracks로 처리한다.", "FramePacket", "live_motion_viewer.py"),
-        ("log_processed_frame", "처리 완료 직후 FramePacket 핵심 값을 JSONL로 저장한다.", "processed_frames.jsonl", "session_report.py"),
+        ("DataProcessor.run", "packet queue를 소비해 raw IQ -> radar cube -> shared FFT -> RDI/RAI -> detections -> tracks로 처리한다.", "FramePacket + stage_timings_ms", "live_motion_viewer.py"),
+        ("log_processed_frame", "처리 완료 직후 FramePacket 핵심 값과 stage timing을 JSONL로 저장한다.", "processed_frames.jsonl", "session_report.py"),
     ],
     "read_binfile": [
         ("remove_header", "mmWave Studio 캡처에 붙은 UDP header를 제거한다.", "헤더가 제거된 int16 stream", "read_bin_file"),
         ("read_bin_file", "raw int16 데이터를 complex IQ cube로 reshape하고 안테나 축을 정렬한다.", "frame x chirp x sample x channel cube", "DSP.py / future replay path"),
     ],
     "DSP": [
-        ("Range_Doppler", "range 축과 doppler 축 FFT를 수행해 움직임이 보이는 맵을 만든다.", "RDI magnitude map", "radar_runtime.py / detection.py"),
-        ("Range_Angle", "안테나 축 FFT를 수행해 각도 성분이 보이는 맵을 만든다.", "RAI magnitude map", "radar_runtime.py / detection.py"),
+        ("shared_range_doppler_fft", "window를 적용하고 range/doppler FFT를 한 번만 계산한다.", "shared FFT cube", "range_doppler_from_fft / range_angle_from_fft"),
+        ("range_doppler_from_fft", "공통 FFT 결과를 RDI magnitude map으로 투영한다.", "RDI magnitude map", "radar_runtime.py / detection.py"),
+        ("range_angle_from_fft", "공통 FFT 결과를 angle 축으로 다시 변환해 RAI를 만든다.", "RAI magnitude map", "radar_runtime.py / detection.py"),
     ],
     "radar_runtime": [
         ("parse_runtime_config", "settings dict를 축 길이와 ROI 규칙을 포함한 runtime config 객체로 바꾼다.", "RadarRuntimeConfig", "frame_to_radar_cube"),
@@ -555,13 +702,27 @@ FLOW_DETAILS = {
     "session_report": [
         ("_load_jsonl", "processed/render/event 로그를 JSON record 배열로 읽는다.", "record list", "build_summary"),
         ("_summarize_numeric", "latency와 count 값에서 mean, p50, p95를 계산한다.", "통계 dict", "build_summary"),
-        ("build_summary", "processed와 render 로그를 나눠 세션 요약을 만든다.", "summary.json 내용", "session_compare.py"),
+        ("_summarize_stage_timings", "stage timing dict를 stage별 분포로 요약한다.", "stage timing summary", "build_summary"),
+        ("build_summary", "processed와 render와 system snapshot을 함께 읽어 세션 요약과 운영 점수를 만든다.", "summary.json 내용", "session_compare.py"),
         ("main", "CLI에서 세션 폴더를 받아 summary.json을 파일로 쓴다.", "summary.json", "실험 비교 단계"),
     ],
     "session_compare": [
         ("_load_summary", "before와 after summary.json을 로드한다.", "두 세션의 summary dict", "build_comparison"),
-        ("build_comparison", "핵심 지표 delta와 improved/regressed 판단을 계산한다.", "comparison dict", "main"),
+        ("build_comparison", "핵심 지표와 operational score delta, improved/regressed 판단을 계산한다.", "comparison dict", "main"),
         ("main", "비교 결과를 comparison_vs_*.json으로 저장하고 콘솔에 요약 출력한다.", "comparison json", "실험 회귀 판단"),
+    ],
+    "session_logging": [
+        ("SessionLogger.build_session_metadata", "git 정보와 logging 토글을 세션 메타데이터로 묶는다.", "session metadata", "prepare"),
+        ("SessionLogger.prepare", "세션 폴더, runtime_config, system_snapshot, 로그 파일 핸들을 준비한다.", "session directory + file handles", "live_motion_viewer.py"),
+        ("SessionLogger.close", "로그 파일을 닫고 derived summary와 HTML 리포트를 생성한다.", "summary.json + index.html + ops_report.html", "사용자 검토"),
+    ],
+    "system_snapshot": [
+        ("_build_windows_runtime_snapshot", "Windows NIC, 방화벽, IP, priority 관련 정보를 수집한다.", "network/process snapshot", "capture_system_snapshot"),
+        ("capture_system_snapshot", "전원 계획과 Python 환경까지 합쳐 system_snapshot.json 구조를 만든다.", "system snapshot dict", "session_logging.py / session_report.py"),
+    ],
+    "log_html_reports": [
+        ("generate_reports", "summary.json과 비교 결과를 읽어 세션 HTML과 루트 dashboard를 다시 만든다.", "index.html / ops_report.html", "사용자 검토"),
+        ("_collect_session_rows", "루트 dashboard에 들어갈 세션 목록과 점수를 모은다.", "dashboard rows", "index.html"),
     ],
     "legacy_xwr1843_app": [
         ("send_cmd", "예전 구조에서 시리얼 명령을 장비에 보내는 진입점이다.", "장비 설정 상태", "plot"),
@@ -608,6 +769,7 @@ DATA_CONTRACTS = [
             "iq, rdi, rai",
             "udp_gap_count, byte_mismatch_count, invalid, invalid_reason",
             "detections, confirmed_tracks, tentative_tracks",
+            "stage_timings_ms",
         ],
     },
     {
@@ -1397,11 +1559,11 @@ def render_project_index() -> str:
 
       <section class="section" id="goal">
         <h2>프로젝트 목표 정리</h2>
-        <p class="intro">한 문장으로 줄이면, 이 프로젝트는 실시간 객체 추적 레이더 데모를 만들고 그것을 나중에 재현 가능하게 측정하는 시스템으로 진화하고 있다.</p>
+        <p class="intro">한 문장으로 줄이면, 이 프로젝트는 실시간 객체 추적 레이더 데모를 만들고 그것을 환경 스냅샷과 운영 점수까지 포함해 재현 가능하게 측정하는 시스템으로 진화하고 있다.</p>
         <div class="grid3">
           <article class="card"><h3>실시간 검출</h3><p>UDP로 들어오는 raw frame에서 움직이는 후보를 안정적으로 찾아야 한다.</p></article>
           <article class="card"><h3>실시간 추적</h3><p>같은 사람을 여러 프레임에서 같은 ID로 유지해야 한다.</p></article>
-          <article class="card"><h3>지속 측정</h3><p>processed와 render와 report 구조가 들어가면서 전과 후를 숫자로 비교하는 기반이 생겼다.</p></article>
+          <article class="card"><h3>지속 측정</h3><p>processed, render, event, system snapshot, ops report 구조가 들어가면서 전과 후를 숫자와 점수로 비교하는 기반이 생겼다.</p></article>
         </div>
       </section>
 
@@ -1415,18 +1577,18 @@ def render_project_index() -> str:
         </div>
         <div class="flow" style="margin-top:16px;">
           <article class="flow-step"><span>4. 실시간 표시</span><strong>live_motion_viewer.py + app_layout.py</strong><p>최신 프레임만 골라 UI에 올린다.</p></article>
-          <article class="flow-step"><span>5. 로그</span><strong>session_meta / processed / render / event</strong><p>처리 로그와 렌더 로그를 분리해 남긴다.</p></article>
-          <article class="flow-step"><span>6. 리포트</span><strong>session_report.py + session_compare.py</strong><p>summary와 before와 after 비교 결과를 만든다.</p></article>
+          <article class="flow-step"><span>5. 로그</span><strong>session_meta / processed / render / event / system_snapshot</strong><p>처리 로그와 렌더 로그를 분리해 남기고 실행 환경도 함께 저장한다.</p></article>
+          <article class="flow-step"><span>6. 리포트</span><strong>session_report.py + operational_assessment.py + log_html_reports.py</strong><p>summary, 운영 점수, HTML 대시보드를 만든다.</p></article>
         </div>
       </section>
 
       <section class="section">
         <h2>왜 로그 구조가 중요해졌는가</h2>
-        <p class="intro">예전에는 status_log.jsonl이 사실상 render 기준 로그였다. 지금은 처리된 모든 프레임과 실제 화면에 보인 프레임을 분리해서 볼 수 있다.</p>
+        <p class="intro">예전에는 status_log.jsonl이 사실상 render 기준 로그였다. 지금은 처리된 모든 프레임과 실제 화면에 보인 프레임을 분리해서 볼 수 있고, 그 세션을 어떤 전원 계획과 NIC 상태에서 돌렸는지도 함께 남긴다.</p>
         <div class="grid3">
           <article class="card"><h3>이전 상태</h3><p>UI가 최신 프레임만 소비하면 중간 처리 프레임이 스킵되고, 알고리즘 자체 성능이 로그에 충분히 남지 않았다.</p></article>
-          <article class="card"><h3>현재 상태</h3><p>processed_frames.jsonl은 처리기 기준 전체 프레임을, render_frames.jsonl은 사용자 체감 기준 프레임을 남긴다.</p></article>
-          <article class="card"><h3>의미</h3><p>이제 알고리즘 개선과 UI 병목을 분리해서 측정할 수 있다. session_report와 session_compare가 그 차이를 숫자로 보여 준다.</p></article>
+          <article class="card"><h3>현재 상태</h3><p>processed_frames.jsonl은 처리기 기준 전체 프레임을, render_frames.jsonl은 사용자 체감 기준 프레임을, system_snapshot.json은 실행 환경 상태를 남긴다.</p></article>
+          <article class="card"><h3>의미</h3><p>이제 알고리즘 개선, UI 병목, 실행 환경 문제를 분리해서 측정할 수 있다. session_report와 ops_report가 그 차이를 숫자와 점수로 보여 준다.</p></article>
         </div>
       </section>
 
@@ -1465,22 +1627,22 @@ def render_project_index() -> str:
         <p class="intro">시간을 아끼려면 아래 순서가 가장 효율적이다.</p>
         <div class="card">
           <ul>
-            <li>1단계: runtime_settings.py로 실험 파라미터와 logging metadata 범위를 본다.</li>
+            <li>1단계: runtime_settings.py와 session_logging.py로 실험 파라미터와 로그 토글을 본다.</li>
             <li>2단계: live_motion_viewer.py로 앱이 어떤 워커와 로그를 엮는지 이해한다.</li>
-            <li>3단계: real_time_process.py와 radar_runtime.py로 실제 처리 파이프라인을 따라간다.</li>
+            <li>3단계: real_time_process.py, radar_runtime.py, DSP.py로 실제 처리 파이프라인과 shared FFT 경로를 따라간다.</li>
             <li>4단계: detection.py, dbscan_cluster.py, tracking.py로 결과가 어떻게 안정화되는지 본다.</li>
-            <li>5단계: session_report.py, session_compare.py로 전후 비교 체계를 이해한다.</li>
+            <li>5단계: session_report.py, operational_assessment.py, log_html_reports.py로 진단과 리포트 체계를 이해한다.</li>
           </ul>
         </div>
       </section>
 
       <section class="section">
         <h2>현업 시점 평가</h2>
-        <p class="intro">관측성과 실험 추적 능력은 좋아졌지만, 구조 분리와 재생 기반 회귀 검증은 아직 더 필요하다.</p>
+        <p class="intro">관측성과 실험 추적 능력은 분명히 좋아졌고, shared FFT와 stage timing처럼 성능 개선 기반도 생겼다. 다만 구조 분리와 재생 기반 회귀 검증은 아직 더 필요하다.</p>
         <div class="grid3">
-          <article class="card"><h3>좋아진 점</h3><p>processed, render, event, session meta, summary, comparison 구조가 생기면서 개선 판단 근거가 훨씬 강해졌다.</p></article>
-          <article class="card"><h3>여전히 아쉬운 점</h3><p>MotionViewer에 책임이 많이 몰려 있고 print 기반 장비 로그 흔적과 legacy 경로가 남아 있다.</p></article>
-          <article class="card"><h3>다음 우선순위</h3><p>AppController 분리, replay 입력 경로 정리, regression threshold 추가가 다음 단계다.</p></article>
+          <article class="card"><h3>좋아진 점</h3><p>processed, render, event, system snapshot, summary, ops report 구조가 생기면서 개선 판단 근거가 훨씬 강해졌다.</p></article>
+          <article class="card"><h3>여전히 아쉬운 점</h3><p>MotionViewer에 책임이 많이 몰려 있고 processing hot path는 아직 직렬 계산 비중이 높다.</p></article>
+          <article class="card"><h3>다음 우선순위</h3><p>AppController 분리, replay 입력 경로 정리, CFAR/후보 루프 벡터화, regression threshold 추가가 다음 단계다.</p></article>
         </div>
       </section>
     </div>
@@ -1506,13 +1668,13 @@ def render_req_index() -> str:
           <div>
             <span class="eyebrow">REQ / Improvement Spec</span>
             <h1>실무형 리팩터링 요구사항</h1>
-            <p>이 문서는 지금 구조에서 무엇이 부족하고 무엇을 어떤 순서로 고쳐야 하는지 구현 관점에서 정리한 명세서다. 최근에는 로그 분리와 세션 리포트 생성이 반영되었고, 그 다음 단계도 함께 업데이트했다.</p>
+            <p>이 문서는 지금 구조에서 무엇이 부족하고 무엇을 어떤 순서로 고쳐야 하는지 구현 관점에서 정리한 명세서다. 최근에는 로그 분리, system snapshot, stage timing, operational report, shared FFT 최적화가 반영되었고, 그 다음 단계도 함께 업데이트했다.</p>
           </div>
           <div class="hero-meta">
             <div class="meta"><span>Overall</span><strong>{CURRENT_STATE['score_overall']}</strong></div>
             <div class="meta"><span>Logging</span><strong>{CURRENT_STATE['score_logging']}</strong></div>
-            <div class="meta"><span>Active REQ</span><strong>5</strong></div>
-            <div class="meta"><span>Implemented</span><strong>Phase 1-2</strong></div>
+            <div class="meta"><span>Active REQ</span><strong>6</strong></div>
+            <div class="meta"><span>Implemented</span><strong>Phase 1-3</strong></div>
           </div>
         </div>
       </section>
@@ -1522,19 +1684,20 @@ def render_req_index() -> str:
         <p class="intro">최근 업데이트로 관측성과 비교 자동화 기반은 실제 코드에 반영되었다.</p>
         <div class="grid3">
           <article class="card"><h3>완료 1</h3><p>processed_frames.jsonl, render_frames.jsonl, event_log.jsonl, session_meta.json 구조가 추가되었다.</p></article>
-          <article class="card"><h3>완료 2</h3><p>session_report.py가 세션 폴더에서 summary.json을 생성한다.</p></article>
-          <article class="card"><h3>완료 3</h3><p>session_compare.py가 before와 after 실험의 개선과 회귀를 정리한다.</p></article>
+          <article class="card"><h3>완료 2</h3><p>session_report.py가 system_snapshot, stage timing, operational assessment를 포함한 summary.json을 생성한다.</p></article>
+          <article class="card"><h3>완료 3</h3><p>log_html_reports.py가 index.html과 ops_report.html을 만들고, DSP.py에는 shared FFT 기반 hot-path 최적화가 반영되었다.</p></article>
         </div>
       </section>
 
       <section class="section">
         <h2>남은 핵심 요구사항</h2>
-        <p class="intro">이제부터는 구조 분리, 재현 실험, 알고리즘 개선을 단계적으로 진행하는 것이 맞다.</p>
+        <p class="intro">이제부터는 구조 분리, 재현 실험, 남은 processing 병목 제거를 단계적으로 진행하는 것이 맞다.</p>
         <div class="table-wrap">
           <table>
             <thead><tr><th>REQ</th><th>상태</th><th>목표</th><th>구현 포인트</th></tr></thead>
             <tbody>
-              <tr><td>MotionViewer 책임 분리</td><td>Pending</td><td>UI, 앱 제어, 세션 로그 책임을 나눈다.</td><td>AppController / ViewRenderer / SessionLogger 분리</td></tr>
+              <tr><td>MotionViewer 책임 분리</td><td>In Progress</td><td>UI, 앱 제어, 세션 로그 책임을 더 명확히 나눈다.</td><td>AppController / ViewRenderer / SessionLogger 경계 강화</td></tr>
+              <tr><td>Processing hot-path 경량화</td><td>In Progress</td><td>real_time_process.py의 직렬 계산 비용을 더 줄인다.</td><td>CFAR 벡터화, 후보 pruning, logging writer 분리</td></tr>
               <tr><td>print 기반 로그 정리</td><td>Pending</td><td>장비 제어와 예외 로그도 구조화한다.</td><td>logging 모듈 또는 JSON logger 도입</td></tr>
               <tr><td>Replay 입력 경로</td><td>Pending</td><td>같은 raw 입력으로 전후 비교 가능하게 만든다.</td><td>read_binfile.py 기반 session_replay 경로 추가</td></tr>
               <tr><td>Regression Threshold</td><td>Pending</td><td>요약 비교 결과를 pass와 fail로 판정한다.</td><td>session_compare.py에 임계값 규칙 추가</td></tr>
@@ -1548,10 +1711,10 @@ def render_req_index() -> str:
         <h2>우선순위 상세</h2>
         <p class="intro">현업 기준으로는 아래 순서가 가장 안전하다.</p>
         <div class="grid2">
-          <article class="card"><h3>1. 구조 안정화</h3><p>현재는 live_motion_viewer.py에 앱 제어와 렌더와 로그 준비가 한곳에 몰려 있다. 먼저 SessionLogger와 AppController를 분리해 책임 경계를 만든다.</p></article>
-          <article class="card"><h3>2. 재현 실험 가능화</h3><p>실제 전후 비교는 동일 입력이 있어야 의미가 있다. read_binfile.py를 기반으로 replay 경로를 만들고 session_meta에 source_capture를 강제 기록한다.</p></article>
-          <article class="card"><h3>3. 비교 자동화 강화</h3><p>session_compare.py는 이미 delta를 내지만 아직 fail와 pass 정책은 없다. invalid_rate, latency p95, multi-target success 기준을 추가한다.</p></article>
-          <article class="card"><h3>4. 알고리즘 실험</h3><p>그 다음에야 Capon hybrid나 tracking 파라미터 튜닝을 실험하는 것이 맞다. 지금은 측정 기반이 생겼기 때문에 개선 여부를 더 신뢰할 수 있다.</p></article>
+          <article class="card"><h3>1. processing 병목 제거</h3><p>shared FFT는 들어갔지만 detect_targets, CFAR, logging write 비용은 아직 크다. 여기서 추가 벡터화와 비동기화를 먼저 진행하는 것이 체감 효과가 크다.</p></article>
+          <article class="card"><h3>2. 구조 안정화</h3><p>현재는 live_motion_viewer.py에 앱 제어와 렌더가 많이 몰려 있다. SessionLogger는 분리됐으니 다음은 AppController와 ViewRenderer 경계를 더 만드는 단계다.</p></article>
+          <article class="card"><h3>3. 재현 실험 가능화</h3><p>실제 전후 비교는 동일 입력이 있어야 의미가 있다. read_binfile.py를 기반으로 replay 경로를 만들고 session_meta에 source_capture를 강제 기록한다.</p></article>
+          <article class="card"><h3>4. 비교 자동화 강화</h3><p>session_compare.py는 이미 delta를 내지만 아직 fail와 pass 정책은 없다. invalid_rate, latency p95, operational score 기준을 추가한다.</p></article>
         </div>
       </section>
 
@@ -1563,7 +1726,7 @@ def render_req_index() -> str:
             <li>live path와 replay path 모두 같은 summary schema를 만든다.</li>
             <li>before와 after 비교가 scenario_id와 source_capture 기준으로 자동 묶인다.</li>
             <li>구조상 UI, 처리, 로깅 책임이 분리되어 한 파일 집중도가 낮아진다.</li>
-            <li>tracking과 latency 지표에 최소 회귀 기준이 걸린다.</li>
+            <li>tracking과 latency와 operational score 지표에 최소 회귀 기준이 걸린다.</li>
             <li>README와 docs만 읽어도 신규 인원이 실행 경로와 비교 경로를 이해할 수 있다.</li>
           </ul>
         </div>

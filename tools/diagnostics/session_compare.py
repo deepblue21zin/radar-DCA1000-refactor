@@ -6,7 +6,9 @@ from pathlib import Path
 
 
 METRICS = [
+    ("assessment.overall.score", "Operational score", "higher"),
     ("processed.invalid_rate", "Processed invalid rate", "lower"),
+    ("render.invalid_rate", "Render invalid rate", "lower"),
     ("processed.capture_to_process_ms.mean", "Processed latency mean", "lower"),
     ("processed.capture_to_process_ms.p95", "Processed latency p95", "lower"),
     ("processed.confirmed_track_count.mean", "Confirmed track mean", "higher"),

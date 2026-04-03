@@ -139,14 +139,14 @@ def frame_to_radar_cube(frame_data, runtime_config):
             runtime_config.adc_sample,
         ],
     )
-
-    rx_major_channels = []
-    for rx_index in range(runtime_config.rx_num):
-        channel_view = complex_frame[:, :, rx_index, :]
-        channel_view = np.transpose(channel_view, [0, 2, 1])
-        rx_major_channels.append(channel_view)
-
-    return np.concatenate(rx_major_channels, axis=2)
+    return np.reshape(
+        np.transpose(complex_frame, [0, 3, 2, 1]),
+        [
+            runtime_config.chirp_loops,
+            runtime_config.adc_sample,
+            runtime_config.rx_num * runtime_config.tx_num,
+        ],
+    )
 
 
 def remove_static_clutter(radar_cube):
@@ -160,16 +160,41 @@ def integrate_rdi_channels(rdi_cube):
     return np.sum(rdi_cube, axis=2)
 
 
+def _stable_motion_projection(motion_cube, top_k=3):
+    motion_energy = np.square(np.abs(np.asarray(motion_cube, dtype=np.float64)))
+    if motion_energy.ndim != 3 or motion_energy.size == 0:
+        return motion_energy
+
+    k = max(1, min(int(top_k), motion_energy.shape[0]))
+    if k >= motion_energy.shape[0]:
+        return np.sqrt(np.mean(motion_energy, axis=0))
+
+    partition_index = motion_energy.shape[0] - k
+    top_motion = np.partition(motion_energy, partition_index, axis=0)[-k:]
+    return np.sqrt(np.mean(top_motion, axis=0))
+
+
 def collapse_motion_rai(rai_cube, guard_bins=1):
     if rai_cube.ndim != 3:
         return rai_cube
 
-    motion_cube = np.array(rai_cube, copy=True)
-    center_bin = motion_cube.shape[0] // 2
+    center_bin = rai_cube.shape[0] // 2
     lower = max(center_bin - guard_bins, 0)
-    upper = min(center_bin + guard_bins + 1, motion_cube.shape[0])
-    motion_cube[lower:upper, :, :] = 0
-    return np.max(motion_cube, axis=0)
+    upper = min(center_bin + guard_bins + 1, rai_cube.shape[0])
+
+    leading_motion = rai_cube[:lower]
+    trailing_motion = rai_cube[upper:]
+
+    if leading_motion.size and trailing_motion.size:
+        return np.maximum(
+            _stable_motion_projection(leading_motion),
+            _stable_motion_projection(trailing_motion),
+        )
+    if leading_motion.size:
+        return _stable_motion_projection(leading_motion)
+    if trailing_motion.size:
+        return _stable_motion_projection(trailing_motion)
+    return np.zeros(rai_cube.shape[1:], dtype=rai_cube.dtype)
 
 
 def radial_bin_limit(runtime_config, max_distance_m):

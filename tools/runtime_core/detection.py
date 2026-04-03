@@ -138,6 +138,60 @@ def _nearest_axis_bin(axis_values, value):
     return int(np.argmin(np.abs(np.asarray(axis_values) - value)))
 
 
+def _angle_centroid_radius_for_range(range_m, radius_bands, default_radius=1):
+    if not radius_bands:
+        return int(default_radius)
+
+    for band in radius_bands:
+        try:
+            r_min = float(band.get("r_min", 0.0))
+            r_max = band.get("r_max")
+            radius = int(band.get("radius", default_radius))
+        except (TypeError, ValueError, AttributeError):
+            continue
+
+        if radius < 1:
+            radius = int(default_radius)
+        if range_m < r_min:
+            continue
+        if r_max is None or float(range_m) < float(r_max):
+            return radius
+
+    return int(default_radius)
+
+
+def _refine_angle_centroid(
+    angle_profile,
+    angle_axis_rad,
+    peak_bin,
+    angle_floor,
+    angle_mask,
+    radius=1,
+):
+    lower = max(int(peak_bin) - int(radius), 0)
+    upper = min(int(peak_bin) + int(radius) + 1, angle_profile.shape[0])
+    local_bins = np.arange(lower, upper)
+    local_bins = local_bins[np.asarray(angle_mask[lower:upper], dtype=bool)]
+    if local_bins.size == 0:
+        return int(peak_bin), float(angle_axis_rad[int(peak_bin)])
+
+    local_values = np.asarray(angle_profile[local_bins], dtype=np.float64)
+    weights = np.maximum(local_values - max(float(angle_floor), 0.0), 0.0)
+    weight_sum = float(np.sum(weights))
+    if weight_sum <= 1e-9:
+        weights = np.maximum(local_values, 0.0)
+        weight_sum = float(np.sum(weights))
+    if weight_sum <= 1e-9:
+        return int(peak_bin), float(angle_axis_rad[int(peak_bin)])
+
+    refined_angle_rad = float(
+        np.sum(np.asarray(angle_axis_rad[local_bins], dtype=np.float64) * weights)
+        / weight_sum
+    )
+    refined_angle_bin = _nearest_axis_bin(angle_axis_rad, refined_angle_rad)
+    return refined_angle_bin, refined_angle_rad
+
+
 def _cluster_detection_candidates(
     candidate_pool,
     runtime_config,
@@ -229,6 +283,7 @@ def detect_targets(
     angle_quantile=0.75,
     angle_contrast_scale=1.35,
     min_cartesian_separation_m=0.45,
+    angle_centroid_radius_bands=None,
 ):
     rdi_roi = np.asarray(rdi_map[min_range_bin:max_range_bin], dtype=np.float64)
     if rdi_roi.size == 0:
@@ -285,8 +340,8 @@ def detect_targets(
 
         angle_profile = np.asarray(rai_map[range_bin], dtype=np.float64)
         masked_angle_profile = np.where(angle_mask, angle_profile, 0)
-        angle_bin = int(np.argmax(masked_angle_profile))
-        rai_peak = float(masked_angle_profile[angle_bin])
+        peak_angle_bin = int(np.argmax(masked_angle_profile))
+        rai_peak = float(masked_angle_profile[peak_angle_bin])
         if rai_peak <= 0:
             continue
 
@@ -299,10 +354,22 @@ def detect_targets(
         if angle_contrast < angle_contrast_scale:
             continue
 
-        if not _angle_is_local_peak(masked_angle_profile, angle_bin):
+        if not _angle_is_local_peak(masked_angle_profile, peak_angle_bin):
             continue
 
-        angle_rad = float(runtime_config.angle_axis_rad[angle_bin])
+        centroid_radius = _angle_centroid_radius_for_range(
+            range_m,
+            angle_centroid_radius_bands,
+            default_radius=1,
+        )
+        angle_bin, angle_rad = _refine_angle_centroid(
+            masked_angle_profile,
+            runtime_config.angle_axis_rad,
+            peak_angle_bin,
+            angle_floor,
+            angle_mask,
+            radius=centroid_radius,
+        )
         x_m = float(range_m * np.sin(angle_rad))
         y_m = float(range_m * np.cos(angle_rad))
         rdi_peak = float(rdi_map[range_bin, int(doppler_bin)])

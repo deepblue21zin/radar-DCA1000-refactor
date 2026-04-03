@@ -1,0 +1,880 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>real_time_process 병목 문제 명세서</title>
+  <style>
+    :root {
+      --bg: #eef3f6;
+      --panel: rgba(255, 255, 255, 0.96);
+      --ink: #17242f;
+      --muted: #597080;
+      --line: #d7e2e8;
+      --teal: #0e7c78;
+      --navy: #183b63;
+      --orange: #ff8b3d;
+      --good: #18794e;
+      --warn: #b66a12;
+      --danger: #c0392b;
+      --shadow: 0 24px 56px rgba(20, 35, 47, 0.12);
+      --sans: "Pretendard Variable", "IBM Plex Sans KR", "Segoe UI", sans-serif;
+      --mono: "JetBrains Mono", Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(14, 124, 120, 0.18), transparent 28%),
+        radial-gradient(circle at top right, rgba(24, 59, 99, 0.16), transparent 24%),
+        linear-gradient(180deg, #eef4f7 0%, #f7fafc 24%, #edf2f5 100%);
+    }
+    a { color: inherit; }
+    code {
+      font-family: var(--mono);
+      background: rgba(24, 59, 99, 0.08);
+      padding: 2px 6px;
+      border-radius: 8px;
+      font-size: 0.95em;
+    }
+    .wrap {
+      width: min(1240px, calc(100vw - 40px));
+      margin: 0 auto 64px;
+    }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      backdrop-filter: blur(18px);
+      background: rgba(238, 243, 246, 0.84);
+      border-bottom: 1px solid rgba(23, 36, 47, 0.08);
+    }
+    .topbar-inner {
+      width: min(1240px, calc(100vw - 40px));
+      margin: 0 auto;
+      padding: 16px 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      font-weight: 700;
+    }
+    .mark {
+      width: 44px;
+      height: 44px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, var(--teal), #19a6a1 54%, var(--navy));
+      box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden;
+    }
+    .mark::before {
+      content: "";
+      position: absolute;
+      inset: 10px;
+      border-radius: 999px;
+      border: 2px solid rgba(255, 255, 255, 0.88);
+    }
+    .nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .nav a {
+      text-decoration: none;
+      color: var(--muted);
+      font-size: 14px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.9);
+      border: 1px solid rgba(23, 36, 47, 0.06);
+    }
+    .hero {
+      margin-top: 28px;
+      padding: 34px;
+      border-radius: 32px;
+      color: #f9fcfd;
+      background: linear-gradient(135deg, rgba(14, 124, 120, 0.97), rgba(24, 59, 99, 0.95));
+      box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden;
+    }
+    .hero::before {
+      content: "";
+      position: absolute;
+      right: -90px;
+      top: -72px;
+      width: 280px;
+      height: 280px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(255, 255, 255, 0.18), transparent 70%);
+    }
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.5fr 1fr;
+      gap: 24px;
+      position: relative;
+      z-index: 1;
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 18px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      font-size: 13px;
+      background: rgba(255, 255, 255, 0.12);
+    }
+    h1 {
+      margin: 0 0 16px;
+      font-size: clamp(34px, 4vw, 54px);
+      line-height: 1.04;
+      letter-spacing: -0.04em;
+    }
+    .hero p {
+      margin: 0;
+      line-height: 1.72;
+      font-size: 16px;
+      color: rgba(249, 252, 253, 0.92);
+    }
+    .hero-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .meta {
+      padding: 18px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+    }
+    .meta span {
+      display: block;
+      font-size: 13px;
+      color: rgba(249, 252, 253, 0.76);
+    }
+    .meta strong {
+      display: block;
+      margin-top: 10px;
+      font-size: 28px;
+      letter-spacing: -0.04em;
+    }
+    .section {
+      margin-top: 26px;
+      padding: 28px;
+      border-radius: 28px;
+      background: var(--panel);
+      border: 1px solid rgba(23, 36, 47, 0.06);
+      box-shadow: var(--shadow);
+    }
+    .section h2 {
+      margin: 0 0 10px;
+      font-size: 30px;
+      letter-spacing: -0.03em;
+    }
+    .intro {
+      margin: 0 0 22px;
+      color: var(--muted);
+      line-height: 1.74;
+      font-size: 15px;
+    }
+    .grid2, .grid3, .grid4 {
+      display: grid;
+      gap: 18px;
+    }
+    .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .card, .metric, .problem, .note, .spec {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      padding: 20px;
+    }
+    .metric h3, .card h3, .problem h3, .spec h3 {
+      margin: 0 0 10px;
+      font-size: 20px;
+      letter-spacing: -0.02em;
+    }
+    .metric p, .card p, .problem p, .spec p, li, td, th {
+      color: var(--muted);
+      line-height: 1.72;
+      font-size: 14px;
+    }
+    .signal {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--teal);
+    }
+    .signal::before {
+      content: "";
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 0 6px rgba(14, 124, 120, 0.12);
+    }
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 16px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .pill.good { background: rgba(24, 121, 78, 0.1); color: var(--good); }
+    .pill.warn { background: rgba(182, 106, 18, 0.12); color: var(--warn); }
+    .pill.danger { background: rgba(192, 57, 43, 0.1); color: var(--danger); }
+    .pill.brand { background: rgba(24, 59, 99, 0.08); color: var(--navy); }
+    .problem {
+      display: grid;
+      gap: 16px;
+    }
+    .problem-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+    }
+    .spec-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .spec {
+      padding: 16px;
+      border-radius: 18px;
+      background: #f8fbfc;
+    }
+    .spec strong {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--ink);
+      font-size: 14px;
+    }
+    ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+    li + li {
+      margin-top: 6px;
+    }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .flow-step {
+      padding: 18px;
+      border-radius: 20px;
+      background: #fff;
+      border: 1px solid var(--line);
+    }
+    .flow-step span {
+      display: inline-block;
+      margin-bottom: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--teal);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .flow-step strong {
+      display: block;
+      margin-bottom: 10px;
+      font-size: 18px;
+    }
+    .table-wrap {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: #fff;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    th, td {
+      text-align: left;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    th {
+      background: #f7fafb;
+      color: var(--ink);
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    tr:last-child td {
+      border-bottom: 0;
+    }
+    .footer-note {
+      margin-top: 26px;
+      padding: 18px 22px;
+      border-radius: 18px;
+      background: linear-gradient(135deg, rgba(255, 139, 61, 0.1), rgba(24, 59, 99, 0.07));
+      border: 1px solid rgba(255, 139, 61, 0.18);
+      color: var(--muted);
+      line-height: 1.72;
+    }
+    @media (max-width: 1100px) {
+      .hero-grid,
+      .grid4,
+      .grid3,
+      .flow {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+    @media (max-width: 760px) {
+      .topbar-inner,
+      .hero-grid,
+      .grid2,
+      .grid3,
+      .grid4,
+      .flow,
+      .spec-grid {
+        grid-template-columns: 1fr;
+      }
+      .wrap {
+        width: min(100vw - 24px, 1240px);
+      }
+      .hero, .section {
+        padding: 22px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <div class="mark"></div>
+        <div>
+          <div>real_time_process 병목 문제 명세서</div>
+          <small style="color: var(--muted);">학생도 이해할 수 있게 풀어쓴 성능 개선 안내서</small>
+        </div>
+      </div>
+      <nav class="nav">
+        <a href="#summary">한눈에 보기</a>
+        <a href="#flow">처리 흐름</a>
+        <a href="#problems">문제 상세</a>
+        <a href="#roadmap">개선 순서</a>
+        <a href="./environment_checklist.html">환경 체크리스트</a>
+        <a href="./retest_plan.html">재실험 계획서</a>
+        <a href="../log_guides/processed_frames_guide.html">로그 가이드</a>
+        <a href="../project_analysis/index.html">프로젝트 분석</a>
+      </nav>
+    </div>
+  </div>
+
+  <main class="wrap">
+    <section class="hero">
+      <div class="hero-grid">
+        <div>
+          <div class="eyebrow">Latest session: <code>20260402_165901</code></div>
+          <h1>왜 <code>real_time_process.py</code>가 느린지, 그리고 어떻게 고치면 좋은지</h1>
+          <p>
+            이 문서는 <code>tools/runtime_core/real_time_process.py</code>와 그 주변 함수들을 기준으로
+            처리 시간 문제를 설명한 명세서다. 목표는 "어디가 느리다"를 넘어서
+            "왜 느린지", "현업에서는 왜 위험한지", "무엇부터 고쳐야 하는지"를
+            대학생 2학년도 이해할 수 있게 정리하는 것이다.
+          </p>
+          <div class="pill-row">
+            <span class="pill danger">핵심 결론: render만의 문제가 아님</span>
+            <span class="pill warn">핵심 병목: 중복 FFT + 복사 + dtype</span>
+            <span class="pill brand">문서 범위: processing path 중심</span>
+          </div>
+        </div>
+        <div class="hero-meta">
+          <div class="meta">
+            <span>Processed P95</span>
+            <strong>203.4ms</strong>
+          </div>
+          <div class="meta">
+            <span>Render P95</span>
+            <strong>236.4ms</strong>
+          </div>
+          <div class="meta">
+            <span>Render Invalid</span>
+            <strong>1.73%</strong>
+          </div>
+          <div class="meta">
+            <span>Operational Score</span>
+            <strong>59 / 100</strong>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="summary" class="section">
+      <h2>한눈에 보기</h2>
+      <p class="intro">
+        먼저 가장 중요한 요약부터 적는다. 최신 로그 기준으로 이 시스템은 "아예 동작하지 않는 수준"은 아니다.
+        하지만 "현업에서 바로 믿고 쓰기 좋은 수준"도 아니다. 이유는 간단하다.
+        프레임 하나를 처리하는 데 걸리는 시간이 프레임이 들어오는 주기와 비슷하거나 더 길기 때문이다.
+      </p>
+      <div class="grid4">
+        <article class="metric">
+          <div class="signal">Diagnosis</div>
+          <h3>가장 큰 문제</h3>
+          <p>
+            한 프레임 안에서 <code>Radar Cube</code>, <code>Range-Doppler</code>,
+            <code>Range-Angle</code>, detection, tracking, logging을
+            한 스레드에서 순서대로 다 끝낸다.
+          </p>
+        </article>
+        <article class="metric">
+          <div class="signal">Why It Hurts</div>
+          <h3>현업에서 위험한 이유</h3>
+          <p>
+            평균값보다 <strong>상위 95%</strong> 지연이 중요하다. 가끔만 느려져도
+            실시간 시스템은 사용자 체감이 급격히 나빠지고, 패킷 문제와 겹치면 디버깅이 어려워진다.
+          </p>
+        </article>
+        <article class="metric">
+          <div class="signal">Simple View</div>
+          <h3>쉬운 비유</h3>
+          <p>
+            손님이 들어올 때마다 빵을 처음부터 굽고, 포장하고, 계산하고, 장부까지 직접 쓰는
+            1인 매장 구조다. 일은 되지만 손님이 몰리면 바로 느려진다.
+          </p>
+        </article>
+        <article class="metric">
+          <div class="signal">Priority</div>
+          <h3>먼저 할 일</h3>
+          <p>
+            <code>stage timer 추가</code>, <code>dtype 축소</code>,
+            <code>중복 FFT 제거</code>를 가장 먼저 해야 한다.
+            이 셋이 효과 대비 우선순위가 가장 높다.
+          </p>
+        </article>
+      </div>
+      <div class="pill-row">
+        <a class="pill brand" href="./environment_checklist.html" style="text-decoration: none;">운영 환경 체크리스트 보기</a>
+        <a class="pill brand" href="./retest_plan.html" style="text-decoration: none;">재실험 계획서 보기</a>
+      </div>
+    </section>
+
+    <section id="flow" class="section">
+      <h2>현재 처리 흐름</h2>
+      <p class="intro">
+        아래 흐름이 한 프레임마다 거의 그대로 실행된다.
+        중요한 점은 이 단계들이 서로 겹쳐서 병렬로 돌아가지 않고, 대부분 직렬로 이어진다는 것이다.
+      </p>
+      <div class="flow">
+        <div class="flow-step">
+          <span>Step 1</span>
+          <strong>IQ -> Radar Cube</strong>
+          <p><code>frame_to_radar_cube()</code>에서 복소수 배열을 만들고 reshape, transpose, concatenate를 수행한다.</p>
+        </div>
+        <div class="flow-step">
+          <span>Step 2</span>
+          <strong>Static 제거</strong>
+          <p><code>remove_static_clutter()</code>에서 평균을 계산하고 전체 cube에서 뺀다.</p>
+        </div>
+        <div class="flow-step">
+          <span>Step 3</span>
+          <strong>RDI / RAI 계산</strong>
+          <p><code>Range_Doppler()</code>와 <code>Range_Angle()</code>에서 큰 FFT를 별도로 수행한다.</p>
+        </div>
+        <div class="flow-step">
+          <span>Step 4</span>
+          <strong>Detection</strong>
+          <p><code>detect_targets()</code>에서 median, quantile, CFAR, ROI, cluster를 적용한다.</p>
+        </div>
+        <div class="flow-step">
+          <span>Step 5</span>
+          <strong>Tracking + Logging</strong>
+          <p><code>tracker.update()</code> 후 JSON 로그를 쓰고 queue에 넣는다.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="problems" class="section">
+      <h2>문제 상세</h2>
+      <p class="intro">
+        아래 문제들은 "느려 보이는 느낌"이 아니라 실제 코드 구조와 최신 세션 로그를 바탕으로 정리한 것이다.
+        각 항목마다 문제 정의, 쉬운 설명, 왜 현업에서 문제인지, 해결 명세, 완료 기준을 적었다.
+      </p>
+
+      <article class="problem">
+        <div class="problem-top">
+          <div>
+            <div class="signal">Problem 1</div>
+            <h3>한 프레임의 모든 무거운 작업을 한 스레드에서 순서대로 처리한다</h3>
+          </div>
+          <span class="pill danger">우선순위 매우 높음</span>
+        </div>
+        <p>
+          <code>DataProcessor.run()</code>는 <code>raw_frame_queue.get()</code> 이후
+          cube 생성, static 제거, RDI, RAI, detection, tracking, logging을 한 번에 끝낸다.
+          이 구조는 구현은 단순하지만, 프레임 예산을 넘기기 쉽다.
+        </p>
+        <div class="spec-grid">
+          <div class="spec">
+            <strong>쉬운 설명</strong>
+            <p>한 학생이 실험 보고서, 발표 자료, 그래프, 발표 연습을 모두 혼자 순서대로 하는 구조다. 누군가를 더 쓸 수 있는데도 안 쓰는 셈이다.</p>
+          </div>
+          <div class="spec">
+            <strong>현업에서 왜 문제인가</strong>
+            <p>실시간 시스템은 "평균 속도"보다 "가장 느린 순간"이 중요하다. 한 단계가 밀리면 그 뒤 단계가 모두 밀린다.</p>
+          </div>
+          <div class="spec">
+            <strong>해결 명세</strong>
+            <ul>
+              <li>각 stage 실행 시간을 먼저 기록한다.</li>
+              <li>필요하다면 RAI를 저주기로 계산하거나 별도 worker로 분리한다.</li>
+              <li>처리 단계와 로그 쓰기 단계를 분리한다.</li>
+            </ul>
+          </div>
+          <div class="spec">
+            <strong>완료 기준</strong>
+            <ul>
+              <li><code>cube_ms</code>, <code>rd_ms</code>, <code>ra_ms</code>, <code>detect_ms</code>, <code>track_ms</code>, <code>log_ms</code>가 로그에 남는다.</li>
+              <li>최신 세션 기준으로 어떤 단계가 제일 느린지 숫자로 바로 보인다.</li>
+            </ul>
+          </div>
+        </div>
+      </article>
+
+      <article class="problem">
+        <div class="problem-top">
+          <div>
+            <div class="signal">Problem 2</div>
+            <h3>큰 FFT를 사실상 두 번 계산한다</h3>
+          </div>
+          <span class="pill danger">우선순위 매우 높음</span>
+        </div>
+        <p>
+          현재 코드는 같은 <code>radar_cube</code>를 기반으로
+          <code>Range_Doppler()</code>와 <code>Range_Angle()</code>를 각각 호출한다.
+          두 함수 모두 range/doppler 쪽 큰 FFT를 다시 계산한다.
+          즉, 이미 비싼 계산을 중복으로 내고 있다.
+        </p>
+        <div class="spec-grid">
+          <div class="spec">
+            <strong>쉬운 설명</strong>
+            <p>같은 원본 사진으로 필터 A를 적용한 뒤, 다시 원본을 처음부터 읽어서 필터 B를 적용하는 구조다. 중간 결과를 재사용하지 않는다.</p>
+          </div>
+          <div class="spec">
+            <strong>현업에서 왜 문제인가</strong>
+            <p>FFT는 CPU 시간을 크게 먹는 편이다. 중복 계산은 지연뿐 아니라 전력, 발열, 여유 자원까지 같이 깎아먹는다.</p>
+          </div>
+          <div class="spec">
+            <strong>해결 명세</strong>
+            <ul>
+              <li>range/doppler FFT 공통 결과를 한 번만 만들고 재사용한다.</li>
+              <li>RDI는 그 결과를 channel integration 해서 만든다.</li>
+              <li>RAI는 필요한 축만 추가 변환하는 방향으로 재구성한다.</li>
+            </ul>
+          </div>
+          <div class="spec">
+            <strong>완료 기준</strong>
+            <ul>
+              <li>한 프레임 안에서 공통 FFT 계산 함수가 1회만 호출된다.</li>
+              <li><code>processed.capture_to_process_ms.p95</code>가 눈에 띄게 줄어든다.</li>
+            </ul>
+          </div>
+        </div>
+      </article>
+
+      <article class="problem">
+        <div class="problem-top">
+          <div>
+            <div class="signal">Problem 3</div>
+            <h3><code>complex128 / float64</code>와 복사본이 너무 많다</h3>
+          </div>
+          <span class="pill danger">우선순위 매우 높음</span>
+        </div>
+        <p>
+          로컬 확인 결과 <code>frame_to_radar_cube()</code> 출력 dtype은 <code>complex128</code>이다.
+          이후 RDI/RAI도 <code>float64</code>로 흐른다.
+          여기에 <code>np.array(copy=True)</code>, <code>np.array(..., copy=True)</code>,
+          <code>np.asarray(..., dtype=np.float64)</code>가 여러 군데 들어간다.
+        </p>
+        <div class="spec-grid">
+          <div class="spec">
+            <strong>쉬운 설명</strong>
+            <p>노트를 복사기로 여러 번 복사해 가며 공부하는 것과 비슷하다. 내용은 같지만 시간과 종이를 더 쓴다.</p>
+          </div>
+          <div class="spec">
+            <strong>현업에서 왜 문제인가</strong>
+            <p>실시간 DSP에서는 계산보다 메모리 이동이 더 비싸질 때가 많다. 64비트 데이터는 32비트보다 메모리와 캐시를 더 많이 잡아먹는다.</p>
+          </div>
+          <div class="spec">
+            <strong>해결 명세</strong>
+            <ul>
+              <li>가능한 경로를 <code>complex64</code>, <code>float32</code> 중심으로 내린다.</li>
+              <li>정말 필요한 경우가 아니면 <code>copy=True</code>를 제거한다.</li>
+              <li>ROI 계산용 임시 배열도 최소화한다.</li>
+            </ul>
+          </div>
+          <div class="spec">
+            <strong>완료 기준</strong>
+            <ul>
+              <li>cube dtype이 <code>complex64</code>로 바뀐다.</li>
+              <li>핵심 처리 경로에서 불필요한 full-copy가 사라진다.</li>
+            </ul>
+          </div>
+        </div>
+      </article>
+
+      <article class="problem">
+        <div class="problem-top">
+          <div>
+            <div class="signal">Problem 4</div>
+            <h3>window 생성과 채널 loop가 매 프레임 반복된다</h3>
+          </div>
+          <span class="pill warn">우선순위 높음</span>
+        </div>
+        <p>
+          <code>DSP.Range_Doppler()</code>와 <code>DSP.Range_Angle()</code>는
+          프레임마다 <code>np.hanning()</code>으로 window를 새로 만들고,
+          channel 수만큼 Python loop를 돌며 곱셈을 수행한다.
+          상수처럼 고정될 수 있는 계산이 hot path 안에 들어와 있다.
+        </p>
+        <div class="spec-grid">
+          <div class="spec">
+            <strong>쉬운 설명</strong>
+            <p>매 수업 시간마다 같은 공식이 적힌 종이를 다시 프린트해서 보는 것과 비슷하다. 한 번 만들어 놓으면 계속 재사용해도 된다.</p>
+          </div>
+          <div class="spec">
+            <strong>현업에서 왜 문제인가</strong>
+            <p>작아 보이는 반복 비용이 프레임마다 쌓이면 p95, p99 지연이 커진다. 특히 Python loop는 벡터화보다 느리다.</p>
+          </div>
+          <div class="spec">
+            <strong>해결 명세</strong>
+            <ul>
+              <li>runtime config가 정해질 때 window를 미리 계산해 캐시한다.</li>
+              <li>채널 loop 대신 broadcasting으로 한 번에 곱한다.</li>
+            </ul>
+          </div>
+          <div class="spec">
+            <strong>완료 기준</strong>
+            <ul>
+              <li>프레임 처리 함수 안에서 <code>np.hanning()</code> 호출이 사라진다.</li>
+              <li>window 적용 코드가 channel loop 없이 벡터화된다.</li>
+            </ul>
+          </div>
+        </div>
+      </article>
+
+      <article class="problem">
+        <div class="problem-top">
+          <div>
+            <div class="signal">Problem 5</div>
+            <h3>detection 단계에서 통계 계산과 후보 후처리가 자주 반복된다</h3>
+          </div>
+          <span class="pill warn">우선순위 중간 이상</span>
+        </div>
+        <p>
+          <code>detect_targets()</code>는 median, quantile, CFAR, angle quantile,
+          local peak 검사, cluster를 한 프레임마다 수행한다.
+          FFT보다는 작을 수 있지만, 지연을 더 줄이려면 결국 이 단계도 정리해야 한다.
+        </p>
+        <div class="spec-grid">
+          <div class="spec">
+            <strong>쉬운 설명</strong>
+            <p>시험 채점을 할 때 학생 전체 점수 분포를 매 문제마다 다시 계산하는 것과 비슷하다. 필요한 것은 맞지만 매번 전부 다시 하면 느리다.</p>
+          </div>
+          <div class="spec">
+            <strong>현업에서 왜 문제인가</strong>
+            <p>1차 병목을 줄인 뒤에는 detection이 다음 병목으로 올라올 가능성이 높다. 뒤늦게 손대면 최적화가 두 번 일어난다.</p>
+          </div>
+          <div class="spec">
+            <strong>해결 명세</strong>
+            <ul>
+              <li>ROI 축소를 더 앞단으로 당긴다.</li>
+              <li>quantile 계산 횟수를 줄이거나 근사값 전략을 검토한다.</li>
+              <li>candidate pool 크기를 초기 단계에서 제한한다.</li>
+            </ul>
+          </div>
+          <div class="spec">
+            <strong>완료 기준</strong>
+            <ul>
+              <li><code>detect_ms</code>가 별도 기록된다.</li>
+              <li>candidate 수가 많을 때도 p95 지연이 급격히 튀지 않는다.</li>
+            </ul>
+          </div>
+        </div>
+      </article>
+
+      <article class="problem">
+        <div class="problem-top">
+          <div>
+            <div class="signal">Problem 6</div>
+            <h3>로그 파일 쓰기가 처리 hot path 안에 있다</h3>
+          </div>
+          <span class="pill warn">우선순위 높음</span>
+        </div>
+        <p>
+          처리 스레드는 프레임을 만들자마자 JSON 로그를 기록한다.
+          로그는 매우 중요하지만, 실시간 처리와 같은 줄에 놓으면 지연 분산이 커질 수 있다.
+          특히 저장 장치 상태가 흔들릴 때 p95가 튈 수 있다.
+        </p>
+        <div class="spec-grid">
+          <div class="spec">
+            <strong>쉬운 설명</strong>
+            <p>실험 중간중간 노트 정리를 그 자리에서 완벽하게 하느라 실험 자체가 늦어지는 상황과 같다.</p>
+          </div>
+          <div class="spec">
+            <strong>현업에서 왜 문제인가</strong>
+            <p>평균 지연은 괜찮아 보여도 간헐적으로 느려지는 시스템은 운영자가 신뢰하기 어렵다. 현업에서는 이런 지터가 큰 문제다.</p>
+          </div>
+          <div class="spec">
+            <strong>해결 명세</strong>
+            <ul>
+              <li>로그 writer thread를 별도로 둔다.</li>
+              <li>처리 스레드는 queue에 요약 데이터만 넘긴다.</li>
+              <li>필요하다면 상세 payload logging을 옵션으로 바꾼다.</li>
+            </ul>
+          </div>
+          <div class="spec">
+            <strong>완료 기준</strong>
+            <ul>
+              <li>처리 경로에서 직접 파일 open/write/close를 하지 않는다.</li>
+              <li><code>log_ms</code>가 분리 측정되고 처리 p95가 안정화된다.</li>
+            </ul>
+          </div>
+        </div>
+      </article>
+
+      <article class="problem">
+        <div class="problem-top">
+          <div>
+            <div class="signal">Problem 7</div>
+            <h3>단계별 타이머가 없어 어느 함수가 진짜 범인인지 즉시 알기 어렵다</h3>
+          </div>
+          <span class="pill brand">우선순위 매우 높음, 구현 난도 낮음</span>
+        </div>
+        <p>
+          지금은 결과적으로 <code>capture_to_process_ms</code>만 강하게 보인다.
+          하지만 그것만으로는 "FFT가 70ms", "detection이 25ms", "logging이 9ms"처럼
+          구체적 병목을 나눠 말하기 어렵다.
+        </p>
+        <div class="spec-grid">
+          <div class="spec">
+            <strong>쉬운 설명</strong>
+            <p>시험 총점만 있고 과목별 점수가 없는 상태다. 전체 점수가 낮은 건 알지만 어느 과목이 문제인지 확실히 모른다.</p>
+          </div>
+          <div class="spec">
+            <strong>현업에서 왜 문제인가</strong>
+            <p>관측이 없으면 최적화가 감으로 흘러간다. 그러면 시간을 들여도 실제 병목이 아닌 곳을 고칠 위험이 크다.</p>
+          </div>
+          <div class="spec">
+            <strong>해결 명세</strong>
+            <ul>
+              <li>각 stage 시작/끝에 <code>time.perf_counter()</code>를 넣는다.</li>
+              <li>요약 로그와 HTML 리포트에 stage별 p50, p95를 표시한다.</li>
+            </ul>
+          </div>
+          <div class="spec">
+            <strong>완료 기준</strong>
+            <ul>
+              <li>세션 리포트에서 가장 느린 함수가 자동으로 보인다.</li>
+              <li>최적화 전후 비교가 숫자로 가능해진다.</li>
+            </ul>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section id="roadmap" class="section">
+      <h2>권장 개선 순서</h2>
+      <p class="intro">
+        모든 문제를 한 번에 고치기보다, 효과가 큰 순서대로 가는 것이 좋다.
+        아래 표는 실제 작업 우선순위를 명세 형태로 정리한 것이다.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>순서</th>
+              <th>작업</th>
+              <th>이유</th>
+              <th>기대 효과</th>
+              <th>완료 기준</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>1</td>
+              <td>Stage timer 추가</td>
+              <td>어디가 진짜 병목인지 수치로 확인해야 하기 때문이다.</td>
+              <td>이후 최적화 방향이 명확해진다.</td>
+              <td>stage별 p50, p95가 summary와 HTML에 보인다.</td>
+            </tr>
+            <tr>
+              <td>2</td>
+              <td><code>complex64 / float32</code> 전환</td>
+              <td>메모리와 캐시 사용량을 크게 줄일 수 있다.</td>
+              <td>처리 지연과 메모리 부담이 함께 줄어든다.</td>
+              <td>cube와 중간 배열 dtype이 축소된다.</td>
+            </tr>
+            <tr>
+              <td>3</td>
+              <td>중복 FFT 제거</td>
+              <td>가장 비싼 연산을 두 번 하고 있기 때문이다.</td>
+              <td>큰 폭의 처리 시간 감소를 기대할 수 있다.</td>
+              <td>공통 FFT 계산이 프레임당 1회가 된다.</td>
+            </tr>
+            <tr>
+              <td>4</td>
+              <td>window precompute + 벡터화</td>
+              <td>작은 상수 비용이 매 프레임 쌓이기 때문이다.</td>
+              <td>p95 안정화에 도움을 준다.</td>
+              <td>frame loop 안의 <code>np.hanning()</code>이 사라진다.</td>
+            </tr>
+            <tr>
+              <td>5</td>
+              <td>logging 비동기화</td>
+              <td>실시간 처리와 디스크 I/O를 분리해야 지터가 줄어든다.</td>
+              <td>평균보다 p95, p99가 안정된다.</td>
+              <td>처리 스레드가 직접 파일을 쓰지 않는다.</td>
+            </tr>
+            <tr>
+              <td>6</td>
+              <td>detection 후처리 최적화</td>
+              <td>1차 병목을 줄인 뒤 다음 병목으로 올라올 가능성이 높다.</td>
+              <td>추가적인 10~30ms 절감 여지가 생긴다.</td>
+              <td>candidate 수 증가에도 지연이 급격히 튀지 않는다.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="footer-note">
+        <strong>마지막 정리:</strong>
+        지금 <code>real_time_process.py</code>의 문제는 "코드가 틀렸다"가 아니라
+        "실시간 시스템으로 운영하기엔 구조가 무겁다"에 가깝다.
+        따라서 고칠 때도 기능 자체를 바꾸기보다,
+        <strong>같은 기능을 더 적은 복사, 더 적은 중복 계산, 더 나은 관측성으로 돌리는 방향</strong>으로 가는 것이 맞다.
+      </div>
+    </section>
+  </main>
+</body>
+</html>
