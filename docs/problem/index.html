@@ -386,6 +386,7 @@
         <a href="#roadmap">개선 순서</a>
         <a href="./environment_checklist.html">환경 체크리스트</a>
         <a href="./retest_plan.html">재실험 계획서</a>
+        <a href="./ppt_dca_update_story.html">발표 구성안</a>
         <a href="../log_guides/processed_frames_guide.html">로그 가이드</a>
         <a href="../project_analysis/index.html">프로젝트 분석</a>
       </nav>
@@ -396,36 +397,38 @@
     <section class="hero">
       <div class="hero-grid">
         <div>
-          <div class="eyebrow">Latest session: <code>20260402_165901</code></div>
-          <h1>왜 <code>real_time_process.py</code>가 느린지, 그리고 어떻게 고치면 좋은지</h1>
+          <div class="eyebrow">Latest reference session: <code>20260405_183733</code></div>
+          <h1>왜 <code>real_time_process.py</code>가 느렸고, 지금은 무엇이 더 문제인지</h1>
           <p>
             이 문서는 <code>tools/runtime_core/real_time_process.py</code>와 그 주변 함수들을 기준으로
-            처리 시간 문제를 설명한 명세서다. 목표는 "어디가 느리다"를 넘어서
-            "왜 느린지", "현업에서는 왜 위험한지", "무엇부터 고쳐야 하는지"를
+            처리 시간 문제를 설명한 명세서로 시작했지만, 최근 clean session 기준으로는
+            pure latency만이 아니라 <strong>single-person 원운동에서 한 사람을 여러 ID로 나누는 continuity 문제</strong>까지
+            함께 설명하도록 범위를 넓혔다. 목표는 "어디가 느리다"를 넘어서
+            "지금 무엇이 핵심 리스크인지", "현업에서는 왜 위험한지", "무엇부터 고쳐야 하는지"를
             대학생 2학년도 이해할 수 있게 정리하는 것이다.
           </p>
           <div class="pill-row">
-            <span class="pill danger">핵심 결론: render만의 문제가 아님</span>
-            <span class="pill warn">핵심 병목: 중복 FFT + 복사 + dtype</span>
-            <span class="pill brand">문서 범위: processing path 중심</span>
+            <span class="pill danger">핵심 결론: pure latency만의 문제가 아님</span>
+            <span class="pill warn">현재 핵심 리스크: single-person multi-ID split</span>
+            <span class="pill brand">문서 범위: processing path + continuity</span>
           </div>
         </div>
         <div class="hero-meta">
           <div class="meta">
             <span>Processed P95</span>
-            <strong>203.4ms</strong>
+            <strong>151.2ms</strong>
           </div>
           <div class="meta">
             <span>Render P95</span>
-            <strong>236.4ms</strong>
+            <strong>168.0ms</strong>
           </div>
           <div class="meta">
             <span>Render Invalid</span>
-            <strong>1.73%</strong>
+            <strong>0.00%</strong>
           </div>
           <div class="meta">
             <span>Operational Score</span>
-            <strong>59 / 100</strong>
+            <strong>76 / 100</strong>
           </div>
         </div>
       </div>
@@ -434,18 +437,17 @@
     <section id="summary" class="section">
       <h2>한눈에 보기</h2>
       <p class="intro">
-        먼저 가장 중요한 요약부터 적는다. 최신 로그 기준으로 이 시스템은 "아예 동작하지 않는 수준"은 아니다.
-        하지만 "현업에서 바로 믿고 쓰기 좋은 수준"도 아니다. 이유는 간단하다.
-        프레임 하나를 처리하는 데 걸리는 시간이 프레임이 들어오는 주기와 비슷하거나 더 길기 때문이다.
+        먼저 가장 중요한 요약부터 적는다. 최신 clean session 기준으로 이 시스템은 "아예 동작하지 않는 수준"은 아니다.
+        packet invalid도 거의 없고 latency도 예전보다 내려왔다. 하지만 "현업에서 바로 믿고 쓰기 좋은 수준"도 아직 아니다.
+        이유는 이제 단순 지연보다 <strong>한 사람을 detection 단계에서 여러 점으로 살리고, tracking이 그 조각들을 여러 ID로 유지하는 문제</strong>가 더 크게 보이기 때문이다.
       </p>
       <div class="grid4">
         <article class="metric">
           <div class="signal">Diagnosis</div>
-          <h3>가장 큰 문제</h3>
+          <h3>현재 가장 큰 문제</h3>
           <p>
-            한 프레임 안에서 <code>Radar Cube</code>, <code>Range-Doppler</code>,
-            <code>Range-Angle</code>, detection, tracking, logging을
-            한 스레드에서 순서대로 다 끝낸다.
+            clean session에서는 네트워크 손실보다 <strong>한 사람이 detection 단계에서 여러 후보로 살아남고,
+            tracker가 그 후보 사이를 오가며 multi-ID split이 나는 것</strong>이 더 큰 문제다.
           </p>
         </article>
         <article class="metric">
@@ -468,9 +470,8 @@
           <div class="signal">Priority</div>
           <h3>먼저 할 일</h3>
           <p>
-            <code>stage timer 추가</code>, <code>dtype 축소</code>,
-            <code>중복 FFT 제거</code>를 가장 먼저 해야 한다.
-            이 셋이 효과 대비 우선순위가 가장 높다.
+            detection을 body-center에 더 가깝게 만들고, tracker는 global detection을 그대로 잇는 대신
+            continuity를 더 강하게 보도록 바꾸는 것이 우선이다.
           </p>
         </article>
       </div>
@@ -804,11 +805,60 @@
       </article>
     </section>
 
+    <section class="section">
+      <h2>최근 반영된 안정화</h2>
+      <p class="intro">
+        이 문서는 원래 processing 병목을 중심으로 쓴 명세서지만, 최근에는 궤적이 너무 튀는 문제를 줄이기 위한
+        tracking 안정화도 일부 반영되었다.
+      </p>
+      <div class="grid-three">
+        <article class="card">
+          <h3>대표 Track 유지</h3>
+          <p>한 번 안정적으로 잡힌 track을 primary로 더 오래 유지하고, 근처에서 새 track이 쉽게 태어나지 않도록 억제했다.</p>
+        </article>
+        <article class="card">
+          <h3>Lateral 안정화</h3>
+          <p>x 방향은 작은 변화에 deadband와 smoothing을 적용해 좌우 지그재그를 그대로 따라가지 않도록 조정했다.</p>
+        </article>
+        <article class="card">
+          <h3>리포트 해석 개선</h3>
+          <p>HTML 궤적 차트는 대표 lead track 중심으로 보고, frame gap이 큰 구간은 선을 끊어서 과장된 점프를 줄이게 바뀌었다.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>최근 핵심 문제: 원운동에서 한 사람이 여러 ID로 갈라진다</h2>
+      <p class="intro">
+        최근 기준 세션 <code>20260405_183733</code>은 invalid rate가 거의 없어서 알고리즘 자체를 보기 좋은 로그였다.
+        그런데 이 세션에서도 사용자가 원을 두 바퀴 돌었을 때 하나의 궤적이 아니라 여러 track 조각으로 갈라졌다.
+        즉 지금 핵심 문제는 "데이터가 없어서"가 아니라 "한 사람을 한 사람처럼 못 유지한다"에 더 가깝다.
+      </p>
+      <div class="grid-three">
+        <article class="card">
+          <h3>로그가 말하는 사실</h3>
+          <p><code>render invalid_rate = 0.0%</code>, <code>processed invalid_rate = 0.0%</code>였다.</p>
+          <p><code>candidate mean = 3.799</code>, <code>confirmed track mean = 2.755</code>라서 한 사람인데도 detection과 confirmed가 여러 개로 살아남았다.</p>
+          <p>대표 lead track도 약 <code>179</code> 프레임 동안 <code>21</code>번 정도 바뀌어 continuity가 약했다.</p>
+        </article>
+        <article class="card">
+          <h3>왜 이런가</h3>
+          <p>지금 detection은 몸 중심을 직접 재는 구조라기보다, 살아남은 강한 반사 peak들을 angle refinement와 clustering으로 정리한 결과에 가깝다.</p>
+          <p>그래서 원운동 중 몸 측면, 팔, 다리 반사점이 번갈아 강해지면 한 사람도 여러 detection과 여러 track으로 갈라질 수 있다.</p>
+        </article>
+        <article class="card">
+          <h3>지금 바로 보는 방향</h3>
+          <p>single-person 디버그 모드로 <code>max_targets = 1</code>, <code>dbscan min_samples = 2</code>, <code>min_cartesian_separation_m = 0.65</code>를 적용했고, 최근에는 <code>body_center_patch_bands</code>를 추가해 seed 주변 <code>range-angle local patch</code>에서 connected blob centroid를 다시 계산하도록 바꿨다.</p>
+          <p>즉 detection 단계가 이제 strongest angle peak 한 점만 쓰는 것이 아니라, 거리별 adaptive patch 안에서 body-center에 가까운 대표점을 다시 만들기 시작했다. 다음 단계는 이를 기존 track 주변의 <code>track-conditioned local update</code>까지 확장하는 것이다.</p>
+        </article>
+      </div>
+    </section>
+
     <section id="roadmap" class="section">
       <h2>권장 개선 순서</h2>
       <p class="intro">
-        모든 문제를 한 번에 고치기보다, 효과가 큰 순서대로 가는 것이 좋다.
-        아래 표는 실제 작업 우선순위를 명세 형태로 정리한 것이다.
+        지금은 pure latency보다 one-person continuity가 더 중요하다.
+        아래 표는 최신 detection local patch refinement가 들어간 뒤 기준으로, 실제 개선 우선순위를 다시 정리한 것이다.
       </p>
       <div class="table-wrap">
         <table>
@@ -824,55 +874,54 @@
           <tbody>
             <tr>
               <td>1</td>
-              <td>Stage timer 추가</td>
-              <td>어디가 진짜 병목인지 수치로 확인해야 하기 때문이다.</td>
-              <td>이후 최적화 방향이 명확해진다.</td>
-              <td>stage별 p50, p95가 summary와 HTML에 보인다.</td>
+              <td>local patch body-center refinement 검증</td>
+              <td>최근 detection이 strongest peak 한 점 대신 adaptive range-angle patch centroid를 쓰도록 바뀌었기 때문이다.</td>
+              <td>candidate mean과 confirmed track mean이 줄고, one-person multi-ID split이 완화된다.</td>
+              <td><code>candidate mean</code>, <code>confirmed track mean</code>, <code>lead confirmed switch</code>가 이전 세션보다 개선된다.</td>
             </tr>
             <tr>
               <td>2</td>
-              <td><code>complex64 / float32</code> 전환</td>
-              <td>메모리와 캐시 사용량을 크게 줄일 수 있다.</td>
-              <td>처리 지연과 메모리 부담이 함께 줄어든다.</td>
-              <td>cube와 중간 배열 dtype이 축소된다.</td>
+              <td>track-conditioned local update 추가</td>
+              <td>현재 tracker는 여전히 global detection 후보를 이어 붙이는 구조라, detection이 좋아져도 원운동에서 continuity 한계가 남기 때문이다.</td>
+              <td>기존 primary track 근처에서 대표점을 다시 재측정해 ID continuity가 더 좋아진다.</td>
+              <td>원운동에서도 같은 사람이 같은 ID로 대부분 유지된다.</td>
             </tr>
             <tr>
               <td>3</td>
-              <td>중복 FFT 제거</td>
-              <td>가장 비싼 연산을 두 번 하고 있기 때문이다.</td>
-              <td>큰 폭의 처리 시간 감소를 기대할 수 있다.</td>
-              <td>공통 FFT 계산이 프레임당 1회가 된다.</td>
+              <td>candidate pre-merge와 cluster policy 보강</td>
+              <td>두 사람은 분리하되 한 사람 내부 peak는 더 일찍 하나로 줄여야 하기 때문이다.</td>
+              <td>candidate pool이 tracker에 들어가기 전부터 더 작고 안정적으로 정리된다.</td>
+              <td>single-person에서는 candidate가 대부분 1개로 수렴하고, two-person에서는 서로 안 뭉개진다.</td>
             </tr>
             <tr>
               <td>4</td>
-              <td>window precompute + 벡터화</td>
-              <td>작은 상수 비용이 매 프레임 쌓이기 때문이다.</td>
-              <td>p95 안정화에 도움을 준다.</td>
-              <td>frame loop 안의 <code>np.hanning()</code>이 사라진다.</td>
+              <td>원운동 continuity 정책 보강</td>
+              <td>primary track 유지, 근처 birth 억제만으로는 방향이 계속 바뀌는 motion에 완전히 대응하기 어렵기 때문이다.</td>
+              <td>lead ID switch와 display lead switch가 더 줄어든다.</td>
+              <td>원운동 세션에서 lead ID switch가 눈에 띄게 감소한다.</td>
             </tr>
             <tr>
               <td>5</td>
-              <td>logging 비동기화</td>
-              <td>실시간 처리와 디스크 I/O를 분리해야 지터가 줄어든다.</td>
-              <td>평균보다 p95, p99가 안정된다.</td>
-              <td>처리 스레드가 직접 파일을 쓰지 않는다.</td>
+              <td>multi-person 회귀 실험</td>
+              <td>local patch를 넓히면 두 사람이 가까울 때 과도하게 합쳐질 위험도 함께 보기 때문이다.</td>
+              <td>single-person 최적화가 multi-person을 망치지 않는지 확인할 수 있다.</td>
+              <td>두 사람 교차/근접 테스트에서 merge와 ID switch 기준치가 관리된다.</td>
             </tr>
             <tr>
               <td>6</td>
-              <td>detection 후처리 최적화</td>
-              <td>1차 병목을 줄인 뒤 다음 병목으로 올라올 가능성이 높다.</td>
-              <td>추가적인 10~30ms 절감 여지가 생긴다.</td>
-              <td>candidate 수 증가에도 지연이 급격히 튀지 않는다.</td>
+              <td>남은 processing 최적화</td>
+              <td>continuity 개선 이후에는 detect loop, logging write, CFAR 비용이 다시 주요 병목으로 올라올 수 있다.</td>
+              <td>품질을 유지한 채 p95 latency를 더 줄일 수 있다.</td>
+              <td><code>detect_ms</code>, <code>compute_total_ms</code>가 quality regression 없이 더 내려간다.</td>
             </tr>
           </tbody>
         </table>
       </div>
       <div class="footer-note">
         <strong>마지막 정리:</strong>
-        지금 <code>real_time_process.py</code>의 문제는 "코드가 틀렸다"가 아니라
-        "실시간 시스템으로 운영하기엔 구조가 무겁다"에 가깝다.
-        따라서 고칠 때도 기능 자체를 바꾸기보다,
-        <strong>같은 기능을 더 적은 복사, 더 적은 중복 계산, 더 나은 관측성으로 돌리는 방향</strong>으로 가는 것이 맞다.
+        지금 핵심은 "레이더가 안 된다"가 아니라,
+        <strong>한 사람을 detection 단계에서 body-center에 더 가깝게 만들고, 그것을 시간축에서 같은 ID로 오래 유지하느냐</strong>다.
+        따라서 현재 우선순위는 pure latency 최적화보다, <strong>body-center local measurement와 continuity 정책을 함께 강화하는 방향</strong>으로 잡는 것이 맞다.
       </div>
     </section>
   </main>

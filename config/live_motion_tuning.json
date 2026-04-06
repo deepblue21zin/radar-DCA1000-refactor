@@ -10,7 +10,7 @@
   },
   "detection": {
     "allow_strongest_fallback": false,
-    "max_targets": 6,
+    "max_targets": 1,
     "display_min_confidence": 0.26,
     "cluster_min_samples": 2,
     "cluster_velocity_weight": 0.0,
@@ -21,7 +21,7 @@
       "global_quantile": 0.985,
       "angle_quantile": 0.75,
       "angle_contrast_scale": 1.35,
-      "min_cartesian_separation_m": 0.45,
+      "min_cartesian_separation_m": 0.65,
       "angle_centroid_radius_bands": [
         {
           "r_min": 0.0,
@@ -38,6 +38,29 @@
           "r_max": null,
           "radius": 3
         }
+      ],
+      "body_center_patch_bands": [
+        {
+          "r_min": 0.0,
+          "r_max": 1.5,
+          "range_radius_bins": 1,
+          "angle_radius_bins": 2,
+          "relative_floor": 0.6
+        },
+        {
+          "r_min": 1.5,
+          "r_max": 3.0,
+          "range_radius_bins": 2,
+          "angle_radius_bins": 3,
+          "relative_floor": 0.55
+        },
+        {
+          "r_min": 3.0,
+          "r_max": null,
+          "range_radius_bins": 3,
+          "angle_radius_bins": 4,
+          "relative_floor": 0.5
+        }
       ]
     },
     "dbscan_adaptive_eps_bands": [
@@ -45,19 +68,19 @@
         "r_min": 0.25,
         "r_max": 1.0,
         "eps": 0.34,
-        "min_samples": 1
+        "min_samples": 2
       },
       {
         "r_min": 1.0,
         "r_max": 2.0,
         "eps": 0.44,
-        "min_samples": 1
+        "min_samples": 2
       },
       {
         "r_min": 2.0,
         "r_max": 3.5,
         "eps": 0.56,
-        "min_samples": 1
+        "min_samples": 2
       }
     ]
   },
@@ -74,7 +97,15 @@
     "doppler_cost_weight": 0.65,
     "report_miss_tolerance": 3,
     "lost_gate_factor": 1.6,
-    "tentative_gate_factor": 0.65
+    "tentative_gate_factor": 0.65,
+    "birth_suppression_radius_m": 0.55,
+    "primary_track_birth_scale": 1.35,
+    "birth_suppression_miss_tolerance": 3,
+    "primary_track_hold_frames": 4,
+    "lateral_deadband_m": 0.05,
+    "lateral_deadband_range_scale": 0.03,
+    "lateral_smoothing_alpha": 0.45,
+    "lateral_velocity_damping": 0.55
   },
   "pipeline": {
     "queue_size": 4,

@@ -271,6 +271,7 @@ function renderTrajectoryChart(targetId, seriesList, options = {}) {
   if (!target) return;
   const width = options.width || 520;
   const height = options.height || 420;
+  const breakFrameGap = Number.isFinite(Number(options.breakFrameGap)) ? Number(options.breakFrameGap) : 2;
   const padding = { top: 18, right: 24, bottom: 40, left: 44 };
   const palette = ['#0f6cbd', '#ef4444', '#10b981', '#f97316', '#8b5cf6', '#14b8a6'];
   const points = [];
@@ -322,10 +323,27 @@ function renderTrajectoryChart(targetId, seriesList, options = {}) {
     const color = series.color || palette[index % palette.length];
     const validPoints = (series.points || []).filter((point) => Number.isFinite(Number(point.x_m)) && Number.isFinite(Number(point.y_m)));
     if (!validPoints.length) return;
-    const polyline = validPoints.map((point) => `${xFor(point.x_m)},${yFor(point.y_m)}`).join(" ");
+    const segments = [];
+    let currentSegment = [];
+    validPoints.forEach((point, pointIndex) => {
+      if (pointIndex > 0) {
+        const previousPoint = validPoints[pointIndex - 1];
+        const frameGap = Number(point.frame_id) - Number(previousPoint.frame_id);
+        if (Number.isFinite(frameGap) && frameGap > breakFrameGap) {
+          if (currentSegment.length) segments.push(currentSegment);
+          currentSegment = [];
+        }
+      }
+      currentSegment.push(point);
+    });
+    if (currentSegment.length) segments.push(currentSegment);
     const start = validPoints[0];
     const end = validPoints[validPoints.length - 1];
-    svg += `<polyline fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="${polyline}"></polyline>`;
+    segments.forEach((segment) => {
+      if (segment.length < 2) return;
+      const polyline = segment.map((point) => `${xFor(point.x_m)},${yFor(point.y_m)}`).join(" ");
+      svg += `<polyline fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="${polyline}"></polyline>`;
+    });
     svg += `<circle cx="${xFor(start.x_m)}" cy="${yFor(start.y_m)}" r="4.5" fill="#ffffff" stroke="${color}" stroke-width="2"></circle>`;
     svg += `<circle cx="${xFor(end.x_m)}" cy="${yFor(end.y_m)}" r="5.2" fill="${color}" stroke="#ffffff" stroke-width="2"></circle>`;
   });
@@ -540,7 +558,23 @@ def _trajectory_point(item: dict, frame_id: int):
         "y_m": round(float(y_m), 4),
         "angle_deg": _round_or_none(item.get("angle_deg")),
         "range_m": _round_or_none(item.get("range_m"), digits=4),
+        "is_primary": bool(item.get("is_primary")),
     }
+
+
+def _longest_contiguous_run(points: list[dict], max_gap_frames: int = 2) -> int:
+    if not points:
+        return 0
+    longest = 1
+    current = 1
+    for previous, current_point in zip(points, points[1:]):
+        frame_gap = int(current_point["frame_id"]) - int(previous["frame_id"])
+        if frame_gap <= max_gap_frames:
+            current += 1
+        else:
+            longest = max(longest, current)
+            current = 1
+    return max(longest, current)
 
 
 def _build_track_trajectory_bundle(
@@ -549,6 +583,8 @@ def _build_track_trajectory_bundle(
     *,
     max_tracks: int = 4,
     min_points: int = 2,
+    lead_only: bool = False,
+    gap_break_frames: int = 2,
 ):
     key_hits = {key: 0 for key in priority_keys}
     grouped: dict[str, list[dict]] = {}
@@ -577,23 +613,44 @@ def _build_track_trajectory_bundle(
 
     series = []
     for index, (track_id, points) in enumerate(
-        sorted(grouped.items(), key=lambda entry: (-len(entry[1]), entry[0]))
+        sorted(grouped.items(), key=lambda entry: entry[0])
     ):
         points.sort(key=lambda point: point["frame_id"])
         if len(points) < min_points:
             continue
         sampled_points = _downsample_points(points)
+        primary_hits = sum(1 for point in points if point.get("is_primary"))
+        longest_run = _longest_contiguous_run(points, max_gap_frames=gap_break_frames)
         series.append(
             {
                 "track_id": track_id,
                 "label": f"track {track_id}",
                 "color": TRAJECTORY_COLORS[index % len(TRAJECTORY_COLORS)],
                 "point_count": len(sampled_points),
+                "full_point_count": len(points),
+                "primary_hits": primary_hits,
+                "longest_run": longest_run,
                 "points": sampled_points,
             }
         )
-        if len(series) >= max_tracks:
-            break
+
+    series.sort(
+        key=lambda item: (
+            -int(item.get("primary_hits", 0)),
+            -int(item.get("longest_run", 0)),
+            -int(item.get("full_point_count", 0)),
+            item.get("track_id", ""),
+        )
+    )
+
+    if lead_only and series:
+        lead_series = dict(series[0])
+        lead_series["label"] = f"lead track {lead_series['track_id']}"
+        series = [lead_series]
+    else:
+        for index, item in enumerate(series):
+            item["color"] = TRAJECTORY_COLORS[index % len(TRAJECTORY_COLORS)]
+        series = series[:max_tracks]
 
     source_key = None
     if key_hits and max(key_hits.values()) > 0:
@@ -619,6 +676,9 @@ def _build_track_trajectory_bundle(
                     "label": "lead detection",
                     "color": TRAJECTORY_COLORS[0],
                     "point_count": len(sampled_points),
+                    "full_point_count": len(detection_points),
+                    "primary_hits": 0,
+                    "longest_run": _longest_contiguous_run(detection_points, max_gap_frames=gap_break_frames),
                     "points": sampled_points,
                 }
             )
@@ -639,6 +699,8 @@ def _build_track_trajectory_bundle(
         "source_label": source_label,
         "priority_label": _trajectory_priority_label(priority_keys),
         "fallback_used": fallback_used,
+        "lead_only": bool(lead_only),
+        "gap_break_frames": int(gap_break_frames),
         "empty_message": empty_message,
     }
 
@@ -647,22 +709,26 @@ def _load_session_trajectory_bundle(session_dir: Path):
     render_bundle = _build_track_trajectory_bundle(
         _load_render_records_with_fallback(session_dir),
         ["display_tracks", "tentative_display_tracks", "tentative_tracks"],
+        lead_only=True,
     )
     if render_bundle["series"]:
         return render_bundle
     return _build_track_trajectory_bundle(
         _load_jsonl(session_dir / "processed_frames.jsonl"),
         ["confirmed_tracks", "tentative_tracks"],
+        lead_only=True,
     )
 
 
 def _trajectory_summary_text(bundle: dict):
     if bundle.get("series"):
         fallback_text = " | fallback=detection" if bundle.get("fallback_used") else ""
+        mode_text = " | mode=lead-only" if bundle.get("lead_only") else ""
+        gap_text = f" | gap_break>{int(bundle.get('gap_break_frames', 2))}" if bundle.get("gap_break_frames") else ""
         return (
             f"priority={bundle.get('priority_label', 'n/a')} | "
             f"source={bundle.get('source_label', 'n/a')} | "
-            f"tracks={bundle.get('track_count', 0)}{fallback_text}"
+            f"tracks={bundle.get('track_count', 0)}{mode_text}{gap_text}{fallback_text}"
         )
     return bundle.get("empty_message") or "궤적 데이터가 없습니다."
 
@@ -749,6 +815,95 @@ def _overview_cards(summary: dict):
         ("Power Plan", system.get("power_plan_name") or "n/a", "실험/측정용으로는 High performance 권장", power_tone),
         ("Host IP Match", _yes_no_unknown(system.get("host_ip_present"), yes_text="match", no_text="mismatch"), f"expected={system.get('expected_host_ip') or 'n/a'}", host_ip_tone),
         ("Slowest Stage", preferred_stage.get("name") or "n/a", f"p95={_fmt(preferred_stage.get('p95_ms'), suffix=' ms')}", "warn"),
+    ]
+
+
+def _performance_overview_cards(summary: dict):
+    performance = summary.get("performance", {})
+    budget = performance.get("frame_budget", {})
+    throughput = performance.get("throughput", {})
+    compute = performance.get("compute", {})
+    jitter = performance.get("jitter", {})
+    continuity = performance.get("continuity", {})
+
+    processed_ratio = throughput.get("processed_vs_expected_ratio")
+    render_ratio = throughput.get("render_vs_expected_ratio")
+    compute_ratio = compute.get("compute_utilization_p95_ratio")
+    render_jitter = jitter.get("render_latency_jitter_ms")
+    lead_switches = (continuity.get("lead_confirmed") or {}).get("switch_count")
+    candidate_ratio = continuity.get("candidate_to_confirmed_ratio")
+
+    def ratio_tone(value):
+        if value is None:
+            return "brand"
+        if value >= 0.9:
+            return "good"
+        if value >= 0.75:
+            return "brand"
+        if value >= 0.5:
+            return "warn"
+        return "danger"
+
+    def lower_tone(value, good_limit, brand_limit, warn_limit):
+        if value is None:
+            return "brand"
+        if value <= good_limit:
+            return "good"
+        if value <= brand_limit:
+            return "brand"
+        if value <= warn_limit:
+            return "warn"
+        return "danger"
+
+    return [
+        (
+            "Frame Budget",
+            _fmt(budget.get("configured_frame_period_ms"), suffix=" ms"),
+            f"target={_fmt(budget.get('expected_fps'))} fps",
+            "brand",
+        ),
+        (
+            "Processed FPS",
+            _fmt(throughput.get("processed_fps")),
+            f"target 대비 {_fmt_pct(processed_ratio)}",
+            ratio_tone(processed_ratio),
+        ),
+        (
+            "Render FPS",
+            _fmt(throughput.get("render_fps")),
+            f"target 대비 {_fmt_pct(render_ratio)}",
+            ratio_tone(render_ratio),
+        ),
+        (
+            "Compute Util P95",
+            _fmt_pct(compute_ratio),
+            "frame budget 대비 compute_total p95 비율",
+            lower_tone(compute_ratio, 0.6, 0.85, 1.0),
+        ),
+        (
+            "Render Jitter",
+            _fmt(render_jitter, suffix=" ms"),
+            "render latency p95 - p50",
+            lower_tone(render_jitter, 20, 40, 70),
+        ),
+        (
+            "Lead Confirmed Switch",
+            _fmt(lead_switches, digits=0),
+            f"coverage={_fmt_pct((continuity.get('lead_confirmed') or {}).get('coverage_rate'))}",
+            lower_tone(lead_switches, 5, 12, 20),
+        ),
+        (
+            "Candidate/Confirmed",
+            _fmt(candidate_ratio),
+            "높을수록 한 사람 후보가 여러 개로 나뉘기 쉬움",
+            lower_tone(candidate_ratio, 1.3, 1.8, 2.5),
+        ),
+        (
+            "Display/Confirmed",
+            _fmt(continuity.get("display_to_confirmed_ratio")),
+            "화면에 실제로 남는 track 비율",
+            ratio_tone(continuity.get("display_to_confirmed_ratio")),
+        ),
     ]
 
 
@@ -867,7 +1022,7 @@ def _build_processed_pattern_rows(rows: list[dict]):
         matched = grouped[key]
         if not matched:
             continue
-        frame_ids = [row["frame_id"] for row in matched]
+        frame_ids = [int(row.get("frame_id", row.get("frame_index", 0)) or 0) for row in matched]
         latency_mean = _mean_or_none(row.get("capture_to_process_ms") for row in matched)
         candidate_mean = _mean_or_none(row.get("candidate_count") for row in matched)
         confirmed_mean = _mean_or_none(row.get("confirmed_track_count") for row in matched)
@@ -942,7 +1097,7 @@ def _build_render_pattern_rows(rows: list[dict]):
         matched = grouped[key]
         if not matched:
             continue
-        frame_ids = [row["frame_id"] for row in matched]
+        frame_ids = [int(row.get("frame_id", row.get("frame_index", 0)) or 0) for row in matched]
         latency_mean = _mean_or_none(row.get("capture_to_render_ms") for row in matched)
         display_mean = _mean_or_none(row.get("display_track_count") for row in matched)
         tentative_mean = _mean_or_none(row.get("tentative_display_track_count") for row in matched)
@@ -1080,6 +1235,169 @@ def _system_snapshot_rows(system_summary: dict):
     )
 
 
+def _build_performance_html(session_dir: Path, summary: dict):
+    performance = summary.get("performance", {})
+    budget = performance.get("frame_budget", {})
+    throughput = performance.get("throughput", {})
+    compute = performance.get("compute", {})
+    jitter = performance.get("jitter", {})
+    continuity = performance.get("continuity", {})
+    overview_cards = "".join(
+        f"""
+        <div class="metric">
+          <div class="label">{label}</div>
+          <div class="value">{value}</div>
+          <div class="hint">{hint}</div>
+        </div>
+        """
+        for label, value, hint, _tone in _performance_overview_cards(summary)
+    )
+    highlights_html = _build_text_list_html(
+        performance.get("highlights", []),
+        "성능 해석용 하이라이트가 없습니다.",
+    )
+    read_steps = _build_steps_html(
+        [
+            "1순위: frame budget과 processed/render FPS를 같이 봅니다. target 대비 비율이 낮으면 실시간성부터 흔들립니다.",
+            "2순위: compute utilization을 봅니다. compute_total p95가 frame budget에 가까우면 계산 최적화가 우선입니다.",
+            "3순위: render jitter와 non-compute latency를 같이 봅니다. compute는 여유인데 jitter가 크면 큐, 환경, 표시 경로를 의심합니다.",
+            "4순위: continuity 지표를 봅니다. candidate/confirmed 비율이 높고 lead switch가 많으면 detection/tracking 설계 병목일 가능성이 큽니다.",
+        ],
+        empty_message="표시할 해석 순서가 없습니다.",
+    )
+
+    throughput_rows = "".join(
+        f"""
+        <tr><td><strong>{label}</strong></td><td>{value}</td><td>{hint}</td></tr>
+        """
+        for label, value, hint in [
+            ("Configured Frame Period", _fmt(budget.get("configured_frame_period_ms"), suffix=" ms"), budget.get("cfg_path") or "cfg unavailable"),
+            ("Expected FPS", _fmt(budget.get("expected_fps")), "설정 frameCfg 기준 입력 목표"),
+            ("Processed FPS", _fmt(throughput.get("processed_fps")), f"target 대비 {_fmt_pct(throughput.get('processed_vs_expected_ratio'))}"),
+            ("Render FPS", _fmt(throughput.get("render_fps")), f"target 대비 {_fmt_pct(throughput.get('render_vs_expected_ratio'))}"),
+            ("Render / Processed", _fmt_pct(throughput.get("render_to_processed_ratio")), "화면 갱신이 처리 출력을 얼마나 따라갔는지"),
+            ("Session Duration", _fmt(throughput.get("session_duration_s"), suffix=" s"), "FPS 계산 기준 세션 길이"),
+        ]
+    )
+
+    compute_rows = "".join(
+        f"""
+        <tr><td><strong>{label}</strong></td><td>{value}</td><td>{hint}</td></tr>
+        """
+        for label, value, hint in [
+            ("Compute Total Mean", _fmt((compute.get("compute_total_ms") or {}).get("mean"), suffix=" ms"), f"util={_fmt_pct(compute.get('compute_utilization_mean_ratio'))}"),
+            ("Compute Total P95", _fmt((compute.get("compute_total_ms") or {}).get("p95"), suffix=" ms"), f"util={_fmt_pct(compute.get('compute_utilization_p95_ratio'))}"),
+            ("Pipeline Total P95", _fmt((compute.get("pipeline_total_ms") or {}).get("p95"), suffix=" ms"), f"util={_fmt_pct(compute.get('pipeline_utilization_p95_ratio'))}"),
+            ("Render Overhead Mean", _fmt(compute.get("render_overhead_mean_ms"), suffix=" ms"), "processed 완료 후 실제 표시까지 평균 지연"),
+            ("Non-compute Capture->Process Mean", _fmt(compute.get("non_compute_capture_to_process_mean_ms"), suffix=" ms"), "frame 수집/조립/대기 등 compute 외 구간"),
+            ("Slowest Substage", compute.get("slowest_stage_name") or "n/a", f"p95={_fmt(compute.get('slowest_stage_p95_ms'), suffix=' ms')} | share={_fmt_pct(compute.get('slowest_stage_share_of_compute_p95_ratio'))}"),
+            ("Log Write Mean", _fmt((compute.get("log_write_ms") or {}).get("mean"), suffix=" ms"), f"source={compute.get('source') or 'n/a'}"),
+        ]
+    )
+
+    jitter_rows = "".join(
+        f"""
+        <tr><td><strong>{label}</strong></td><td>{value}</td><td>{hint}</td></tr>
+        """
+        for label, value, hint in [
+            ("Processed Latency P50", _fmt(jitter.get("processed_latency_p50_ms"), suffix=" ms"), "capture_to_process 중앙값"),
+            ("Processed Latency P95", _fmt(jitter.get("processed_latency_p95_ms"), suffix=" ms"), "capture_to_process 상위 95%"),
+            ("Processed Jitter", _fmt(jitter.get("processed_latency_jitter_ms"), suffix=" ms"), "p95 - p50"),
+            ("Render Latency P50", _fmt(jitter.get("render_latency_p50_ms"), suffix=" ms"), "capture_to_render 중앙값"),
+            ("Render Latency P95", _fmt(jitter.get("render_latency_p95_ms"), suffix=" ms"), "capture_to_render 상위 95%"),
+            ("Render Jitter", _fmt(jitter.get("render_latency_jitter_ms"), suffix=" ms"), "p95 - p50"),
+            ("Compute Jitter", _fmt(jitter.get("compute_total_jitter_ms"), suffix=" ms"), "compute_total p95 - p50"),
+        ]
+    )
+
+    continuity_rows = "".join(
+        f"""
+        <tr><td><strong>{label}</strong></td><td>{value}</td><td>{hint}</td></tr>
+        """
+        for label, value, hint in [
+            ("Candidate / Confirmed", _fmt(continuity.get("candidate_to_confirmed_ratio")), "높을수록 detection 분해가 큼"),
+            ("Display / Confirmed", _fmt(continuity.get("display_to_confirmed_ratio")), "높을수록 내부 추적이 화면까지 잘 전달됨"),
+            ("Lead Confirmed Switch", _fmt((continuity.get("lead_confirmed") or {}).get("switch_count"), digits=0), f"coverage={_fmt_pct((continuity.get('lead_confirmed') or {}).get('coverage_rate'))} | unique={_fmt((continuity.get('lead_confirmed') or {}).get('unique_track_id_count'), digits=0)}"),
+            ("Lead Display Switch", _fmt((continuity.get("lead_display") or {}).get("switch_count"), digits=0), f"coverage={_fmt_pct((continuity.get('lead_display') or {}).get('coverage_rate'))} | unique={_fmt((continuity.get('lead_display') or {}).get('unique_track_id_count'), digits=0)}"),
+            ("Unique Confirmed Track IDs", _fmt(continuity.get("unique_confirmed_track_ids"), digits=0), "세션 전체에서 내부 confirmed로 관측된 ID 수"),
+            ("Unique Display Track IDs", _fmt(continuity.get("unique_display_track_ids"), digits=0), "세션 전체에서 화면에 실제 표시된 ID 수"),
+        ]
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{session_dir.name} performance report</title>
+  <style>{COMMON_STYLE}</style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <h1>{session_dir.name} 성능 KPI 리포트</h1>
+      <p>운영 안정성(fail-safe)과 별도로, 실시간 처리 성능을 엔지니어링 관점에서 정리한 페이지입니다. frame budget, 실효 FPS, compute utilization, jitter, continuity를 분리해서 봅니다.</p>
+      <nav class="nav">
+        <a href="./index.html">세션 개요</a>
+        <a href="./ops_report.html">현업 평가 리포트</a>
+        <a href="./processed_report.html">processed 리포트</a>
+        <a href="./render_report.html">render 리포트</a>
+        <a href="./event_report.html">event 리포트</a>
+        <a href="../index.html">전체 비교 대시보드</a>
+      </nav>
+    </header>
+
+    <section class="card">
+      <h2>핵심 KPI</h2>
+      <div class="grid">{overview_cards}</div>
+    </section>
+
+    <section class="card">
+      <h2>성능 해석 하이라이트</h2>
+      {highlights_html}
+    </section>
+
+    <section class="card">
+      <h2>Throughput &amp; Budget</h2>
+      <table>
+        <thead><tr><th>지표</th><th>값</th><th>해석</th></tr></thead>
+        <tbody>{throughput_rows}</tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Compute &amp; Overhead</h2>
+      <table>
+        <thead><tr><th>지표</th><th>값</th><th>해석</th></tr></thead>
+        <tbody>{compute_rows}</tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Jitter</h2>
+      <table>
+        <thead><tr><th>지표</th><th>값</th><th>해석</th></tr></thead>
+        <tbody>{jitter_rows}</tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Continuity &amp; Fragmentation</h2>
+      <table>
+        <thead><tr><th>지표</th><th>값</th><th>해석</th></tr></thead>
+        <tbody>{continuity_rows}</tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>이 페이지 읽는 순서</h2>
+      {read_steps}
+    </section>
+  </div>
+</body>
+</html>"""
+
+
 def _build_session_index_html(session_dir: Path, summary: dict, event_summary: dict):
     cards_html = "".join(
         f"""
@@ -1090,6 +1408,16 @@ def _build_session_index_html(session_dir: Path, summary: dict, event_summary: d
         </div>
         """
         for label, value, hint, _tone in _overview_cards(summary)
+    )
+    performance_cards_html = "".join(
+        f"""
+        <div class="metric">
+          <div class="label">{label}</div>
+          <div class="value">{value}</div>
+          <div class="hint">{hint}</div>
+        </div>
+        """
+        for label, value, hint, _tone in _performance_overview_cards(summary)
     )
     health = _session_health(summary)
     assessment = summary.get("assessment", {})
@@ -1124,6 +1452,7 @@ def _build_session_index_html(session_dir: Path, summary: dict, event_summary: d
       <p>세션 전체 개요입니다. 아래 링크로 processed, render, event 전용 리포트로 이동할 수 있습니다.</p>
       <nav class="nav">
         <a href="./ops_report.html">현업 평가 리포트</a>
+        <a href="./performance_report.html">성능 KPI 리포트</a>
         <a href="./processed_report.html">processed 리포트</a>
         <a href="./render_report.html">render 리포트</a>
         <a href="./event_report.html">event 리포트</a>
@@ -1150,6 +1479,12 @@ def _build_session_index_html(session_dir: Path, summary: dict, event_summary: d
         현업 점수: <strong>{overall.get("score", "n/a")}/100</strong> {_pill(overall.get("grade", "n/a"), overall.get("tone", "brand"))}
       </p>
       <div class="grid">{cards_html}</div>
+    </section>
+
+    <section class="card">
+      <h2>성능 KPI 요약</h2>
+      <p class="subtle">운영 안정성 점수와 별도로, 실제 실시간 처리 품질을 보는 엔지니어링 지표입니다.</p>
+      <div class="grid">{performance_cards_html}</div>
     </section>
 
     <section class="card">
@@ -1180,6 +1515,11 @@ def _build_session_index_html(session_dir: Path, summary: dict, event_summary: d
             <td><code>ops_report.html</code></td>
             <td>현업 기준 점수, 주요 문제, 권장 조치</td>
             <td><a href="./ops_report.html">열기</a></td>
+          </tr>
+          <tr>
+            <td><code>performance_report.html</code></td>
+            <td>frame budget, FPS, compute utilization, jitter, continuity KPI</td>
+            <td><a href="./performance_report.html">열기</a></td>
           </tr>
           <tr>
             <td><code>processed_report.html</code></td>
@@ -1217,6 +1557,16 @@ def _build_ops_html(session_dir: Path, summary: dict, event_summary: dict):
     system = summary.get("system", {})
     preferred_stage_timings = summary.get("diagnostics", {}).get("preferred_stage_timings_ms") or {}
     preferred_slowest_stage = preferred_stage_timings.get("slowest_stage") or {}
+    performance_cards = "".join(
+        f"""
+        <div class="metric">
+          <div class="label">{label}</div>
+          <div class="value">{value}</div>
+          <div class="hint">{hint}</div>
+        </div>
+        """
+        for label, value, hint, _tone in _performance_overview_cards(summary)
+    )
     category_cards = "".join(
         f"""
         <div class="metric">
@@ -1258,6 +1608,7 @@ def _build_ops_html(session_dir: Path, summary: dict, event_summary: dict):
       <p>최근 세션 로그를 기준으로 운영 적합도를 100점 만점으로 환산한 요약입니다. 절대적인 인증 점수라기보다, 현장 투입 전 품질 판단과 세션 간 비교를 돕기 위한 내부 루브릭입니다.</p>
       <nav class="nav">
         <a href="./index.html">세션 개요</a>
+        <a href="./performance_report.html">성능 KPI 리포트</a>
         <a href="./processed_report.html">processed 리포트</a>
         <a href="./render_report.html">render 리포트</a>
         <a href="./event_report.html">event 리포트</a>
@@ -1306,6 +1657,12 @@ def _build_ops_html(session_dir: Path, summary: dict, event_summary: dict):
     <section class="card">
       <h2>카테고리 점수</h2>
       <div class="grid">{category_cards}</div>
+    </section>
+
+    <section class="card">
+      <h2>엔지니어링 성능 KPI</h2>
+      <p class="subtle">운영 점수와 별도로, 실시간 처리 관점에서 throughput, compute budget, jitter, continuity를 바로 읽을 수 있는 요약입니다.</p>
+      <div class="grid">{performance_cards}</div>
     </section>
 
     <section class="card">
@@ -1371,7 +1728,11 @@ def _build_ops_html(session_dir: Path, summary: dict, event_summary: dict):
 
 def _build_processed_html(session_dir: Path, summary: dict, processed_records: list[dict]):
     simplified = _simplify_processed_records(processed_records)
-    trajectory = _build_track_trajectory_bundle(processed_records, ["confirmed_tracks", "tentative_tracks"])
+    trajectory = _build_track_trajectory_bundle(
+        processed_records,
+        ["confirmed_tracks", "tentative_tracks"],
+        lead_only=True,
+    )
     pattern_rows = _build_processed_pattern_rows(processed_records)
 
     payload = {
@@ -1420,7 +1781,11 @@ def _build_processed_html(session_dir: Path, summary: dict, processed_records: l
       renderTrajectoryChart(
         'processed-trajectory-chart',
         REPORT_DATA.trajectory.series,
-        {{ title: 'processed trajectory', emptyMessage: REPORT_DATA.trajectory.empty_message }}
+        {{
+          title: 'processed trajectory',
+          emptyMessage: REPORT_DATA.trajectory.empty_message,
+          breakFrameGap: REPORT_DATA.trajectory.gap_break_frames || 2
+        }}
       );
     </script>
     """
@@ -1440,6 +1805,7 @@ def _build_processed_html(session_dir: Path, summary: dict, processed_records: l
       <p>처리 파이프라인 내부 상태를 보는 페이지입니다. detection 후보, tracker 입력, invalid 신호를 먼저 읽습니다.</p>
       <nav class="nav">
         <a href="./index.html">세션 개요</a>
+        <a href="./performance_report.html">성능 KPI 리포트</a>
         <a href="./render_report.html">render 리포트</a>
         <a href="./event_report.html">event 리포트</a>
         <a href="../../../docs/log_guides/processed_frames_guide.html">processed 가이드</a>
@@ -1516,6 +1882,7 @@ def _build_render_html(session_dir: Path, summary: dict, render_records: list[di
     trajectory = _build_track_trajectory_bundle(
         render_records,
         ["display_tracks", "tentative_display_tracks", "tentative_tracks"],
+        lead_only=True,
     )
     pattern_rows = _build_render_pattern_rows(render_records)
 
@@ -1556,7 +1923,11 @@ def _build_render_html(session_dir: Path, summary: dict, render_records: list[di
       renderTrajectoryChart(
         'render-trajectory-chart',
         REPORT_DATA.trajectory.series,
-        {{ title: 'render trajectory', emptyMessage: REPORT_DATA.trajectory.empty_message }}
+        {{
+          title: 'render trajectory',
+          emptyMessage: REPORT_DATA.trajectory.empty_message,
+          breakFrameGap: REPORT_DATA.trajectory.gap_break_frames || 2
+        }}
       );
     </script>
     """
@@ -1576,6 +1947,7 @@ def _build_render_html(session_dir: Path, summary: dict, render_records: list[di
       <p>사용자가 실제로 본 결과 기준 리포트입니다. 화면 지연과 최종 display track을 중심으로 읽습니다.</p>
       <nav class="nav">
         <a href="./index.html">세션 개요</a>
+        <a href="./performance_report.html">성능 KPI 리포트</a>
         <a href="./processed_report.html">processed 리포트</a>
         <a href="./event_report.html">event 리포트</a>
         <a href="../../../docs/log_guides/render_frames_guide.html">render 가이드</a>
@@ -1681,6 +2053,7 @@ def _build_event_html(session_dir: Path, events: list[dict], event_summary: dict
       <p>세션 시작, DCA1000 설정, radar open, first render, 종료 흐름을 시간순으로 보는 리포트입니다.</p>
       <nav class="nav">
         <a href="./index.html">세션 개요</a>
+        <a href="./performance_report.html">성능 KPI 리포트</a>
         <a href="./processed_report.html">processed 리포트</a>
         <a href="./render_report.html">render 리포트</a>
         <a href="../../../docs/log_guides/event_log_guide.html">event 가이드</a>
@@ -1763,6 +2136,7 @@ def _collect_session_rows(log_root: Path):
                 "links": {
                     "index": f"./{session_dir.name}/index.html",
                     "ops": f"./{session_dir.name}/ops_report.html",
+                    "performance": f"./{session_dir.name}/performance_report.html",
                     "processed": f"./{session_dir.name}/processed_report.html",
                     "render": f"./{session_dir.name}/render_report.html",
                     "event": f"./{session_dir.name}/event_report.html",
@@ -1789,6 +2163,7 @@ def _build_root_dashboard_html(session_rows: list[dict]):
           <td>
             <a href="{row['links']['index']}">개요</a> |
             <a href="{row['links']['ops']}">ops</a> |
+            <a href="{row['links']['performance']}">perf</a> |
             <a href="{row['links']['processed']}">processed</a> |
             <a href="{row['links']['render']}">render</a> |
             <a href="{row['links']['event']}">event</a>
@@ -1920,11 +2295,13 @@ def _build_root_dashboard_html(session_rows: list[dict]):
           `priority=${{afterTrajectory.priority_label || 'n/a'}} | source=${{afterTrajectory.source_label || 'n/a'}} | tracks=${{afterTrajectory.track_count ?? 0}}`;
         renderTrajectoryChart('before-trajectory-chart', beforeTrajectory.series, {{
           title: 'before trajectory',
-          emptyMessage: beforeTrajectory.empty_message
+          emptyMessage: beforeTrajectory.empty_message,
+          breakFrameGap: beforeTrajectory.gap_break_frames || 2
         }});
         renderTrajectoryChart('after-trajectory-chart', afterTrajectory.series, {{
           title: 'after trajectory',
-          emptyMessage: afterTrajectory.empty_message
+          emptyMessage: afterTrajectory.empty_message,
+          breakFrameGap: afterTrajectory.gap_break_frames || 2
         }});
       }}
 
@@ -2269,11 +2646,13 @@ def _build_static_comparison_html(
       const COMPARISON_DATA = {json.dumps(payload, ensure_ascii=False)};
       renderTrajectoryChart('static-before-trajectory-chart', COMPARISON_DATA.beforeTrajectory.series, {{
         title: 'before trajectory',
-        emptyMessage: COMPARISON_DATA.beforeTrajectory.empty_message
+        emptyMessage: COMPARISON_DATA.beforeTrajectory.empty_message,
+        breakFrameGap: COMPARISON_DATA.beforeTrajectory.gap_break_frames || 2
       }});
       renderTrajectoryChart('static-after-trajectory-chart', COMPARISON_DATA.afterTrajectory.series, {{
         title: 'after trajectory',
-        emptyMessage: COMPARISON_DATA.afterTrajectory.empty_message
+        emptyMessage: COMPARISON_DATA.afterTrajectory.empty_message,
+        breakFrameGap: COMPARISON_DATA.afterTrajectory.gap_break_frames || 2
       }});
     </script>
     """
@@ -2435,6 +2814,7 @@ def generate_session_artifacts(session_dir: str | Path):
 
     _write_text(session_dir / "index.html", _build_session_index_html(session_dir, summary, event_summary))
     _write_text(session_dir / "ops_report.html", _build_ops_html(session_dir, summary, event_summary))
+    _write_text(session_dir / "performance_report.html", _build_performance_html(session_dir, summary))
     _write_text(session_dir / "processed_report.html", _build_processed_html(session_dir, summary, processed_records))
     _write_text(session_dir / "render_report.html", _build_render_html(session_dir, summary, render_records))
     _write_text(session_dir / "event_report.html", _build_event_html(session_dir, events, event_summary))
@@ -2443,6 +2823,7 @@ def generate_session_artifacts(session_dir: str | Path):
         "summary_path": session_dir / "summary.json",
         "index_path": session_dir / "index.html",
         "ops_report_path": session_dir / "ops_report.html",
+        "performance_report_path": session_dir / "performance_report.html",
         "processed_report_path": session_dir / "processed_report.html",
         "render_report_path": session_dir / "render_report.html",
         "event_report_path": session_dir / "event_report.html",

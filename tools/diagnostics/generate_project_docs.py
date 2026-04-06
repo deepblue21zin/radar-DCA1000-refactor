@@ -15,11 +15,11 @@ CODE_DIR = PROJECT_DIR / "code"
 REQ_DIR = DOCS_DIR / "REQ"
 
 CURRENT_STATE = {
-    "score_overall": "82/100",
-    "score_structure": "80/100",
-    "score_logging": "93/100",
+    "score_overall": "76/100",
+    "score_structure": "83/100",
+    "score_logging": "94/100",
     "code_files": 18,
-    "log_artifacts": 9,
+    "log_artifacts": 10,
 }
 
 
@@ -143,15 +143,15 @@ FILES = [
         "title": "detection.py",
         "category": "Detection",
         "stages": ["Detection"],
-        "summary": "RDI와 RAI에서 실제 타깃 후보를 고르는 검출 계층이다. CFAR, angle ROI, clustering 결과가 여기서 합쳐진다.",
-        "why": "tracker가 아무리 좋아도 detection이 흔들리면 전체 성능이 무너진다.",
-        "mentor": "화면의 점이 왜 여기 찍혔는지 알고 싶을 때 가장 먼저 봐야 하는 파일이다. 후보를 만들고 점수를 주고 최종 detection candidate로 정리한다.",
+        "summary": "RDI와 RAI에서 실제 타깃 후보를 고르는 검출 계층이다. CFAR, angle ROI, clustering 결과가 여기서 합쳐지며, 최근에는 seed 주변 range-angle local patch centroid를 도입해 strong reflection 후보를 body-center 쪽으로 다시 보정하기 시작했다.",
+        "why": "tracker가 아무리 좋아도 detection이 한 사람을 여러 후보로 나누면 전체 성능이 무너진다.",
+        "mentor": "화면의 점이 왜 여기 찍혔는지 알고 싶을 때 가장 먼저 봐야 하는 파일이다. 지금 DetectionCandidate는 예전처럼 단순 strongest peak 결과는 아니고, seed 주변 local patch에서 connected blob centroid까지 계산한 대표점이다. 그래도 아직 track-conditioned local update까지 가진 완전한 body-center measurement는 아니다.",
         "before": "radar_runtime.py, dbscan_cluster.py",
         "after": "tracking.py, live_motion_viewer.py",
         "inputs": "RDI magnitude, RAI magnitude, ROI 설정, clustering 결과",
         "outputs": "DetectionCandidate 리스트",
-        "debug": "CFAR threshold, angle ROI, cluster 기준이 과도하지 않은지 본다.",
-        "ops": "Capon을 붙일 경우 가장 자연스러운 주입 지점은 detect_targets 내부의 angle refinement 단계다.",
+        "debug": "CFAR threshold, angle ROI, cluster 기준, adaptive band의 min_samples override가 과도하지 않은지 함께 본다.",
+        "ops": "최근 첫 단계로 local patch body-center refinement가 들어갔고, 다음 중요한 단계는 이것을 기존 track 예측 위치와 연결된 track-conditioned local measurement까지 확장하는 것이다.",
         "read_order": [
             "DetectionRegion과 DetectionCandidate를 먼저 본다.",
             "cfar_threshold_2d로 픽셀 수준 gating을 이해한다.",
@@ -178,15 +178,15 @@ FILES = [
         "title": "dbscan_cluster.py",
         "category": "Clustering",
         "stages": ["Detection"],
-        "summary": "밀집된 점들을 사람 단위 후보로 묶기 위한 DBSCAN 기반 후처리다. adaptive eps band가 핵심이다.",
-        "why": "한 사람에서 여러 포인트가 나오더라도 detection 수가 불필요하게 폭증하지 않게 만든다.",
-        "mentor": "detection이 점을 찾는 단계라면 clustering은 점 무리를 해석하는 단계다. 멀고 가까운 거리에서 포인트 분포가 달라 adaptive eps가 중요하다.",
+        "summary": "밀집된 점들을 사람 단위 후보로 묶기 위한 DBSCAN 기반 후처리다. adaptive eps band와 band별 min_samples override가 핵심이며, 최근 single-person 테스트에서도 여기 튜닝이 one-person-to-multi-ID split을 줄이는 첫 관문으로 쓰였다.",
+        "why": "한 사람에서 여러 포인트가 나오더라도 detection 수가 불필요하게 폭증하지 않게 만들어야 한다.",
+        "mentor": "detection이 점을 찾는 단계라면 clustering은 점 무리를 해석하는 단계다. 특히 지금 프로젝트에서는 global cluster_min_samples보다 band 안의 min_samples가 우선할 수 있어서, 겉보기 설정과 실제 동작이 달라질 수 있다는 점이 중요하다.",
         "before": "detection.py",
         "after": "detection.py, tracking.py",
         "inputs": "point cloud 후보, distance band 설정, DBSCAN 파라미터",
         "outputs": "cluster labels, cluster summary",
-        "debug": "eps가 과도하면 사람이 쪼개지고 느슨하면 두 사람이 합쳐진다.",
-        "ops": "multi-target 장면에서는 이 파일 튜닝만으로도 큰 개선이 나올 수 있다.",
+        "debug": "eps가 과도하면 사람이 쪼개지고 느슨하면 두 사람이 합쳐진다. 또한 band별 min_samples가 전역 cluster_min_samples를 덮어쓰는지 꼭 확인해야 한다.",
+        "ops": "지금은 multi-target 최적화보다 single-person continuity가 더 급해서, 이 파일 튜닝은 한 사람을 detection 단계에서 최대한 하나로 묶는 방향으로 먼저 쓰는 것이 맞다.",
         "read_order": [
             "adaptive eps 설정과 normalize_adaptive_eps_bands를 먼저 본다.",
             "cluster_points가 어떤 입력을 받아 어떤 라벨을 돌려주는지 확인한다.",
@@ -209,24 +209,26 @@ FILES = [
         "title": "tracking.py",
         "category": "Tracking",
         "stages": ["Tracking"],
-        "summary": "프레임 간 detection을 이어 붙여 일관된 track ID를 유지하는 다중 타깃 tracker다.",
-        "why": "사용자 입장에서 중요한 것은 같은 사람이 같은 ID로 유지되는가이다.",
-        "mentor": "이 파일은 단순히 점을 따라가는 것이 아니라, 어떤 가설을 유지하고 버리고 확정할지 결정하는 정책 묶음이다.",
+        "summary": "프레임 간 detection을 이어 붙여 일관된 track ID를 유지하는 다중 타깃 tracker다. 최근에는 대표 track 유지, 근접 birth 억제, lateral smoothing 정책이 들어가 궤적 안정화 역할이 더 커졌고, detection도 local patch refinement로 좋아졌지만 원운동에서는 여전히 multi-ID split이 남는다.",
+        "why": "사용자 입장에서 중요한 것은 같은 사람이 같은 ID로 유지되는가, 그리고 좌우로 덜 튀는가이다. 현재 현업형 핵심 문제도 바로 이 continuity다.",
+        "mentor": "이 파일은 단순히 점을 따라가는 것이 아니라, 어떤 가설을 유지하고 버리고 확정할지 결정하는 정책 묶음이다. 최근에는 대표 track을 더 오래 유지하고 근처 새 ID 생성을 억제하는 안정화 계층으로도 작동하지만, detection이 local patch centroid로 좋아진 현재도 아직 body-center를 직접 재측정하는 구조는 아니다.",
         "before": "detection.py",
         "after": "live_motion_viewer.py, session_report.py",
         "inputs": "DetectionCandidate 리스트, gating과 aging 파라미터",
         "outputs": "confirmed track, tentative track, lifecycle 상태",
-        "debug": "track birth가 늦지 않은지, ID switch가 잦지 않은지, association이 깨지지 않는지 본다.",
-        "ops": "로그가 좋아진 지금은 이 파일의 파라미터 변화 영향을 수치로 보기 쉬워졌다.",
+        "debug": "track birth가 늦지 않은지, ID switch가 잦지 않은지, association이 깨지지 않는지, primary track이 과도하게 바뀌지 않는지, non-primary가 너무 오래 살아남지 않는지 본다.",
+        "ops": "로그가 좋아진 지금은 이 파일의 파라미터 변화 영향을 수치로 보기 쉬워졌지만, 장기적으로는 global detection을 그대로 잇는 구조에서 벗어나 track-conditioned local measurement를 추가하는 것이 더 중요하다.",
         "read_order": [
             "TrackState와 TrackEstimate로 상태 구조를 본다.",
             "MultiTargetTracker가 내부 리스트를 어떻게 유지하는지 확인한다.",
-            "_associate와 update를 읽어 실제 추적 정책을 이해한다.",
+            "_measurement_covariance와 _stabilize_lateral_state를 읽어 왜 x 축을 덜 믿는지 이해한다.",
+            "_associate와 update를 읽어 실제 추적 정책과 birth suppression 흐름을 이해한다.",
         ],
         "roles": [
             ("상태 유지", "각 detection이 시간축에서 어떤 사람인지 연결한다."),
             ("확정 정책", "tentative를 confirmed로 올릴지, 오래된 track을 지울지 결정한다."),
             ("다중 타깃 정합", "가까운 후보가 여러 개일 때 어떤 detection을 어떤 track에 잇는지 계산한다."),
+            ("궤적 안정화", "대표 track 유지, 근접 birth 억제, lateral smoothing으로 지그재그를 줄인다."),
         ],
         "landmarks": [
             ("TrackState", r"^class TrackState", "트랙 상태 열거형이다."),
@@ -245,7 +247,7 @@ FILES = [
         "stages": ["Settings", "Logging"],
         "summary": "프로젝트 전반에서 공통으로 쓰는 런타임 설정을 로드하고 병합하는 설정 계층이다.",
         "why": "환경이 달라도 코드 수정 없이 값을 바꾸게 해 주는 중심점이다.",
-        "mentor": "실험을 반복할수록 설정 파일 품질이 중요해진다. ROI, tracker뿐 아니라 logging on/off, payload 포함 여부, system snapshot 수집 여부까지 설정에서 제어하게 된 점이 현업적으로 좋다.",
+        "mentor": "실험을 반복할수록 설정 파일 품질이 중요해진다. ROI, tracker뿐 아니라 logging on/off, payload 포함 여부, system snapshot 수집 여부까지 설정에서 제어하게 된 점이 현업적으로 좋고, 최근에는 single-person 디버그 모드처럼 max_targets와 clustering 강도를 빠르게 바꿔 볼 수 있다는 점도 중요해졌다.",
         "before": "외부 runtime_settings.json",
         "after": "live_motion_viewer.py, radar_runtime.py, real_time_process.py",
         "inputs": "기본값 dict, 사용자 JSON override",
@@ -408,24 +410,25 @@ FILES = [
         "title": "session_report.py",
         "category": "Reporting",
         "stages": ["Logging", "Reports"],
-        "summary": "한 세션 폴더를 읽어 summary.json을 생성하는 리포트 빌더다. processed/render 집계뿐 아니라 system snapshot, stage timing, operational assessment까지 묶는다.",
-        "why": "로그가 남는 것만으로 끝나지 않고, 사람이 바로 비교 가능한 숫자와 운영 점수로 정리해야 하기 때문이다.",
-        "mentor": "processed 로그와 render 로그를 왜 나눴는지 가장 잘 보여 주는 파일이다. 이제는 알고리즘 성능과 UI 체감 성능뿐 아니라 환경 상태와 stage별 병목까지 같은 세션 안에서 묶어 본다.",
+        "summary": "한 세션 폴더를 읽어 summary.json을 생성하는 리포트 빌더다. processed/render 집계뿐 아니라 system snapshot, stage timing, operational assessment, performance KPI까지 묶는다.",
+        "why": "로그가 남는 것만으로 끝나지 않고, 사람이 바로 비교 가능한 숫자와 운영 점수와 성능 지표로 정리해야 하기 때문이다.",
+        "mentor": "processed 로그와 render 로그를 왜 나눴는지 가장 잘 보여 주는 파일이다. 이제는 알고리즘 성능과 UI 체감 성능뿐 아니라 환경 상태와 stage별 병목, compute budget, continuity까지 같은 세션 안에서 묶어 본다.",
         "before": "session_meta.json, processed_frames.jsonl, render_frames.jsonl, system_snapshot.json",
         "after": "summary.json, session_compare.py",
         "inputs": "세션 디렉터리의 JSON과 JSONL 로그",
         "outputs": "summary.json",
         "debug": "legacy status_log만 있는 옛 세션도 읽히는지, stage_timings_ms와 system_snapshot이 빠져도 안전한지 확인한다.",
-        "ops": "리포트 스키마를 고정해 두어야 장기 추세 비교가 편하고, 운영 점수와 환경 진단이 summary에 같이 들어가야 현장 판단이 빨라진다.",
+        "ops": "리포트 스키마를 고정해 두어야 장기 추세 비교가 편하고, 운영 점수와 환경 진단과 performance KPI가 summary에 같이 들어가야 현장 판단이 빨라진다.",
         "read_order": [
             "_load_jsonl과 _summarize_numeric로 집계 기본기를 본다.",
-            "_summarize_stage_timings와 _build_system_summary로 새 진단 축을 본다.",
-            "build_summary에서 processed와 render와 assessment를 어떻게 합치는지 확인한다.",
+            "_summarize_stage_timings와 _build_system_summary와 _build_performance_summary로 새 진단 축을 본다.",
+            "build_summary에서 processed와 render와 performance와 assessment를 어떻게 합치는지 확인한다.",
             "main으로 실제 CLI 사용 흐름을 본다.",
         ],
         "roles": [
             ("세션 요약", "프레임 로그를 사람이 읽기 쉬운 summary.json으로 압축한다."),
             ("지표 표준화", "invalid rate, latency, track count 같은 지표를 일관된 구조로 만든다."),
+            ("성능 KPI 요약", "frame budget, throughput, compute utilization, jitter, continuity를 같은 schema로 정리한다."),
             ("운영 진단", "system snapshot과 stage timing을 요약해 현업형 판단 재료를 만든다."),
         ],
         "landmarks": [
@@ -444,7 +447,7 @@ FILES = [
         "title": "session_compare.py",
         "category": "Reporting",
         "stages": ["Reports"],
-        "summary": "before와 after 두 summary.json을 읽어 개선인지 회귀인지 판단하는 비교기다. 최근에는 operational score도 기본 비교 항목에 들어간다.",
+        "summary": "before와 after 두 summary.json을 읽어 개선인지 회귀인지 판단하는 비교기다. 최근에는 operational score와 performance KPI도 기본 비교 항목에 들어간다.",
         "why": "실험이 늘어날수록 좋아진 느낌이 아니라 지표상 좋아졌는가를 자동으로 판단해야 하기 때문이다.",
         "mentor": "현업에서는 이런 비교기가 있어야 실험이 누적될수록 팀이 같은 언어로 의사결정을 할 수 있다.",
         "before": "session_report.py",
@@ -454,7 +457,7 @@ FILES = [
         "debug": "metric direction, 0 division, None 값 처리, legacy session의 missing metric을 안전하게 다루는지 확인해야 한다.",
         "ops": "threshold 기반 fail와 pass를 붙이면 회귀 검증 자동화에 연결하기 좋고, operational score를 같이 보면 현업 설명이 쉬워진다.",
         "read_order": [
-            "METRICS 목록으로 operational score와 latency가 어떤 순서로 비교되는지 먼저 본다.",
+            "METRICS 목록으로 operational score와 throughput, jitter, continuity가 어떤 순서로 비교되는지 먼저 본다.",
             "build_comparison에서 delta와 judgement 계산을 본다.",
             "main에서 CLI 출력 형식을 확인한다.",
         ],
@@ -480,7 +483,7 @@ FILES = [
         "why": "live_motion_viewer.py에서 세션 준비와 종료 보고를 분리해 운영 책임 경계를 만든 핵심 파일이다.",
         "mentor": "예전에는 앱 파일이 로그 준비까지 거의 다 들고 있었다. 지금은 SessionLogger가 세션 폴더 구조와 system snapshot, report generation을 묶어 주는 전용 계층이 됐다.",
         "before": "live_motion_viewer.py, runtime_settings.py",
-        "after": "session_meta.json, event_log.jsonl, render_frames.jsonl, summary.json, ops_report.html",
+        "after": "session_meta.json, event_log.jsonl, render_frames.jsonl, summary.json, ops_report.html, performance_report.html",
         "inputs": "세션 메타데이터, runtime summary, logging 토글",
         "outputs": "세션 디렉터리와 로그/리포트 파일",
         "debug": "enabled 토글, 파일 핸들 생명주기, system snapshot 수집 실패 시 degrade gracefully 되는지 확인한다.",
@@ -576,28 +579,33 @@ FILES = [
         "title": "log_html_reports.py",
         "category": "Reporting",
         "stages": ["Reports"],
-        "summary": "summary.json과 comparison 결과를 읽어 세션 index, ops_report, 루트 대시보드까지 HTML로 생성하는 리포트 렌더러다.",
-        "why": "JSON만 있으면 숫자는 남지만, 회의나 현장 설명에서는 한눈에 보이는 HTML 리포트가 훨씬 빠르다.",
-        "mentor": "이 파일은 숫자를 전달 가능한 화면으로 바꾸는 마지막 계층이다. stage timing, system snapshot, operational score를 실제 문서로 보여 주는 역할을 한다.",
+        "summary": "summary.json과 comparison 결과를 읽어 세션 index, ops_report, performance_report, 루트 대시보드까지 HTML로 생성하는 리포트 렌더러다. 최근에는 대표 lead track 기준 궤적과 gap break 시각화, 성능 KPI 페이지도 포함한다.",
+        "why": "JSON만 있으면 숫자는 남지만, 회의나 현장 설명에서는 한눈에 보이는 HTML 리포트가 훨씬 빠르다. 특히 궤적과 KPI는 같은 데이터를 어떻게 보여 주느냐에 따라 해석이 크게 달라진다.",
+        "mentor": "이 파일은 숫자를 전달 가능한 화면으로 바꾸는 마지막 계층이다. stage timing, system snapshot, operational score뿐 아니라 성능 KPI와 대표 track을 어떻게 보여 줄지도 이 레이어에서 결정한다.",
         "before": "session_report.py, session_compare.py, operational_assessment.py",
-        "after": "index.html, ops_report.html, 비교용 루트 dashboard",
+        "after": "index.html, ops_report.html, performance_report.html, 비교용 루트 dashboard",
         "inputs": "summary.json, comparison json, event summary",
         "outputs": "세션별/루트 HTML 리포트",
-        "debug": "legacy session처럼 일부 로그가 비어 있어도 HTML이 깨지지 않는지, 링크가 올바른지 확인한다.",
-        "ops": "현업에서는 팀이 동일한 리포트를 보고 이야기할 수 있어야 하므로, HTML 레이어 품질도 꽤 중요하다.",
+        "debug": "legacy session처럼 일부 로그가 비어 있어도 HTML이 깨지지 않는지, lead-only trajectory와 gap break가 의도대로 보이는지, 링크가 올바른지 확인한다.",
+        "ops": "현업에서는 팀이 동일한 리포트를 보고 이야기할 수 있어야 하므로, HTML 레이어 품질도 꽤 중요하다. 대표 track만 보여 주고 빈 구간은 끊어서 그리는 정책도 실제 판단에 큰 영향을 준다.",
         "read_order": [
             "COMMON_STYLE과 COMMON_SCRIPT로 리포트 공통 뼈대를 본다.",
+            "_build_performance_html과 _performance_overview_cards로 KPI 페이지 구성을 본다.",
+            "_build_track_trajectory_bundle과 renderTrajectoryChart를 읽어 궤적 시각화 규칙을 본다.",
             "_build_session_html과 _build_ops_html에서 세션 페이지 구성을 읽는다.",
             "generate_reports로 실제 파일 생성 흐름을 확인한다.",
         ],
         "roles": [
             ("세션 대시보드 생성", "한 세션의 핵심 지표를 index.html로 만든다."),
             ("운영 평가 시각화", "ops_report.html로 점수와 권고를 보여 준다."),
+            ("성능 KPI 시각화", "performance_report.html로 예산 대비 처리량과 지터와 continuity를 보여 준다."),
             ("루트 비교 허브", "여러 세션을 한눈에 비교하는 상위 index를 만든다."),
+            ("궤적 해석 보조", "대표 track과 gap break 규칙으로 과장된 선분을 줄인다."),
         ],
         "landmarks": [
             ("_collect_session_rows", r"^def _collect_session_rows", "루트 대시보드용 세션 목록을 모은다."),
             ("_build_ops_html", r"^def _build_ops_html", "현업 평가 리포트를 만든다."),
+            ("_build_performance_html", r"^def _build_performance_html", "성능 KPI 리포트를 만든다."),
             ("generate_reports", r"^def generate_reports", "세션/루트 HTML 생성 진입점이다."),
             ("main", r"^def main", "CLI entrypoint다."),
         ],
@@ -703,7 +711,7 @@ FLOW_DETAILS = {
         ("_load_jsonl", "processed/render/event 로그를 JSON record 배열로 읽는다.", "record list", "build_summary"),
         ("_summarize_numeric", "latency와 count 값에서 mean, p50, p95를 계산한다.", "통계 dict", "build_summary"),
         ("_summarize_stage_timings", "stage timing dict를 stage별 분포로 요약한다.", "stage timing summary", "build_summary"),
-        ("build_summary", "processed와 render와 system snapshot을 함께 읽어 세션 요약과 운영 점수를 만든다.", "summary.json 내용", "session_compare.py"),
+        ("build_summary", "processed와 render와 system snapshot을 함께 읽어 세션 요약과 운영 점수와 성능 KPI를 만든다.", "summary.json 내용", "session_compare.py"),
         ("main", "CLI에서 세션 폴더를 받아 summary.json을 파일로 쓴다.", "summary.json", "실험 비교 단계"),
     ],
     "session_compare": [
@@ -714,14 +722,14 @@ FLOW_DETAILS = {
     "session_logging": [
         ("SessionLogger.build_session_metadata", "git 정보와 logging 토글을 세션 메타데이터로 묶는다.", "session metadata", "prepare"),
         ("SessionLogger.prepare", "세션 폴더, runtime_config, system_snapshot, 로그 파일 핸들을 준비한다.", "session directory + file handles", "live_motion_viewer.py"),
-        ("SessionLogger.close", "로그 파일을 닫고 derived summary와 HTML 리포트를 생성한다.", "summary.json + index.html + ops_report.html", "사용자 검토"),
+        ("SessionLogger.close", "로그 파일을 닫고 derived summary와 HTML 리포트를 생성한다.", "summary.json + index.html + ops_report.html + performance_report.html", "사용자 검토"),
     ],
     "system_snapshot": [
         ("_build_windows_runtime_snapshot", "Windows NIC, 방화벽, IP, priority 관련 정보를 수집한다.", "network/process snapshot", "capture_system_snapshot"),
         ("capture_system_snapshot", "전원 계획과 Python 환경까지 합쳐 system_snapshot.json 구조를 만든다.", "system snapshot dict", "session_logging.py / session_report.py"),
     ],
     "log_html_reports": [
-        ("generate_reports", "summary.json과 비교 결과를 읽어 세션 HTML과 루트 dashboard를 다시 만든다.", "index.html / ops_report.html", "사용자 검토"),
+        ("generate_reports", "summary.json과 비교 결과를 읽어 세션 HTML과 루트 dashboard를 다시 만든다.", "index.html / ops_report.html / performance_report.html", "사용자 검토"),
         ("_collect_session_rows", "루트 dashboard에 들어갈 세션 목록과 점수를 모은다.", "dashboard rows", "index.html"),
     ],
     "legacy_xwr1843_app": [
@@ -1559,11 +1567,11 @@ def render_project_index() -> str:
 
       <section class="section" id="goal">
         <h2>프로젝트 목표 정리</h2>
-        <p class="intro">한 문장으로 줄이면, 이 프로젝트는 실시간 객체 추적 레이더 데모를 만들고 그것을 환경 스냅샷과 운영 점수까지 포함해 재현 가능하게 측정하는 시스템으로 진화하고 있다.</p>
+        <p class="intro">한 문장으로 줄이면, 이 프로젝트는 실시간 객체 추적 레이더 데모를 만들고 그것을 환경 스냅샷과 운영 점수까지 포함해 재현 가능하게 측정하는 시스템으로 진화했다. 최근에는 detection에 local patch body-center refinement까지 들어갔지만, 최신 clean session 기준 핵심 리스크는 여전히 single-person 원운동에서 한 사람을 여러 ID로 쪼개는 continuity 문제다.</p>
         <div class="grid3">
           <article class="card"><h3>실시간 검출</h3><p>UDP로 들어오는 raw frame에서 움직이는 후보를 안정적으로 찾아야 한다.</p></article>
           <article class="card"><h3>실시간 추적</h3><p>같은 사람을 여러 프레임에서 같은 ID로 유지해야 한다.</p></article>
-          <article class="card"><h3>지속 측정</h3><p>processed, render, event, system snapshot, ops report 구조가 들어가면서 전과 후를 숫자와 점수로 비교하는 기반이 생겼다.</p></article>
+          <article class="card"><h3>지속 측정</h3><p>processed, render, event, system snapshot, ops report, performance report 구조가 들어가면서 전과 후를 숫자와 점수와 KPI로 비교하는 기반이 생겼다.</p></article>
         </div>
       </section>
 
@@ -1578,7 +1586,7 @@ def render_project_index() -> str:
         <div class="flow" style="margin-top:16px;">
           <article class="flow-step"><span>4. 실시간 표시</span><strong>live_motion_viewer.py + app_layout.py</strong><p>최신 프레임만 골라 UI에 올린다.</p></article>
           <article class="flow-step"><span>5. 로그</span><strong>session_meta / processed / render / event / system_snapshot</strong><p>처리 로그와 렌더 로그를 분리해 남기고 실행 환경도 함께 저장한다.</p></article>
-          <article class="flow-step"><span>6. 리포트</span><strong>session_report.py + operational_assessment.py + log_html_reports.py</strong><p>summary, 운영 점수, HTML 대시보드를 만든다.</p></article>
+          <article class="flow-step"><span>6. 리포트</span><strong>session_report.py + operational_assessment.py + log_html_reports.py</strong><p>summary, 운영 점수, 성능 KPI, HTML 대시보드를 만든다.</p></article>
         </div>
       </section>
 
@@ -1588,7 +1596,7 @@ def render_project_index() -> str:
         <div class="grid3">
           <article class="card"><h3>이전 상태</h3><p>UI가 최신 프레임만 소비하면 중간 처리 프레임이 스킵되고, 알고리즘 자체 성능이 로그에 충분히 남지 않았다.</p></article>
           <article class="card"><h3>현재 상태</h3><p>processed_frames.jsonl은 처리기 기준 전체 프레임을, render_frames.jsonl은 사용자 체감 기준 프레임을, system_snapshot.json은 실행 환경 상태를 남긴다.</p></article>
-          <article class="card"><h3>의미</h3><p>이제 알고리즘 개선, UI 병목, 실행 환경 문제를 분리해서 측정할 수 있다. session_report와 ops_report가 그 차이를 숫자와 점수로 보여 준다.</p></article>
+          <article class="card"><h3>의미</h3><p>이제 알고리즘 개선, UI 병목, 실행 환경 문제를 분리해서 측정할 수 있다. session_report와 performance_report와 ops_report가 그 차이를 숫자와 점수와 KPI로 보여 준다.</p></article>
         </div>
       </section>
 
@@ -1638,11 +1646,11 @@ def render_project_index() -> str:
 
       <section class="section">
         <h2>현업 시점 평가</h2>
-        <p class="intro">관측성과 실험 추적 능력은 분명히 좋아졌고, shared FFT와 stage timing처럼 성능 개선 기반도 생겼다. 다만 구조 분리와 재생 기반 회귀 검증은 아직 더 필요하다.</p>
+        <p class="intro">관측성과 실험 추적 능력은 분명히 좋아졌고, shared FFT와 stage timing, trajectory stabilization처럼 성능 개선 기반도 생겼다. 다만 최신 실험에서는 네트워크보다 detection과 tracking continuity가 더 큰 문제로 올라왔고, 구조 분리와 replay 기반 회귀 검증도 아직 더 필요하다.</p>
         <div class="grid3">
-          <article class="card"><h3>좋아진 점</h3><p>processed, render, event, system snapshot, summary, ops report 구조가 생기면서 개선 판단 근거가 훨씬 강해졌다.</p></article>
-          <article class="card"><h3>여전히 아쉬운 점</h3><p>MotionViewer에 책임이 많이 몰려 있고 processing hot path는 아직 직렬 계산 비중이 높다.</p></article>
-          <article class="card"><h3>다음 우선순위</h3><p>AppController 분리, replay 입력 경로 정리, CFAR/후보 루프 벡터화, regression threshold 추가가 다음 단계다.</p></article>
+          <article class="card"><h3>좋아진 점</h3><p>processed, render, event, system snapshot, summary, ops report, performance report 구조가 생기면서 개선 판단 근거가 훨씬 강해졌고, 대표 track 유지와 lead-only trajectory로 궤적 해석도 덜 흔들리게 됐다.</p></article>
+          <article class="card"><h3>여전히 아쉬운 점</h3><p>한 사람 원운동에서도 detection이 여러 점으로 살아남아 confirmed track이 2~3개로 분해되고, tracker는 그 조각 사이에서 ID를 자주 갈아탄다. MotionViewer 책임 집중과 processing hot path 직렬 계산도 여전히 남아 있다.</p></article>
+          <article class="card"><h3>다음 우선순위</h3><p>최근 local patch body-center refinement가 들어갔으므로, 다음 단계는 track-conditioned local update, detection-merge 회귀 검증, replay 입력 경로 정리, CFAR/후보 루프 벡터화, regression threshold 추가다.</p></article>
         </div>
       </section>
     </div>
@@ -1668,40 +1676,42 @@ def render_req_index() -> str:
           <div>
             <span class="eyebrow">REQ / Improvement Spec</span>
             <h1>실무형 리팩터링 요구사항</h1>
-            <p>이 문서는 지금 구조에서 무엇이 부족하고 무엇을 어떤 순서로 고쳐야 하는지 구현 관점에서 정리한 명세서다. 최근에는 로그 분리, system snapshot, stage timing, operational report, shared FFT 최적화가 반영되었고, 그 다음 단계도 함께 업데이트했다.</p>
+            <p>이 문서는 지금 구조에서 무엇이 부족하고 무엇을 어떤 순서로 고쳐야 하는지 구현 관점에서 정리한 명세서다. 최근에는 로그 분리, system snapshot, stage timing, operational report, shared FFT 최적화, primary track 안정화, detection local patch body-center refinement가 반영되었고, 지금은 single-person 원운동 continuity와 track-conditioned local update가 다음 핵심 과제로 올라와 있다.</p>
           </div>
           <div class="hero-meta">
             <div class="meta"><span>Overall</span><strong>{CURRENT_STATE['score_overall']}</strong></div>
             <div class="meta"><span>Logging</span><strong>{CURRENT_STATE['score_logging']}</strong></div>
-            <div class="meta"><span>Active REQ</span><strong>6</strong></div>
-            <div class="meta"><span>Implemented</span><strong>Phase 1-3</strong></div>
+            <div class="meta"><span>Active REQ</span><strong>7</strong></div>
+            <div class="meta"><span>Implemented</span><strong>Phase 1-4</strong></div>
           </div>
         </div>
       </section>
 
       <section class="section" id="status">
         <h2>현재 반영된 항목</h2>
-        <p class="intro">최근 업데이트로 관측성과 비교 자동화 기반은 실제 코드에 반영되었다.</p>
+        <p class="intro">최근 업데이트로 관측성과 비교 자동화 기반은 실제 코드에 반영되었고, single-person 안정화용 추적 정책도 일부 코드에 들어갔다.</p>
         <div class="grid3">
           <article class="card"><h3>완료 1</h3><p>processed_frames.jsonl, render_frames.jsonl, event_log.jsonl, session_meta.json 구조가 추가되었다.</p></article>
-          <article class="card"><h3>완료 2</h3><p>session_report.py가 system_snapshot, stage timing, operational assessment를 포함한 summary.json을 생성한다.</p></article>
-          <article class="card"><h3>완료 3</h3><p>log_html_reports.py가 index.html과 ops_report.html을 만들고, DSP.py에는 shared FFT 기반 hot-path 최적화가 반영되었다.</p></article>
+          <article class="card"><h3>완료 2</h3><p>session_report.py가 system_snapshot, stage timing, operational assessment, performance KPI를 포함한 summary.json을 생성한다.</p></article>
+          <article class="card"><h3>완료 3</h3><p>log_html_reports.py가 index.html, ops_report.html, performance_report.html을 만들고, 최근에는 lead-only trajectory와 gap break 시각화까지 반영되었다.</p></article>
+          <article class="card"><h3>완료 4</h3><p>tracking.py에 primary track 유지, 근접 birth 억제, lateral deadband/smoothing이 들어가 한 사람 궤적 안정화를 위한 기본 장치가 추가되었다.</p></article>
         </div>
       </section>
 
       <section class="section">
         <h2>남은 핵심 요구사항</h2>
-        <p class="intro">이제부터는 구조 분리, 재현 실험, 남은 processing 병목 제거를 단계적으로 진행하는 것이 맞다.</p>
+        <p class="intro">이제부터는 single-person continuity, 재현 실험, 남은 processing 병목 제거를 단계적으로 진행하는 것이 맞다.</p>
         <div class="table-wrap">
           <table>
             <thead><tr><th>REQ</th><th>상태</th><th>목표</th><th>구현 포인트</th></tr></thead>
             <tbody>
-              <tr><td>MotionViewer 책임 분리</td><td>In Progress</td><td>UI, 앱 제어, 세션 로그 책임을 더 명확히 나눈다.</td><td>AppController / ViewRenderer / SessionLogger 경계 강화</td></tr>
+              <tr><td>Single-person continuity / body-center 측정</td><td>In Progress</td><td>원운동에서도 한 사람을 ID 하나로 유지한다.</td><td>local patch body-center refinement, stronger candidate merge, track-conditioned local update, non-primary decay</td></tr>
               <tr><td>Processing hot-path 경량화</td><td>In Progress</td><td>real_time_process.py의 직렬 계산 비용을 더 줄인다.</td><td>CFAR 벡터화, 후보 pruning, logging writer 분리</td></tr>
-              <tr><td>print 기반 로그 정리</td><td>Pending</td><td>장비 제어와 예외 로그도 구조화한다.</td><td>logging 모듈 또는 JSON logger 도입</td></tr>
               <tr><td>Replay 입력 경로</td><td>Pending</td><td>같은 raw 입력으로 전후 비교 가능하게 만든다.</td><td>read_binfile.py 기반 session_replay 경로 추가</td></tr>
               <tr><td>Regression Threshold</td><td>Pending</td><td>요약 비교 결과를 pass와 fail로 판정한다.</td><td>session_compare.py에 임계값 규칙 추가</td></tr>
-              <tr><td>Hybrid Capon PoC</td><td>Pending</td><td>각도 해상도를 개선하되 실시간성은 유지한다.</td><td>detection 후보 상위 N개에 angle refinement 적용</td></tr>
+              <tr><td>MotionViewer 책임 분리</td><td>Pending</td><td>UI, 앱 제어, 세션 로그 책임을 더 명확히 나눈다.</td><td>AppController / ViewRenderer / SessionLogger 경계 강화</td></tr>
+              <tr><td>DCA / NIC preflight 검증</td><td>Pending</td><td>WinError 10049 같은 bind 실패를 실행 전에 잡는다.</td><td>bind 가능 IP 검사, 활성 NIC 안내, startup failure banner</td></tr>
+              <tr><td>print 기반 로그 정리</td><td>Pending</td><td>장비 제어와 예외 로그도 구조화한다.</td><td>logging 모듈 또는 JSON logger 도입</td></tr>
             </tbody>
           </table>
         </div>
@@ -1709,12 +1719,12 @@ def render_req_index() -> str:
 
       <section class="section">
         <h2>우선순위 상세</h2>
-        <p class="intro">현업 기준으로는 아래 순서가 가장 안전하다.</p>
+        <p class="intro">현업 기준으로는 아래 순서가 가장 안전하다. 지금은 다중 인원 완성도보다 one-person continuity를 먼저 안정화하는 것이 우선이다.</p>
         <div class="grid2">
-          <article class="card"><h3>1. processing 병목 제거</h3><p>shared FFT는 들어갔지만 detect_targets, CFAR, logging write 비용은 아직 크다. 여기서 추가 벡터화와 비동기화를 먼저 진행하는 것이 체감 효과가 크다.</p></article>
-          <article class="card"><h3>2. 구조 안정화</h3><p>현재는 live_motion_viewer.py에 앱 제어와 렌더가 많이 몰려 있다. SessionLogger는 분리됐으니 다음은 AppController와 ViewRenderer 경계를 더 만드는 단계다.</p></article>
-          <article class="card"><h3>3. 재현 실험 가능화</h3><p>실제 전후 비교는 동일 입력이 있어야 의미가 있다. read_binfile.py를 기반으로 replay 경로를 만들고 session_meta에 source_capture를 강제 기록한다.</p></article>
-          <article class="card"><h3>4. 비교 자동화 강화</h3><p>session_compare.py는 이미 delta를 내지만 아직 fail와 pass 정책은 없다. invalid_rate, latency p95, operational score 기준을 추가한다.</p></article>
+          <article class="card"><h3>1. continuity 안정화</h3><p>한 사람 원운동에서 detection이 여러 점으로 갈라지는 것을 먼저 막아야 한다. local patch body-center refinement 검증과 cluster 병합 강화, 이후 track-conditioned update가 우선이다.</p></article>
+          <article class="card"><h3>2. 재현 실험 가능화</h3><p>실제 전후 비교는 동일 입력이 있어야 의미가 있다. read_binfile.py를 기반으로 replay 경로를 만들고 session_meta에 source_capture를 강제 기록한다.</p></article>
+          <article class="card"><h3>3. processing 병목 제거</h3><p>shared FFT는 들어갔지만 detect_targets, CFAR, logging write 비용은 아직 크다. continuity 문제를 가리지 않게 여기서도 추가 벡터화와 비동기화를 진행한다.</p></article>
+          <article class="card"><h3>4. startup / 비교 자동화 강화</h3><p>DCA bind preflight, regression threshold, failure banner를 추가해 실험 실패와 회귀를 더 빨리 구분한다.</p></article>
         </div>
       </section>
 
@@ -1723,6 +1733,7 @@ def render_req_index() -> str:
         <p class="intro">아래 기준이 충족되면 이 프로젝트는 PoC를 넘어 반복 실험 가능한 개발 상태에 들어간다.</p>
         <div class="card">
           <ul>
+            <li>single-person 원운동 세션에서 confirmed track이 대부분 1개로 유지되고, lead ID switch가 크게 줄어든다.</li>
             <li>live path와 replay path 모두 같은 summary schema를 만든다.</li>
             <li>before와 after 비교가 scenario_id와 source_capture 기준으로 자동 묶인다.</li>
             <li>구조상 UI, 처리, 로깅 책임이 분리되어 한 파일 집중도가 낮아진다.</li>

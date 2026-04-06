@@ -207,6 +207,8 @@
         어떤 조건이 실제 성능 회귀를 만드는지 분리해서 보는 것이다.
         이 문서는 <code>logging on/off</code>, <code>high-performance mode</code>,
         <code>network check</code>를 축으로 다시 실험하는 계획서다.
+        다만 최신 clean session 기준으로는 invalid보다 <code>single-person continuity</code>가 더 큰 문제라,
+        아래 계획에는 detection의 <code>body_center_patch_bands</code>와 lead ID switch 검증도 추가한다.
       </p>
       <div class="nav">
         <a href="./index.html">문제 명세서</a>
@@ -244,6 +246,29 @@
         <span class="badge danger">한 번만 재면 우연일 수 있음</span>
         <span class="badge warn">같은 장면, 같은 시간, 같은 설정 유지</span>
         <span class="badge brand">이름 규칙을 통일해서 비교 가능하게 만들기</span>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>현재 추가된 continuity 검증 축</h2>
+      <p class="intro">
+        최근에는 detection이 strongest peak 한 점만 쓰지 않고, seed 주변
+        <code>range-angle local patch</code>에서 connected blob centroid를 다시 계산하도록 바뀌었다.
+        그래서 재실험은 이제 latency뿐 아니라 이 수정이 실제로 <code>one-person multi-ID split</code>을 줄였는지도 함께 봐야 한다.
+      </p>
+      <div class="grid3">
+        <article class="card">
+          <strong>Detection 변화</strong>
+          <p><code>body_center_patch_bands</code>가 거리별로 patch 크기를 바꾸며 representative point를 다시 계산한다.</p>
+        </article>
+        <article class="card">
+          <strong>주요 지표</strong>
+          <p><code>candidate mean</code>, <code>confirmed track mean</code>, <code>lead confirmed switch</code>를 이전 세션과 비교한다.</p>
+        </article>
+        <article class="card">
+          <strong>판단 기준</strong>
+          <p>single-person 원운동에서 detection과 confirmed track 수가 1에 가까워지고, lead ID switch가 눈에 띄게 줄어야 개선으로 본다.</p>
+        </article>
       </div>
     </section>
 

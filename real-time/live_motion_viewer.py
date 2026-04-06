@@ -68,6 +68,14 @@ TRACK_DOPPLER_COST_WEIGHT = float(TUNING['tracking']['doppler_cost_weight'])
 TRACK_REPORT_MISS_TOLERANCE = int(TUNING['tracking']['report_miss_tolerance'])
 TRACK_LOST_GATE_FACTOR = float(TUNING['tracking']['lost_gate_factor'])
 TRACK_TENTATIVE_GATE_FACTOR = float(TUNING['tracking']['tentative_gate_factor'])
+TRACK_BIRTH_SUPPRESSION_RADIUS_M = float(TUNING['tracking']['birth_suppression_radius_m'])
+TRACK_PRIMARY_TRACK_BIRTH_SCALE = float(TUNING['tracking']['primary_track_birth_scale'])
+TRACK_BIRTH_SUPPRESSION_MISS_TOLERANCE = int(TUNING['tracking']['birth_suppression_miss_tolerance'])
+TRACK_PRIMARY_TRACK_HOLD_FRAMES = int(TUNING['tracking']['primary_track_hold_frames'])
+TRACK_LATERAL_DEADBAND_M = float(TUNING['tracking']['lateral_deadband_m'])
+TRACK_LATERAL_DEADBAND_RANGE_SCALE = float(TUNING['tracking']['lateral_deadband_range_scale'])
+TRACK_LATERAL_SMOOTHING_ALPHA = float(TUNING['tracking']['lateral_smoothing_alpha'])
+TRACK_LATERAL_VELOCITY_DAMPING = float(TUNING['tracking']['lateral_velocity_damping'])
 DISPLAY_MIN_CONFIDENCE = float(TUNING['detection']['display_min_confidence'])
 PIPELINE_QUEUE_SIZE = int(TUNING['pipeline']['queue_size'])
 BLOCK_TRACK_BIRTH_ON_INVALID = bool(TUNING['pipeline']['block_track_birth_on_invalid'])
@@ -90,6 +98,7 @@ DETECTION_TUNING = {
     'angle_contrast_scale': float(DETECTION_ALGORITHM['angle_contrast_scale']),
     'min_cartesian_separation_m': float(DETECTION_ALGORITHM['min_cartesian_separation_m']),
     'angle_centroid_radius_bands': list(DETECTION_ALGORITHM.get('angle_centroid_radius_bands', [])),
+    'body_center_patch_bands': list(DETECTION_ALGORITHM.get('body_center_patch_bands', [])),
 }
 LOG_ROOT = PROJECT_ROOT / 'logs' / 'live_motion_viewer'
 SPATIAL_VIEW_HEIGHT = int(STATIC['spatial_view']['height'])
@@ -230,6 +239,14 @@ class MotionViewer:
             'track_doppler_zero_guard_bins': TRACK_DOPPLER_ZERO_GUARD_BINS,
             'track_doppler_gate_bins': TRACK_DOPPLER_GATE_BINS,
             'track_doppler_cost_weight': TRACK_DOPPLER_COST_WEIGHT,
+            'track_birth_suppression_radius_m': TRACK_BIRTH_SUPPRESSION_RADIUS_M,
+            'track_primary_track_birth_scale': TRACK_PRIMARY_TRACK_BIRTH_SCALE,
+            'track_birth_suppression_miss_tolerance': TRACK_BIRTH_SUPPRESSION_MISS_TOLERANCE,
+            'track_primary_track_hold_frames': TRACK_PRIMARY_TRACK_HOLD_FRAMES,
+            'track_lateral_deadband_m': TRACK_LATERAL_DEADBAND_M,
+            'track_lateral_deadband_range_scale': TRACK_LATERAL_DEADBAND_RANGE_SCALE,
+            'track_lateral_smoothing_alpha': TRACK_LATERAL_SMOOTHING_ALPHA,
+            'track_lateral_velocity_damping': TRACK_LATERAL_VELOCITY_DAMPING,
             'pipeline_queue_size': PIPELINE_QUEUE_SIZE,
             'block_track_birth_on_invalid': BLOCK_TRACK_BIRTH_ON_INVALID,
             'invalid_policy': dict(INVALID_POLICY),
@@ -451,6 +468,14 @@ class MotionViewer:
                 report_miss_tolerance=TRACK_REPORT_MISS_TOLERANCE,
                 lost_gate_factor=TRACK_LOST_GATE_FACTOR,
                 tentative_gate_factor=TRACK_TENTATIVE_GATE_FACTOR,
+                birth_suppression_radius_m=TRACK_BIRTH_SUPPRESSION_RADIUS_M,
+                primary_track_birth_scale=TRACK_PRIMARY_TRACK_BIRTH_SCALE,
+                birth_suppression_miss_tolerance=TRACK_BIRTH_SUPPRESSION_MISS_TOLERANCE,
+                primary_track_hold_frames=TRACK_PRIMARY_TRACK_HOLD_FRAMES,
+                lateral_deadband_m=TRACK_LATERAL_DEADBAND_M,
+                lateral_deadband_range_scale=TRACK_LATERAL_DEADBAND_RANGE_SCALE,
+                lateral_smoothing_alpha=TRACK_LATERAL_SMOOTHING_ALPHA,
+                lateral_velocity_damping=TRACK_LATERAL_VELOCITY_DAMPING,
             ),
             block_track_birth_on_invalid=BLOCK_TRACK_BIRTH_ON_INVALID,
             invalid_policy=INVALID_POLICY,
@@ -563,7 +588,7 @@ class MotionViewer:
         ]
         display_tracks = sorted(
             display_tracks,
-            key=lambda track: (track.confidence, track.score, track.hits),
+            key=lambda track: (track.is_primary, track.confidence, track.score, track.hits),
             reverse=True,
         )
         rdi_points = [
@@ -596,7 +621,7 @@ class MotionViewer:
             ]
             tentative_display_tracks = sorted(
                 tentative_display_tracks,
-                key=lambda track: (track.confidence, track.score, track.hits),
+                key=lambda track: (track.is_primary, track.confidence, track.score, track.hits),
                 reverse=True,
             )
 

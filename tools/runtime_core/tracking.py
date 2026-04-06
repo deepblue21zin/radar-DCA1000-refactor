@@ -195,6 +195,7 @@ class TrackEstimate:
     age: int
     hits: int
     misses: int
+    is_primary: bool = False
 
 
 @dataclass
@@ -234,6 +235,14 @@ class MultiTargetTracker:
         report_miss_tolerance=2,
         lost_gate_factor=1.2,
         tentative_gate_factor=0.5,
+        birth_suppression_radius_m=0.0,
+        primary_track_birth_scale=1.0,
+        birth_suppression_miss_tolerance=0,
+        primary_track_hold_frames=0,
+        lateral_deadband_m=0.0,
+        lateral_deadband_range_scale=0.0,
+        lateral_smoothing_alpha=1.0,
+        lateral_velocity_damping=1.0,
     ):
         if process_var <= 0:
             raise ValueError("process_var must be positive.")
@@ -265,6 +274,20 @@ class MultiTargetTracker:
             raise ValueError("report_miss_tolerance must be non-negative.")
         if lost_gate_factor <= 0 or tentative_gate_factor <= 0:
             raise ValueError("gate factors must be positive.")
+        if birth_suppression_radius_m < 0:
+            raise ValueError("birth_suppression_radius_m must be non-negative.")
+        if primary_track_birth_scale <= 0:
+            raise ValueError("primary_track_birth_scale must be positive.")
+        if birth_suppression_miss_tolerance < 0:
+            raise ValueError("birth_suppression_miss_tolerance must be non-negative.")
+        if primary_track_hold_frames < 0:
+            raise ValueError("primary_track_hold_frames must be non-negative.")
+        if lateral_deadband_m < 0 or lateral_deadband_range_scale < 0:
+            raise ValueError("lateral deadband values must be non-negative.")
+        if not (0.0 < lateral_smoothing_alpha <= 1.0):
+            raise ValueError("lateral_smoothing_alpha must be in (0, 1].")
+        if not (0.0 < lateral_velocity_damping <= 1.0):
+            raise ValueError("lateral_velocity_damping must be in (0, 1].")
 
         kalman_filter, q_discrete_white_noise = _load_filterpy()
         self._KalmanFilter = kalman_filter
@@ -287,10 +310,19 @@ class MultiTargetTracker:
         self.report_miss_tolerance = int(report_miss_tolerance)
         self.lost_gate_factor = float(lost_gate_factor)
         self.tentative_gate_factor = float(tentative_gate_factor)
+        self.birth_suppression_radius_m = float(birth_suppression_radius_m)
+        self.primary_track_birth_scale = float(primary_track_birth_scale)
+        self.birth_suppression_miss_tolerance = int(birth_suppression_miss_tolerance)
+        self.primary_track_hold_frames = int(primary_track_hold_frames)
+        self.lateral_deadband_m = float(lateral_deadband_m)
+        self.lateral_deadband_range_scale = float(lateral_deadband_range_scale)
+        self.lateral_smoothing_alpha = float(lateral_smoothing_alpha)
+        self.lateral_velocity_damping = float(lateral_velocity_damping)
 
         self._tracks: List[_Track] = []
         self._next_track_id = 1
         self._last_frame_ts: Optional[float] = None
+        self._primary_track_id: Optional[int] = None
 
     def _measurement_covariance(self, range_m: float, confidence: float) -> np.ndarray:
         extra_scale = 1.0 + (self.range_measurement_scale * max(float(range_m) - 0.5, 0.0))
@@ -345,6 +377,98 @@ class MultiTargetTracker:
             order_by_dim=False,
         )
         return kf
+
+    def _track_by_id(self, track_id: Optional[int]) -> Optional[_Track]:
+        if track_id is None:
+            return None
+        return next((track for track in self._tracks if track.track_id == track_id), None)
+
+    @staticmethod
+    def _track_state_rank(track: _Track) -> int:
+        if track.state == TrackState.CONFIRMED:
+            return 2
+        if track.state == TrackState.LOST:
+            return 1
+        return 0
+
+    def _update_primary_track_id(self) -> None:
+        current_primary = self._track_by_id(self._primary_track_id)
+        if (
+            current_primary is not None
+            and current_primary.state != TrackState.TENTATIVE
+            and current_primary.misses <= self.primary_track_hold_frames
+        ):
+            return
+
+        candidates = [
+            track
+            for track in self._tracks
+            if track.state != TrackState.TENTATIVE or track.hits >= self.min_confirmed_hits
+        ]
+        if not candidates:
+            self._primary_track_id = None
+            return
+
+        best_track = max(
+            candidates,
+            key=lambda track: (
+                self._track_state_rank(track),
+                -track.misses,
+                track.hits,
+                track.consecutive_hits,
+                track.confidence,
+                track.score,
+                track.age,
+            ),
+        )
+        self._primary_track_id = best_track.track_id
+
+    def _birth_suppression_radius_for_track(self, track: _Track) -> float:
+        radius = self.birth_suppression_radius_m
+        if track.track_id == self._primary_track_id:
+            radius *= self.primary_track_birth_scale
+        return radius
+
+    def _should_suppress_birth(self, measurement: dict) -> bool:
+        if self.birth_suppression_radius_m <= 0:
+            return False
+
+        for track in self._tracks:
+            if track.misses > self.birth_suppression_miss_tolerance:
+                continue
+            if track.state == TrackState.TENTATIVE and track.consecutive_hits < self.min_confirmed_hits:
+                continue
+
+            radius = self._birth_suppression_radius_for_track(track)
+            if radius <= 0:
+                continue
+
+            dx = float(track.kf.x[0][0]) - float(measurement["x_m"])
+            dy = float(track.kf.x[1][0]) - float(measurement["y_m"])
+            if hypot(dx, dy) <= radius:
+                return True
+
+        return False
+
+    def _lateral_deadband_for_range(self, range_m: float) -> float:
+        extra = max(float(range_m) - 0.5, 0.0) * self.lateral_deadband_range_scale
+        return min(self.lateral_deadband_m + extra, 0.25)
+
+    def _stabilize_lateral_state(
+        self,
+        predicted_x: float,
+        updated_x: float,
+        updated_vx: float,
+        range_m: float,
+    ) -> tuple[float, float]:
+        delta_x = float(updated_x) - float(predicted_x)
+        deadband = self._lateral_deadband_for_range(range_m)
+        if abs(delta_x) <= deadband:
+            stabilized_x = float(predicted_x) + (delta_x * 0.15)
+        else:
+            stabilized_x = float(predicted_x) + (delta_x * self.lateral_smoothing_alpha)
+        stabilized_vx = float(updated_vx) * self.lateral_velocity_damping
+        return stabilized_x, stabilized_vx
 
     @staticmethod
     def _measurement_from_detection(detection) -> dict:
@@ -546,8 +670,7 @@ class MultiTargetTracker:
             birth_measurements,
         )
 
-    @staticmethod
-    def _track_to_estimate(track: _Track) -> TrackEstimate:
+    def _track_to_estimate(self, track: _Track) -> TrackEstimate:
         x_m = float(track.kf.x[0][0])
         y_m = float(track.kf.x[1][0])
         vx_m_s = float(track.kf.x[2][0])
@@ -570,6 +693,7 @@ class MultiTargetTracker:
             age=track.age,
             hits=track.hits,
             misses=track.misses,
+            is_primary=bool(track.track_id == self._primary_track_id),
         )
 
     def update(
@@ -595,11 +719,20 @@ class MultiTargetTracker:
             z = np.array([[measurement["x_m"]], [measurement["y_m"]]], dtype=float)
 
             previous_state = track.state
+            predicted_x = float(track.kf.x[0][0])
             track.kf.R = self._measurement_covariance(
                 measurement["range_m"],
                 measurement["confidence"],
             )
             track.kf.update(z)
+            stabilized_x, stabilized_vx = self._stabilize_lateral_state(
+                predicted_x=predicted_x,
+                updated_x=float(track.kf.x[0][0]),
+                updated_vx=float(track.kf.x[2][0]),
+                range_m=measurement["range_m"],
+            )
+            track.kf.x[0][0] = stabilized_x
+            track.kf.x[2][0] = stabilized_vx
             track.hits += 1
             track.consecutive_hits += 1
             track.misses = 0
@@ -622,9 +755,13 @@ class MultiTargetTracker:
             if track.state == TrackState.CONFIRMED:
                 track.state = TrackState.LOST
 
+        self._update_primary_track_id()
+
         if allow_track_birth:
             for measurement_index in unmatched_measurements:
                 measurement = measurements[measurement_index]
+                if self._should_suppress_birth(measurement):
+                    continue
                 kf = self._build_kf(measurement)
                 self._tracks.append(
                     _Track(
@@ -650,6 +787,8 @@ class MultiTargetTracker:
             if not (track.state == TrackState.TENTATIVE and track.misses > 1)
             and track.misses <= self.max_missed_frames
         ]
+
+        self._update_primary_track_id()
 
         confirmed_tracks = []
         tentative_tracks = []

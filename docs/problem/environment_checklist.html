@@ -222,6 +222,8 @@
         Windows 전원 모드, NIC 상태, IP 설정, 방화벽, 드라이버, 백그라운드 앱,
         Python 프로세스 우선순위 같은 환경 요소가 지연과 invalid frame에 직접 영향을 준다.
         이 문서는 대학생 2학년도 그대로 따라 할 수 있게 "무엇을", "어떻게", "어떤 기준으로" 확인해야 하는지 정리한 문서다.
+        최근에는 invalid 0%에 가까운 clean session도 확보했기 때문에, 환경 체크의 목적도
+        "UDP가 깨지는지"뿐 아니라 "이제 continuity 문제를 볼 수 있을 정도로 입력이 깨끗한지"까지 포함한다.
       </p>
       <div class="nav">
         <a href="./index.html">문제 명세서</a>
@@ -259,6 +261,29 @@
         <span class="tag danger">코드가 같아도 결과는 달라질 수 있음</span>
         <span class="tag warn">실험 전 환경 고정이 먼저</span>
         <span class="tag brand">다음 세션부터는 system_snapshot.json으로 기록</span>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>지금 문서를 어떻게 써야 하는가</h2>
+      <p class="intro">
+        이전에는 이 체크리스트의 1차 목표가 <code>invalid frame</code>을 줄이는 것이었다.
+        지금은 그 목표도 여전히 중요하지만, 최신 clean session처럼 invalid가 거의 없는 상태가 나오면
+        그다음부터는 detection과 tracking continuity 실험으로 우선순위를 옮겨야 한다.
+      </p>
+      <div class="grid3">
+        <article class="card">
+          <strong>입력 불안정 단계</strong>
+          <p><code>render invalid_rate</code>와 <code>processed invalid_rate</code>가 높으면 먼저 NIC, IP, packet delay, buffer size를 본다.</p>
+        </article>
+        <article class="card">
+          <strong>입력 안정 단계</strong>
+          <p>invalid가 0%에 가까우면 환경 문제보다 <code>candidate mean</code>, <code>confirmed track mean</code>, <code>lead switch</code>를 본다.</p>
+        </article>
+        <article class="card">
+          <strong>현재 프로젝트 기준</strong>
+          <p>최근 detection은 <code>body_center_patch_bands</code>로 local patch centroid를 쓰기 시작했으므로, 환경 체크 후에는 continuity 실험으로 넘어가는 것이 맞다.</p>
+        </article>
       </div>
     </section>
 

@@ -7,6 +7,11 @@ from pathlib import Path
 
 METRICS = [
     ("assessment.overall.score", "Operational score", "higher"),
+    ("performance.throughput.render_vs_expected_ratio", "Render FPS vs target", "higher"),
+    ("performance.compute.compute_utilization_p95_ratio", "Compute utilization p95", "lower"),
+    ("performance.jitter.render_latency_jitter_ms", "Render jitter", "lower"),
+    ("performance.continuity.candidate_to_confirmed_ratio", "Candidate/confirmed ratio", "lower"),
+    ("performance.continuity.lead_confirmed.switch_count", "Lead confirmed switch", "lower"),
     ("processed.invalid_rate", "Processed invalid rate", "lower"),
     ("render.invalid_rate", "Render invalid rate", "lower"),
     ("processed.capture_to_process_ms.mean", "Processed latency mean", "lower"),

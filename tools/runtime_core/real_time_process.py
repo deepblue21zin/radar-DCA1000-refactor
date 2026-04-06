@@ -69,6 +69,7 @@ def _serialize_detection(detection):
 def _serialize_track(track):
     return {
         "track_id": int(track.track_id),
+        "is_primary": bool(track.is_primary),
         "doppler_bin": int(track.doppler_bin),
         "range_m": round(float(track.range_m), 4),
         "angle_deg": round(float(track.angle_deg), 3),

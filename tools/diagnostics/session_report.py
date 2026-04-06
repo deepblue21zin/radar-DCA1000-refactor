@@ -131,7 +131,10 @@ def _summarize_stage_timings(records, digits=3):
     }
     slowest_stage = None
     slowest_score = None
+    excluded_slowest_names = {"compute_total_ms", "pipeline_total_ms"}
     for stage_name, stats in timing_summary.items():
+        if stage_name in excluded_slowest_names:
+            continue
         candidate_score = stats.get("p95")
         if candidate_score is None:
             candidate_score = stats.get("mean")
@@ -169,6 +172,266 @@ def _preferred_stage_timing_summary(processed_summary, render_summary):
     selected = dict(processed_summary or {})
     selected["source"] = "processed"
     return selected
+
+
+def _resolve_cfg_path(session_dir: Path, session_meta: dict, runtime_config: dict):
+    project_root = session_meta.get("project_root")
+    inferred_project_root = None
+    try:
+        inferred_project_root = session_dir.parents[2]
+    except IndexError:
+        inferred_project_root = None
+
+    candidates = []
+    for raw_value in (
+        runtime_config.get("cfg"),
+        (runtime_config.get("runtime_snapshot") or {}).get("config_path"),
+    ):
+        if not raw_value:
+            continue
+        raw_path = Path(str(raw_value))
+        if raw_path.is_absolute():
+            candidates.append(raw_path)
+            continue
+        if project_root:
+            candidates.append(Path(project_root) / raw_path)
+        if inferred_project_root is not None:
+            candidates.append(inferred_project_root / raw_path)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _read_frame_period_ms(config_path: Path | None):
+    if config_path is None or not config_path.exists():
+        return None
+    with config_path.open(encoding="utf-8") as cfg_file:
+        for raw_line in cfg_file:
+            line = raw_line.strip()
+            if not line or line.startswith("%"):
+                continue
+            parts = line.split()
+            if parts and parts[0] == "frameCfg" and len(parts) >= 6:
+                try:
+                    return float(parts[5])
+                except ValueError:
+                    return None
+    return None
+
+
+def _lead_track_id(track_items):
+    if not isinstance(track_items, list) or not track_items:
+        return None
+
+    def sort_key(item: dict):
+        return (
+            1 if item.get("is_primary") else 0,
+            float(item.get("confidence") or 0.0),
+            float(item.get("score") or 0.0),
+            int(item.get("hits") or 0),
+            int(item.get("age") or 0),
+            -int(item.get("misses") or 0),
+            float(item.get("rdi_peak") or 0.0),
+        )
+
+    best_item = max(track_items, key=sort_key)
+    track_id = best_item.get("track_id")
+    if track_id is None:
+        return None
+    try:
+        return int(track_id)
+    except (TypeError, ValueError):
+        return None
+
+
+def _lead_track_metrics(records: list[dict], list_key: str):
+    previous_lead_id = None
+    switches = 0
+    unique_ids = set()
+    lead_frame_count = 0
+
+    for record in records:
+        current_lead_id = _lead_track_id(record.get(list_key))
+        if current_lead_id is None:
+            continue
+        lead_frame_count += 1
+        unique_ids.add(current_lead_id)
+        if previous_lead_id is not None and current_lead_id != previous_lead_id:
+            switches += 1
+        previous_lead_id = current_lead_id
+
+    coverage_rate = _safe_rate(lead_frame_count, len(records))
+    switch_rate = _safe_rate(switches, max(lead_frame_count - 1, 1)) if lead_frame_count > 1 else 0.0
+    return {
+        "frame_count_with_lead": lead_frame_count,
+        "coverage_rate": _round_or_none(coverage_rate),
+        "switch_count": switches,
+        "switch_rate": _round_or_none(switch_rate),
+        "unique_track_id_count": len(unique_ids),
+    }
+
+
+def _unique_track_id_count(records: list[dict], list_key: str):
+    unique_ids = set()
+    for record in records:
+        items = record.get(list_key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            track_id = item.get("track_id")
+            if track_id is None:
+                continue
+            try:
+                unique_ids.add(int(track_id))
+            except (TypeError, ValueError):
+                continue
+    return len(unique_ids)
+
+
+def _p95_minus_p50(stats: dict):
+    p95 = None if not isinstance(stats, dict) else stats.get("p95")
+    p50 = None if not isinstance(stats, dict) else stats.get("p50")
+    if p95 is None or p50 is None:
+        return None
+    return max(float(p95) - float(p50), 0.0)
+
+
+def _build_performance_summary(
+    session_dir: Path,
+    session_meta: dict,
+    runtime_config: dict,
+    event_summary: dict,
+    processed_records: list[dict],
+    render_records: list[dict],
+    processed_summary: dict,
+    render_summary: dict,
+    preferred_stage_timings: dict,
+):
+    cfg_path = _resolve_cfg_path(session_dir, session_meta, runtime_config)
+    frame_period_ms = _read_frame_period_ms(cfg_path)
+    expected_fps = (1000.0 / frame_period_ms) if frame_period_ms and frame_period_ms > 0 else None
+    session_duration_s = event_summary.get("session_duration_s")
+
+    processed_fps = _safe_rate(processed_summary.get("frame_count"), session_duration_s)
+    render_fps = _safe_rate(render_summary.get("frame_count"), session_duration_s)
+    render_to_processed_ratio = _safe_rate(render_fps, processed_fps)
+    processed_vs_expected_ratio = _safe_rate(processed_fps, expected_fps)
+    render_vs_expected_ratio = _safe_rate(render_fps, expected_fps)
+
+    preferred_timing_map = (preferred_stage_timings or {}).get("timings") or {}
+    compute_stats = preferred_timing_map.get("compute_total_ms") or {}
+    pipeline_stats = preferred_timing_map.get("pipeline_total_ms") or {}
+    log_write_stats = preferred_timing_map.get("log_write_ms") or {}
+    slowest_stage = (preferred_stage_timings or {}).get("slowest_stage") or {}
+
+    compute_mean = compute_stats.get("mean")
+    compute_p50 = compute_stats.get("p50")
+    compute_p95 = compute_stats.get("p95")
+    pipeline_mean = pipeline_stats.get("mean")
+    pipeline_p95 = pipeline_stats.get("p95")
+    slowest_stage_p95 = slowest_stage.get("p95_ms")
+
+    compute_utilization_mean = _safe_rate(compute_mean, frame_period_ms)
+    compute_utilization_p95 = _safe_rate(compute_p95, frame_period_ms)
+    pipeline_utilization_mean = _safe_rate(pipeline_mean, frame_period_ms)
+    pipeline_utilization_p95 = _safe_rate(pipeline_p95, frame_period_ms)
+    slowest_stage_share = _safe_rate(slowest_stage_p95, compute_p95)
+
+    non_compute_mean = None
+    non_compute_p95 = None
+    processed_latency_stats = processed_summary.get("capture_to_process_ms") or {}
+    if processed_latency_stats.get("mean") is not None and compute_mean is not None:
+        non_compute_mean = max(float(processed_latency_stats["mean"]) - float(compute_mean), 0.0)
+    if processed_latency_stats.get("p95") is not None and compute_p95 is not None:
+        non_compute_p95 = max(float(processed_latency_stats["p95"]) - float(compute_p95), 0.0)
+
+    render_latency_stats = render_summary.get("capture_to_render_ms") or {}
+    process_to_render_stats = render_summary.get("process_to_render_ms") or {}
+
+    confirmed_lead_metrics = _lead_track_metrics(processed_records, "confirmed_tracks")
+    display_lead_metrics = _lead_track_metrics(render_records, "display_tracks")
+
+    candidate_mean = (processed_summary.get("candidate_count") or {}).get("mean")
+    confirmed_mean = (processed_summary.get("confirmed_track_count") or {}).get("mean")
+    display_mean = (render_summary.get("display_track_count") or {}).get("mean")
+
+    candidate_to_confirmed_ratio = _safe_rate(candidate_mean, confirmed_mean)
+    display_to_confirmed_ratio = _safe_rate(display_mean, confirmed_mean)
+
+    performance = {
+        "frame_budget": {
+            "cfg_path": None if cfg_path is None else str(cfg_path),
+            "configured_frame_period_ms": _round_or_none(frame_period_ms, digits=3),
+            "expected_fps": _round_or_none(expected_fps, digits=3),
+        },
+        "throughput": {
+            "session_duration_s": _round_or_none(session_duration_s, digits=3),
+            "processed_fps": _round_or_none(processed_fps, digits=3),
+            "render_fps": _round_or_none(render_fps, digits=3),
+            "render_to_processed_ratio": _round_or_none(render_to_processed_ratio, digits=3),
+            "processed_vs_expected_ratio": _round_or_none(processed_vs_expected_ratio, digits=3),
+            "render_vs_expected_ratio": _round_or_none(render_vs_expected_ratio, digits=3),
+        },
+        "compute": {
+            "source": preferred_stage_timings.get("source"),
+            "frames_with_timings": preferred_stage_timings.get("frame_count_with_timings", 0),
+            "compute_total_ms": compute_stats,
+            "pipeline_total_ms": pipeline_stats,
+            "log_write_ms": log_write_stats,
+            "compute_utilization_mean_ratio": _round_or_none(compute_utilization_mean, digits=3),
+            "compute_utilization_p95_ratio": _round_or_none(compute_utilization_p95, digits=3),
+            "pipeline_utilization_mean_ratio": _round_or_none(pipeline_utilization_mean, digits=3),
+            "pipeline_utilization_p95_ratio": _round_or_none(pipeline_utilization_p95, digits=3),
+            "non_compute_capture_to_process_mean_ms": _round_or_none(non_compute_mean, digits=3),
+            "non_compute_capture_to_process_p95_ms": _round_or_none(non_compute_p95, digits=3),
+            "render_overhead_mean_ms": process_to_render_stats.get("mean"),
+            "render_overhead_p95_ms": process_to_render_stats.get("p95"),
+            "slowest_stage_name": slowest_stage.get("name"),
+            "slowest_stage_p95_ms": slowest_stage_p95,
+            "slowest_stage_share_of_compute_p95_ratio": _round_or_none(slowest_stage_share, digits=3),
+        },
+        "jitter": {
+            "processed_latency_p50_ms": processed_latency_stats.get("p50"),
+            "processed_latency_p95_ms": processed_latency_stats.get("p95"),
+            "processed_latency_jitter_ms": _round_or_none(_p95_minus_p50(processed_latency_stats), digits=3),
+            "render_latency_p50_ms": render_latency_stats.get("p50"),
+            "render_latency_p95_ms": render_latency_stats.get("p95"),
+            "render_latency_jitter_ms": _round_or_none(_p95_minus_p50(render_latency_stats), digits=3),
+            "compute_total_p50_ms": compute_p50,
+            "compute_total_p95_ms": compute_p95,
+            "compute_total_jitter_ms": _round_or_none(_p95_minus_p50(compute_stats), digits=3),
+        },
+        "continuity": {
+            "candidate_to_confirmed_ratio": _round_or_none(candidate_to_confirmed_ratio, digits=3),
+            "display_to_confirmed_ratio": _round_or_none(display_to_confirmed_ratio, digits=3),
+            "lead_confirmed": confirmed_lead_metrics,
+            "lead_display": display_lead_metrics,
+            "unique_confirmed_track_ids": _unique_track_id_count(processed_records, "confirmed_tracks"),
+            "unique_display_track_ids": _unique_track_id_count(render_records, "display_tracks"),
+        },
+        "highlights": [],
+    }
+
+    highlights = performance["highlights"]
+    if compute_utilization_p95 is not None:
+        if compute_utilization_p95 <= 0.60:
+            highlights.append("순수 compute p95는 프레임 예산의 60% 이하로, 계산 자체는 아직 여유가 있습니다.")
+        elif compute_utilization_p95 >= 0.95:
+            highlights.append("compute p95가 프레임 예산에 거의 닿아 계산 병목 위험이 큽니다.")
+    if render_vs_expected_ratio is not None and render_vs_expected_ratio < 0.80:
+        highlights.append("렌더 FPS가 설정 frame rate를 충분히 따라가지 못해 화면 갱신 효율이 낮습니다.")
+    if candidate_to_confirmed_ratio is not None and candidate_to_confirmed_ratio >= 1.5:
+        highlights.append("candidate 대비 confirmed 비율이 낮아, detection 분해 또는 track 정리 품질을 우선 의심해야 합니다.")
+    if confirmed_lead_metrics.get("switch_count", 0) >= 10:
+        highlights.append("lead confirmed ID switch가 많아 continuity 품질이 아직 약합니다.")
+    if _p95_minus_p50(render_latency_stats) not in (None, 0) and _p95_minus_p50(render_latency_stats) >= 30:
+        highlights.append("render latency 변동폭이 커서 체감 품질이 세션 중 흔들릴 수 있습니다.")
+    if not highlights:
+        highlights.append("핵심 KPI는 대체로 안정적이며, 다음 비교 세션과의 추세 확인이 중요합니다.")
+
+    return performance
 
 
 def _build_system_summary(session_dir: Path, runtime_config: dict, system_snapshot: dict):
@@ -306,7 +569,7 @@ def build_summary(session_dir: Path):
     )
 
     summary = {
-        "schema_version": 3,
+        "schema_version": 4,
         "summary_generated_at": datetime.now().isoformat(timespec="seconds"),
         "session_dir": str(session_dir),
         "session_id": session_meta.get("session_id", session_dir.name),
@@ -404,6 +667,17 @@ def build_summary(session_dir: Path):
         },
     }
     summary["event"] = build_event_summary(events)
+    summary["performance"] = _build_performance_summary(
+        session_dir,
+        session_meta,
+        runtime_config,
+        summary["event"],
+        processed_records,
+        render_records,
+        summary["processed"],
+        summary["render"],
+        preferred_stage_timings,
+    )
     summary["assessment"] = build_operational_assessment(summary, summary["event"])
     return summary
 
