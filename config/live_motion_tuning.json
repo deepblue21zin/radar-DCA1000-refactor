@@ -1,7 +1,8 @@
 {
   "processing": {
     "remove_static": true,
-    "doppler_guard_bins": 2
+    "doppler_guard_bins": 2,
+    "invert_lateral_axis": true
   },
   "roi": {
     "lateral_m": 1.5,
@@ -10,7 +11,7 @@
   },
   "detection": {
     "allow_strongest_fallback": false,
-    "max_targets": 1,
+    "max_targets": 2,
     "display_min_confidence": 0.26,
     "cluster_min_samples": 2,
     "cluster_velocity_weight": 0.0,
@@ -61,6 +62,29 @@
           "angle_radius_bins": 4,
           "relative_floor": 0.5
         }
+      ],
+      "candidate_merge_bands": [
+        {
+          "r_min": 0.0,
+          "r_max": 1.5,
+          "merge_radius_m": 0.32,
+          "range_bin_radius": 1,
+          "doppler_bin_radius": 2
+        },
+        {
+          "r_min": 1.5,
+          "r_max": 3.0,
+          "merge_radius_m": 0.48,
+          "range_bin_radius": 2,
+          "doppler_bin_radius": 3
+        },
+        {
+          "r_min": 3.0,
+          "r_max": null,
+          "merge_radius_m": 0.62,
+          "range_bin_radius": 3,
+          "doppler_bin_radius": 4
+        }
       ]
     },
     "dbscan_adaptive_eps_bands": [
@@ -105,7 +129,34 @@
     "lateral_deadband_m": 0.05,
     "lateral_deadband_range_scale": 0.03,
     "lateral_smoothing_alpha": 0.45,
-    "lateral_velocity_damping": 0.55
+    "lateral_velocity_damping": 0.55,
+    "local_remeasurement_enabled": true,
+    "local_remeasurement_blend": 0.35,
+    "local_remeasurement_max_shift_m": 0.28,
+    "local_remeasurement_track_bias": 0.15,
+    "local_remeasurement_patch_bands": [
+      {
+        "r_min": 0.0,
+        "r_max": 1.5,
+        "range_radius_bins": 1,
+        "angle_radius_bins": 2,
+        "relative_floor": 0.55
+      },
+      {
+        "r_min": 1.5,
+        "r_max": 3.0,
+        "range_radius_bins": 2,
+        "angle_radius_bins": 3,
+        "relative_floor": 0.5
+      },
+      {
+        "r_min": 3.0,
+        "r_max": null,
+        "range_radius_bins": 3,
+        "angle_radius_bins": 4,
+        "relative_floor": 0.48
+      }
+    ]
   },
   "pipeline": {
     "queue_size": 4,
@@ -122,6 +173,9 @@
   "visualization": {
     "show_tentative_tracks": true,
     "tentative_min_confidence": 0.3,
-    "tentative_min_hits": 2
+    "tentative_min_hits": 2,
+    "display_hysteresis_frames": 5,
+    "display_hysteresis_confidence_floor": 0.12,
+    "display_primary_bonus_frames": 3
   }
 }

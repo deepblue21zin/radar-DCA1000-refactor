@@ -239,6 +239,7 @@
         같은 코드인데도 어떤 날은 빠르고 어떤 날은 느리다면, 보통은 알고리즘보다 실행 환경이 달라진 경우가 많다.
         특히 지금 시스템은 <code>100ms</code> 프레임 기반이라 여유가 넉넉하지 않다.
         그래서 작은 환경 변화도 <code>processed p95</code>나 <code>render p95</code>를 밀어버릴 수 있다.
+        지연이 비슷해도 궤적이 이상하면 세션별 <code>trajectory_replay.html</code>로 시간축 재생까지 같이 봐야 한다.
       </p>
       <div class="grid3">
         <article class="metric">
@@ -282,7 +283,7 @@
         </article>
         <article class="card">
           <strong>현재 프로젝트 기준</strong>
-          <p>최근 detection은 <code>body_center_patch_bands</code>로 local patch centroid를 쓰기 시작했으므로, 환경 체크 후에는 continuity 실험으로 넘어가는 것이 맞다.</p>
+          <p>최근 detection은 <code>body_center_patch_bands</code>로 local patch centroid를 쓰기 시작했고, <code>candidate_merge_bands</code>로 가까운 후보 pre-merge도 들어갔다. 여기에 tracker의 <code>local_remeasurement_*</code>와 render의 <code>display_hysteresis_*</code>도 추가됐으므로, 환경 체크 후에는 같은 raw replay로 실제 continuity가 좋아졌는지 검증하는 것이 맞다.</p>
         </article>
       </div>
     </section>
@@ -509,7 +510,37 @@ powershell -NoProfile -Command "Get-NetIPConfiguration | Select InterfaceAlias, 
         <li>현재 PC의 IPv4 목록과 설정된 host IP 일치 여부</li>
         <li>활성 NIC 목록, 링크 속도, 방화벽 프로필</li>
         <li>NumPy 버전과 스레드 관련 환경 변수</li>
+        <li><code>logs/raw/&lt;session_id&gt;</code> 아래 raw frame capture와 replay용 manifest/index</li>
       </ul>
+    </section>
+
+    <section class="section">
+      <h2>Raw Replay 체크 포인트</h2>
+      <p class="intro">
+        이제는 live 결과만 보는 것이 아니라 같은 raw 입력을 다시 태워 검증할 수 있다.
+        환경 체크가 끝난 뒤에는 아래 두 항목도 같이 확인하는 편이 좋다.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>항목</th>
+            <th>좋은 상태</th>
+            <th>확인 방법</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Raw Capture 저장</td>
+            <td><code>logs/raw/&lt;session_id&gt;</code>에 <code>raw_frames.i16</code>, <code>raw_frames_index.jsonl</code>, <code>capture_manifest.json</code>이 생성됨</td>
+            <td>세션 종료 후 폴더 확인</td>
+          </tr>
+          <tr>
+            <td>Replay 실행</td>
+            <td><code>python real-time/live_motion_replay.py --capture logs/raw/&lt;session_id&gt;</code>가 같은 UI를 열고, heatmap 대신 <code>x/y trajectory preview</code>를 보여 주며, replay 종료 후 <code>trajectory_replay.html</code>까지 자동으로 열림</td>
+            <td>capture 경로와 source_capture 설정 확인</td>
+          </tr>
+        </tbody>
+      </table>
     </section>
   </main>
 </body>

@@ -9,6 +9,8 @@
     "input_mode": "live",
     "source_capture": "",
     "notes": "",
+    "write_raw_capture": true,
+    "raw_capture_root": "logs/raw",
     "write_processed_frames": true,
     "write_render_frames": true,
     "write_status_log": true,

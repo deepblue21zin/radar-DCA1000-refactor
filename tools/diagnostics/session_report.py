@@ -66,10 +66,17 @@ def _round_or_none(value, digits=4):
     return round(float(value), digits)
 
 
-def _safe_rate(numerator: int, denominator: int):
-    if denominator <= 0:
+def _safe_rate(numerator, denominator):
+    if numerator is None or denominator is None:
         return None
-    return numerator / denominator
+    try:
+        denominator_value = float(denominator)
+        numerator_value = float(numerator)
+    except (TypeError, ValueError):
+        return None
+    if denominator_value <= 0:
+        return None
+    return numerator_value / denominator_value
 
 
 def _summarize_numeric(values, digits=4):
@@ -273,6 +280,188 @@ def _lead_track_metrics(records: list[dict], list_key: str):
     }
 
 
+def _trajectory_point(item: dict, frame_id: int):
+    if not isinstance(item, dict):
+        return None
+    x_m = item.get("x_m")
+    y_m = item.get("y_m")
+    if x_m is None or y_m is None:
+        return None
+    try:
+        return {
+            "frame_id": int(frame_id),
+            "x_m": float(x_m),
+            "y_m": float(y_m),
+            "track_id": item.get("track_id"),
+            "is_primary": bool(item.get("is_primary")),
+            "confidence": float(item.get("confidence") or 0.0),
+            "score": float(item.get("score") or 0.0),
+            "hits": int(item.get("hits") or 0),
+            "age": int(item.get("age") or 0),
+            "misses": int(item.get("misses") or 0),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+def _track_item_rank(item: dict):
+    return (
+        1 if item.get("is_primary") else 0,
+        float(item.get("confidence") or 0.0),
+        float(item.get("score") or 0.0),
+        int(item.get("hits") or 0),
+        int(item.get("age") or 0),
+        -int(item.get("misses") or 0),
+    )
+
+
+def _select_lead_point_from_record(record: dict, priority_keys: list[str]):
+    frame_id = int(record.get("frame_id", record.get("frame_index", 0)) or 0)
+    for key in priority_keys:
+        items = record.get(key) or []
+        if not items:
+            continue
+        lead = max(items, key=_track_item_rank)
+        point = _trajectory_point(lead, frame_id)
+        if point is not None:
+            point["source_key"] = key
+            return point
+    return None
+
+
+def _collect_lead_points(records: list[dict], priority_keys: list[str]):
+    points = []
+    source_hits = {key: 0 for key in priority_keys}
+    for record in records:
+        point = _select_lead_point_from_record(record, priority_keys)
+        if point is None:
+            continue
+        source_key = point.get("source_key")
+        if source_key in source_hits:
+            source_hits[source_key] += 1
+        points.append(point)
+    points.sort(key=lambda item: item["frame_id"])
+    source_key = None
+    if source_hits and max(source_hits.values()) > 0:
+        source_key = max(source_hits.items(), key=lambda item: item[1])[0]
+    return points, source_key
+
+
+def _distance_xy(left: dict, right: dict):
+    return math.hypot(float(right["x_m"]) - float(left["x_m"]), float(right["y_m"]) - float(left["y_m"]))
+
+
+def _point_to_segment_distance(point_xy, start_xy, end_xy):
+    px, py = point_xy
+    x1, y1 = start_xy
+    x2, y2 = end_xy
+    dx = x2 - x1
+    dy = y2 - y1
+    if dx == 0 and dy == 0:
+        return math.hypot(px - x1, py - y1)
+    t = ((px - x1) * dx + (py - y1) * dy) / ((dx * dx) + (dy * dy))
+    t = min(1.0, max(0.0, t))
+    proj_x = x1 + (t * dx)
+    proj_y = y1 + (t * dy)
+    return math.hypot(px - proj_x, py - proj_y)
+
+
+def _build_path_geometry(points: list[dict], *, total_record_count: int, gap_break_frames: int = 2):
+    if not points:
+        return {
+            "point_count": 0,
+            "coverage_ratio": None,
+            "frame_span": None,
+            "segment_count": 0,
+            "gap_count": 0,
+            "max_gap_frames": 0,
+            "path_length_m": None,
+            "net_displacement_m": None,
+            "path_efficiency_ratio": None,
+            "x_span_m": None,
+            "y_span_m": None,
+            "step_length_p50_m": None,
+            "step_length_p95_m": None,
+            "normalized_step_p95_m": None,
+            "jump_ratio": None,
+            "local_residual_rms_m": None,
+        }
+
+    frame_ids = [int(point["frame_id"]) for point in points]
+    coverage_ratio = _safe_rate(len(points), total_record_count)
+    gap_count = 0
+    max_gap_frames = 0
+    segment_count = 1 if points else 0
+    path_length_m = 0.0
+    step_lengths = []
+    normalized_steps = []
+
+    for previous, current in zip(points, points[1:]):
+        gap = int(current["frame_id"]) - int(previous["frame_id"])
+        if gap > 1:
+            gap_count += 1
+            max_gap_frames = max(max_gap_frames, gap - 1)
+            segment_count += 1
+        if gap <= gap_break_frames:
+            distance = _distance_xy(previous, current)
+            path_length_m += distance
+            step_lengths.append(distance)
+            normalized_steps.append(distance / max(gap, 1))
+
+    median_step = _quantile(normalized_steps, 0.50)
+    jump_threshold = None
+    if median_step is not None:
+        jump_threshold = max(0.25, float(median_step) * 2.5)
+    jump_ratio = None
+    if normalized_steps:
+        jump_events = sum(1 for step in normalized_steps if jump_threshold is not None and step > jump_threshold)
+        jump_ratio = _safe_rate(jump_events, len(normalized_steps))
+
+    local_residuals = []
+    for previous, current, following in zip(points, points[1:], points[2:]):
+        gap_left = int(current["frame_id"]) - int(previous["frame_id"])
+        gap_right = int(following["frame_id"]) - int(current["frame_id"])
+        if gap_left > gap_break_frames or gap_right > gap_break_frames:
+            continue
+        residual = _point_to_segment_distance(
+            (float(current["x_m"]), float(current["y_m"])),
+            (float(previous["x_m"]), float(previous["y_m"])),
+            (float(following["x_m"]), float(following["y_m"])),
+        )
+        local_residuals.append(residual)
+
+    local_residual_rms = None
+    if local_residuals:
+        local_residual_rms = math.sqrt(sum(value * value for value in local_residuals) / len(local_residuals))
+
+    first_point = points[0]
+    last_point = points[-1]
+    net_displacement_m = _distance_xy(first_point, last_point) if len(points) >= 2 else 0.0
+    path_efficiency_ratio = _safe_rate(net_displacement_m, path_length_m)
+
+    xs = [float(point["x_m"]) for point in points]
+    ys = [float(point["y_m"]) for point in points]
+
+    return {
+        "point_count": len(points),
+        "coverage_ratio": _round_or_none(coverage_ratio),
+        "frame_span": int(frame_ids[-1] - frame_ids[0] + 1) if len(frame_ids) >= 2 else 1,
+        "segment_count": int(segment_count),
+        "gap_count": int(gap_count),
+        "max_gap_frames": int(max_gap_frames),
+        "path_length_m": _round_or_none(path_length_m, digits=4),
+        "net_displacement_m": _round_or_none(net_displacement_m, digits=4),
+        "path_efficiency_ratio": _round_or_none(path_efficiency_ratio),
+        "x_span_m": _round_or_none(max(xs) - min(xs), digits=4),
+        "y_span_m": _round_or_none(max(ys) - min(ys), digits=4),
+        "step_length_p50_m": _round_or_none(_quantile(step_lengths, 0.50), digits=4),
+        "step_length_p95_m": _round_or_none(_quantile(step_lengths, 0.95), digits=4),
+        "normalized_step_p95_m": _round_or_none(_quantile(normalized_steps, 0.95), digits=4),
+        "jump_ratio": _round_or_none(jump_ratio),
+        "local_residual_rms_m": _round_or_none(local_residual_rms, digits=4),
+    }
+
+
 def _unique_track_id_count(records: list[dict], list_key: str):
     unique_ids = set()
     for record in records:
@@ -296,6 +485,449 @@ def _p95_minus_p50(stats: dict):
     if p95 is None or p50 is None:
         return None
     return max(float(p95) - float(p50), 0.0)
+
+
+def _score_from_anchors(value, anchors):
+    if value is None:
+        return None
+    numeric_value = float(value)
+    ordered = sorted((float(threshold), float(score)) for threshold, score in anchors)
+    if numeric_value <= ordered[0][0]:
+        return ordered[0][1]
+    if numeric_value >= ordered[-1][0]:
+        return ordered[-1][1]
+    for (left_x, left_score), (right_x, right_score) in zip(ordered, ordered[1:]):
+        if left_x <= numeric_value <= right_x:
+            if right_x == left_x:
+                return right_score
+            ratio = (numeric_value - left_x) / (right_x - left_x)
+            return left_score + ((right_score - left_score) * ratio)
+    return ordered[-1][1]
+
+
+def _score_tone(score_10):
+    if score_10 is None:
+        return "brand"
+    if score_10 >= 8.5:
+        return "good"
+    if score_10 >= 7.0:
+        return "brand"
+    if score_10 >= 5.0:
+        return "warn"
+    return "danger"
+
+
+def _score_band(score_10):
+    if score_10 is None:
+        return {"grade": "n/a", "label": "평가 불가", "tone": "brand"}
+    if score_10 >= 9.0:
+        return {"grade": "A", "label": "매우 양호", "tone": "good"}
+    if score_10 >= 8.0:
+        return {"grade": "B", "label": "양호", "tone": "good"}
+    if score_10 >= 7.0:
+        return {"grade": "C", "label": "보통", "tone": "brand"}
+    if score_10 >= 6.0:
+        return {"grade": "D", "label": "주의", "tone": "warn"}
+    return {"grade": "F", "label": "미흡", "tone": "danger"}
+
+
+def _weighted_average_score(items: list[tuple[float | None, float]]):
+    weighted_total = 0.0
+    total_weight = 0.0
+    for score, weight in items:
+        if score is None or weight <= 0:
+            continue
+        weighted_total += float(score) * float(weight)
+        total_weight += float(weight)
+    if total_weight <= 0:
+        return None
+    return weighted_total / total_weight
+
+
+def _kpi_entry(
+    *,
+    label: str,
+    value,
+    value_display: str,
+    value_kind: str,
+    score_10,
+    target: str,
+    calculation: str,
+    meaning: str,
+    industry_standard: str,
+    interpretation: str,
+):
+    return {
+        "label": label,
+        "value": _round_or_none(value, digits=4) if isinstance(value, (int, float)) else value,
+        "value_display": value_display,
+        "value_kind": value_kind,
+        "score_10": _round_or_none(score_10, digits=2),
+        "score_100": _round_or_none(None if score_10 is None else score_10 * 10.0, digits=1),
+        "tone": _score_tone(score_10),
+        "target": target,
+        "calculation": calculation,
+        "meaning": meaning,
+        "industry_standard": industry_standard,
+        "interpretation": interpretation,
+    }
+
+
+def _performance_summary_text(score_10):
+    if score_10 is None:
+        return "성능 KPI를 계산할 데이터가 부족합니다."
+    if score_10 >= 9.0:
+        return "실시간 성능이 매우 안정적이며, 현업형 데모에 가까운 상태입니다."
+    if score_10 >= 8.0:
+        return "실시간 성능이 전반적으로 양호하며, 제한적 파일럿이나 데모에 적합한 수준입니다."
+    if score_10 >= 7.0:
+        return "기능 데모는 가능하지만 일부 KPI는 아직 보강이 필요합니다."
+    if score_10 >= 6.0:
+        return "동작은 하나 성능 여유와 continuity 품질이 충분하지 않습니다."
+    return "성능 KPI 기준으로는 아직 실시간 체감과 안정성이 부족합니다."
+
+
+def _build_performance_scoring(performance: dict):
+    budget = performance.get("frame_budget") or {}
+    throughput = performance.get("throughput") or {}
+    compute = performance.get("compute") or {}
+    jitter = performance.get("jitter") or {}
+    continuity = performance.get("continuity") or {}
+    geometry = performance.get("geometry") or {}
+    geometry_reference = geometry.get("reference") or {}
+
+    frame_period_ms = budget.get("configured_frame_period_ms")
+    expected_fps = budget.get("expected_fps")
+    processed_fps = throughput.get("processed_fps")
+    render_fps = throughput.get("render_fps")
+    processed_ratio = throughput.get("processed_vs_expected_ratio")
+    render_ratio = throughput.get("render_vs_expected_ratio")
+    compute_util_p95 = compute.get("compute_utilization_p95_ratio")
+    compute_total_p95_ms = (compute.get("compute_total_ms") or {}).get("p95")
+    render_latency_p95 = jitter.get("render_latency_p95_ms")
+    render_jitter = jitter.get("render_latency_jitter_ms")
+    candidate_ratio = continuity.get("candidate_to_confirmed_ratio")
+    display_ratio = continuity.get("display_to_confirmed_ratio")
+    lead_confirmed = continuity.get("lead_confirmed") or {}
+    lead_switch_count = lead_confirmed.get("switch_count")
+    lead_switch_rate = lead_confirmed.get("switch_rate")
+    geometry_source = geometry.get("reference_source")
+    path_cleanliness_score = geometry_reference.get("path_cleanliness_score_10")
+    local_residual_rms = geometry_reference.get("local_residual_rms_m")
+    max_gap_frames = geometry_reference.get("max_gap_frames")
+    jump_ratio = geometry_reference.get("jump_ratio")
+
+    processed_score = _score_from_anchors(
+        processed_ratio,
+        [(0.0, 0.0), (0.50, 3.0), (0.75, 6.0), (0.90, 8.0), (0.95, 9.0), (1.00, 10.0)],
+    )
+    render_score = _score_from_anchors(
+        render_ratio,
+        [(0.0, 0.0), (0.50, 3.0), (0.75, 6.0), (0.90, 8.0), (0.95, 9.0), (1.00, 10.0)],
+    )
+    compute_score = _score_from_anchors(
+        compute_util_p95,
+        [(0.35, 10.0), (0.50, 9.0), (0.70, 8.0), (0.85, 6.5), (1.00, 4.0), (1.20, 1.5), (1.50, 0.0)],
+    )
+    render_latency_score = _score_from_anchors(
+        render_latency_p95,
+        [(80.0, 10.0), (120.0, 9.0), (160.0, 8.0), (200.0, 6.5), (250.0, 4.5), (350.0, 2.0), (500.0, 0.0)],
+    )
+    render_jitter_score = _score_from_anchors(
+        render_jitter,
+        [(10.0, 10.0), (20.0, 9.0), (35.0, 7.5), (50.0, 6.0), (80.0, 3.0), (120.0, 0.0)],
+    )
+    candidate_score = _score_from_anchors(
+        candidate_ratio,
+        [(1.0, 10.0), (1.2, 9.0), (1.5, 7.5), (2.0, 5.5), (3.0, 2.5), (4.0, 0.0)],
+    )
+    display_score = _score_from_anchors(
+        display_ratio,
+        [(0.0, 0.0), (0.30, 3.5), (0.50, 6.0), (0.70, 8.0), (0.85, 9.0), (1.00, 10.0)],
+    )
+    lead_switch_score = _score_from_anchors(
+        lead_switch_rate,
+        [(0.0, 10.0), (0.03, 9.0), (0.07, 7.5), (0.12, 6.0), (0.20, 4.0), (0.35, 1.5), (0.50, 0.0)],
+    )
+    geometry_gap_score = _score_from_anchors(
+        max_gap_frames,
+        [(0.0, 10.0), (1.0, 9.5), (3.0, 8.0), (6.0, 6.0), (10.0, 4.0), (20.0, 1.5), (40.0, 0.0)],
+    )
+    geometry_residual_score = _score_from_anchors(
+        local_residual_rms,
+        [(0.02, 10.0), (0.04, 9.0), (0.07, 8.0), (0.12, 6.0), (0.20, 3.0), (0.35, 0.0)],
+    )
+    geometry_jump_score = _score_from_anchors(
+        jump_ratio,
+        [(0.0, 10.0), (0.03, 9.0), (0.07, 8.0), (0.15, 6.0), (0.30, 3.0), (0.50, 0.0)],
+    )
+
+    kpis = {
+        "processed_vs_target": _kpi_entry(
+            label="Processed FPS vs Target",
+            value=processed_ratio,
+            value_display=f"{_fmt_pct_ratio(processed_ratio)} ({_round_value_text(processed_fps, 'fps')} / 목표 {_round_value_text(expected_fps, 'fps')})",
+            value_kind="ratio",
+            score_10=processed_score,
+            target="설정 목표 FPS의 95% 이상 권장, 100%면 설정과 동일한 처리량",
+            calculation="processed_fps / expected_fps",
+            meaning="처리 파이프라인이 설정된 목표 프레임률을 얼마나 따라갔는지 보여줍니다.",
+            industry_standard="실시간 온라인 처리 기준으로 90~95% 이상이면 안정권, 80% 미만이면 프레임 누락 체감이 커질 수 있습니다.",
+            interpretation=(
+                f"실제 processed FPS는 {_round_value_text(processed_fps, 'fps')}이고 설정 목표는 {_round_value_text(expected_fps, 'fps')}입니다. "
+                f"즉 목표 처리량의 {_fmt_pct_ratio(processed_ratio)}를 달성했다는 뜻입니다."
+            ),
+        ),
+        "render_vs_target": _kpi_entry(
+            label="Render FPS vs Target",
+            value=render_ratio,
+            value_display=f"{_fmt_pct_ratio(render_ratio)} ({_round_value_text(render_fps, 'fps')} / 목표 {_round_value_text(expected_fps, 'fps')})",
+            value_kind="ratio",
+            score_10=render_score,
+            target="설정 목표 FPS의 90~95% 이상이면 화면 갱신이 자연스럽고, 100%면 목표와 동일한 표시량",
+            calculation="render_fps / expected_fps",
+            meaning="사용자가 실제로 본 화면 갱신률이 설정 목표를 얼마나 따라갔는지 보여줍니다.",
+            industry_standard="인터랙티브 실시간 화면은 목표 대비 90% 이상 유지가 바람직합니다. 80% 아래면 눈에 띄는 끊김이 생기기 쉽습니다.",
+            interpretation=(
+                f"실제 render FPS는 {_round_value_text(render_fps, 'fps')}이고 설정 목표는 {_round_value_text(expected_fps, 'fps')}입니다. "
+                f"즉 계획한 화면 갱신의 {_fmt_pct_ratio(render_ratio)}만 실제로 사용자가 봤다는 뜻입니다."
+            ),
+        ),
+        "compute_utilization_p95": _kpi_entry(
+            label="Compute Utilization P95",
+            value=compute_util_p95,
+            value_display=f"{_fmt_pct_ratio(compute_util_p95)} ({_round_value_text(compute_total_p95_ms, 'ms')} / 예산 {_round_value_text(frame_period_ms, 'ms')})",
+            value_kind="ratio",
+            score_10=compute_score,
+            target="p95 기준 프레임 예산의 70% 이하 권장, 100%를 넘으면 계산만으로 예산 초과",
+            calculation="compute_total_p95_ms / configured_frame_period_ms",
+            meaning="느린 프레임 상위 5%에서 계산만으로 프레임 예산을 얼마나 쓰는지 보여줍니다.",
+            industry_standard="실시간 파이프라인은 p95 기준 60~70% 이하가 안전합니다. 85%를 넘으면 환경 변화 시 급격히 나빠질 수 있습니다.",
+            interpretation=(
+                f"상위 95% 프레임에서 compute 구간은 {_round_value_text(compute_total_p95_ms, 'ms')}를 사용했습니다. "
+                f"설정 프레임 예산 {_round_value_text(frame_period_ms, 'ms')} 대비 {_fmt_pct_ratio(compute_util_p95)}를 계산이 차지한다는 의미입니다."
+            ),
+        ),
+        "render_latency_p95": _kpi_entry(
+            label="Render Latency P95",
+            value=render_latency_p95,
+            value_display=_round_value_text(render_latency_p95, "ms"),
+            value_kind="ms",
+            score_10=render_latency_score,
+            target="상위 95% 지연이 150~200ms 이내면 실시간 체감 가능, 250ms 이상이면 느리게 느껴질 수 있음",
+            calculation="capture_to_render latency의 p95",
+            meaning="입력 수집 시점부터 화면에 보이기 직전까지의 느린 프레임 상위 5% 지연입니다.",
+            industry_standard="실시간 감시/추적 UI는 p95 기준 200ms 안팎이 보통 허용선이며, 250ms를 넘기면 체감 지연이 커집니다.",
+            interpretation=(
+                f"느린 프레임 상위 5%에서도 capture-to-render 지연이 {_round_value_text(render_latency_p95, 'ms')} 이내라는 뜻입니다. "
+                f"평균보다 최악 구간 체감 품질을 보는 지표라 운영 판단에 중요합니다."
+            ),
+        ),
+        "render_jitter": _kpi_entry(
+            label="Render Jitter",
+            value=render_jitter,
+            value_display=_round_value_text(render_jitter, "ms"),
+            value_kind="ms",
+            score_10=render_jitter_score,
+            target="p95 - p50 기준 20ms 이하가 이상적, 40ms 이상이면 세션 중 흔들림 체감 가능",
+            calculation="render_latency_p95_ms - render_latency_p50_ms",
+            meaning="같은 세션 안에서 render latency가 얼마나 흔들리는지 보여주는 변동폭입니다.",
+            industry_standard="낮은 평균 지연보다 낮은 jitter가 더 중요할 때가 많습니다. 20ms 이하면 안정적, 40ms 이상이면 버벅임을 느끼기 쉽습니다.",
+            interpretation=(
+                f"현재 render latency 변동폭은 {_round_value_text(render_jitter, 'ms')}입니다. "
+                "값이 클수록 어떤 프레임은 빠르고 어떤 프레임은 갑자기 늦어지는 세션이라는 뜻입니다."
+            ),
+        ),
+        "candidate_to_confirmed": _kpi_entry(
+            label="Candidate / Confirmed",
+            value=candidate_ratio,
+            value_display=_round_value_text(candidate_ratio),
+            value_kind="ratio",
+            score_10=candidate_score,
+            target="1.3 이하 권장, 1.0에 가까울수록 한 사람을 한 detection/track으로 정리하는 데 유리",
+            calculation="candidate_mean / confirmed_track_mean",
+            meaning="confirmed track 1개를 만들기 위해 detection candidate가 몇 개나 나오고 있는지 보여줍니다.",
+            industry_standard="단일 인원 테스트에서는 1.0~1.3 수준이 바람직합니다. 2.0 이상이면 한 사람을 여러 후보로 분해할 가능성이 큽니다.",
+            interpretation=(
+                f"현재 confirmed track 1개를 만들기 위해 평균적으로 {_round_value_text(candidate_ratio)}개의 candidate가 생깁니다. "
+                "값이 높을수록 한 사람을 여러 detection으로 보고 있을 가능성이 큽니다."
+            ),
+        ),
+        "display_to_confirmed": _kpi_entry(
+            label="Display / Confirmed",
+            value=display_ratio,
+            value_display=_round_value_text(display_ratio),
+            value_kind="ratio",
+            score_10=display_score,
+            target="0.8 이상 권장, 1.0에 가까울수록 내부 confirmed track이 화면까지 잘 전달됨",
+            calculation="display_track_mean / confirmed_track_mean",
+            meaning="내부 confirmed track이 실제 화면 표시까지 얼마나 살아남는지 보여줍니다.",
+            industry_standard="실시간 데모 기준으로 내부 추적과 화면 표시가 크게 다르면 디버깅이 어렵습니다. 0.7~0.8 이상이 바람직합니다.",
+            interpretation=(
+                f"현재 display/confirmed 비율은 {_round_value_text(display_ratio)}입니다. "
+                "내부에서는 잡았지만 화면에는 덜 보이는 비율이 크면 표시 정책이나 continuity 품질을 다시 봐야 합니다."
+            ),
+        ),
+        "lead_confirmed_switch": _kpi_entry(
+            label="Lead Confirmed Switch",
+            value=lead_switch_count,
+            value_display=f"{_round_value_text(lead_switch_count)}회 (rate {_fmt_pct_ratio(lead_switch_rate)})",
+            value_kind="count",
+            score_10=lead_switch_score,
+            target="lead switch rate 5% 이하 권장. 단일 인원 세션에서는 대표 ID가 자주 바뀌지 않는 것이 이상적",
+            calculation="lead switch count / (lead frame count - 1)",
+            meaning="대표 confirmed ID가 세션 중 얼마나 자주 다른 ID로 바뀌었는지 보여줍니다.",
+            industry_standard="단일 인원/단순 경로 테스트에서는 switch rate가 매우 낮아야 합니다. 10%를 넘기면 continuity 문제가 큰 편입니다.",
+            interpretation=(
+                f"대표 confirmed ID는 {_round_value_text(lead_switch_count)}회 바뀌었고, lead가 존재한 프레임 기준 switch rate는 {_fmt_pct_ratio(lead_switch_rate)}입니다. "
+                "값이 높을수록 같은 사람을 하나의 ID로 오래 유지하지 못했다는 뜻입니다."
+            ),
+        ),
+        "path_cleanliness": _kpi_entry(
+            label="Path Cleanliness",
+            value=path_cleanliness_score,
+            value_display=f"{_round_value_text(path_cleanliness_score)}/10 ({geometry_source or 'n/a'})",
+            value_kind="score",
+            score_10=path_cleanliness_score,
+            target="끊김, 지그재그 residual, 점프 비율이 모두 낮아 8점 이상이면 경로 품질이 양호한 편",
+            calculation="weighted average(max_gap_frames, local_residual_rms_m, jump_ratio)",
+            meaning="눈으로 봤을 때 경로가 얼마나 끊기지 않고, 과한 지그재그/점프 없이 이어지는지를 요약한 참고 점수입니다.",
+            industry_standard="실제 이동 경로를 사람이 이해해야 하는 추적 UI에서는 continuity와 별도로 path cleanliness를 같이 봐야 합니다. 8점 이상이면 비교적 안정, 6점 이하면 눈으로 보기 거친 경우가 많습니다.",
+            interpretation=(
+                f"이번 세션의 기준 경로는 {geometry_source or 'n/a'}이고, 경로 청결도는 {_round_value_text(path_cleanliness_score)}/10 입니다. "
+                "같은 ID를 유지하더라도 이 값이 낮으면 사람이 보기엔 경로가 말리거나 지저분하게 느껴질 수 있습니다."
+            ),
+        ),
+        "path_max_gap_frames": _kpi_entry(
+            label="Path Max Gap Frames",
+            value=max_gap_frames,
+            value_display=_round_value_text(max_gap_frames),
+            value_kind="count",
+            score_10=geometry_gap_score,
+            target="0~2 frame 수준이면 양호, 5 frame 이상이면 눈으로도 끊김이 체감되기 쉬움",
+            calculation="max(frame_id gap - 1) on lead path",
+            meaning="대표 경로에서 가장 길게 비어 있는 프레임 수입니다.",
+            industry_standard="실시간 경로 표시에서는 가장 긴 공백이 짧을수록 좋습니다. 단일 인원 경로에서 5프레임 이상 비면 사람이 보기에도 선이 끊겨 보이기 쉽습니다.",
+            interpretation=(
+                f"대표 경로의 최장 공백은 {_round_value_text(max_gap_frames)}프레임입니다. "
+                "값이 클수록 코너나 약한 구간에서 경로가 뚝뚝 끊겨 보일 가능성이 큽니다."
+            ),
+        ),
+        "path_local_residual_rms": _kpi_entry(
+            label="Path Local Residual RMS",
+            value=local_residual_rms,
+            value_display=_round_value_text(local_residual_rms, "m"),
+            value_kind="m",
+            score_10=geometry_residual_score,
+            target="0.05~0.10m 이하가 양호, 값이 커질수록 local zigzag가 커짐",
+            calculation="RMS distance of lead points to local segment(prev->next)",
+            meaning="대표 경로의 각 점이 바로 앞뒤 점이 만드는 local segment에서 얼마나 벗어나는지 보는 지터 지표입니다.",
+            industry_standard="사람 이동 궤적을 눈으로 이해해야 하는 응용에서는 수 cm~10 cm대 residual이 보통 양호합니다. 0.15m를 넘기면 선이 말리거나 뱀처럼 흔들려 보이기 쉽습니다.",
+            interpretation=(
+                f"현재 local residual RMS는 {_round_value_text(local_residual_rms, 'm')}입니다. "
+                "값이 높을수록 전체 ID는 유지돼도 경로가 지그재그로 흔들려 보입니다."
+            ),
+        ),
+        "path_jump_ratio": _kpi_entry(
+            label="Path Jump Ratio",
+            value=jump_ratio,
+            value_display=_fmt_pct_ratio(jump_ratio),
+            value_kind="ratio",
+            score_10=geometry_jump_score,
+            target="3~7% 이하가 양호, 커질수록 순간적인 좌표 점프가 많음",
+            calculation="ratio of normalized steps larger than adaptive jump threshold",
+            meaning="대표 경로에서 과하게 큰 step이 전체 step 중 얼마나 자주 나타나는지 보는 지표입니다.",
+            industry_standard="직선/왕복/원형 등 대부분의 단일 인원 경로에서는 큰 점프가 드물어야 합니다. 10%를 넘기면 눈에 띄는 튐으로 느껴질 가능성이 높습니다.",
+            interpretation=(
+                f"현재 jump ratio는 {_fmt_pct_ratio(jump_ratio)}입니다. "
+                "값이 높을수록 일부 프레임에서 대표점이 갑자기 다른 위치로 뛰는 현상이 잦다는 의미입니다."
+            ),
+        ),
+    }
+
+    categories = {
+        "throughput": _weighted_average_score(
+            [
+                (processed_score, 1.0),
+                (render_score, 1.0),
+                (render_latency_score, 1.0),
+            ]
+        ),
+        "efficiency": _weighted_average_score([(compute_score, 1.0)]),
+        "stability": _weighted_average_score([(render_jitter_score, 1.0)]),
+        "continuity": _weighted_average_score(
+            [
+                (candidate_score, 1.0),
+                (display_score, 1.0),
+                (lead_switch_score, 1.2),
+            ]
+        ),
+        "geometry": _weighted_average_score(
+            [
+                (geometry_gap_score, 1.1),
+                (geometry_residual_score, 1.0),
+                (geometry_jump_score, 0.9),
+            ]
+        ),
+    }
+
+    category_labels = {
+        "throughput": "처리량/목표 달성",
+        "efficiency": "계산 여유",
+        "stability": "지연 안정성",
+        "continuity": "추적 연속성",
+        "geometry": "경로 기하 품질",
+    }
+    category_scores = {}
+    for key, score in categories.items():
+        band = _score_band(score)
+        category_scores[key] = {
+            "label": category_labels[key],
+            "score_10": _round_or_none(score, digits=2),
+            "score_100": _round_or_none(None if score is None else score * 10.0, digits=1),
+            "grade": band["grade"],
+            "tone": band["tone"],
+        }
+
+    overall_score_10 = _weighted_average_score(
+        [
+            (processed_score, 1.0),
+            (render_score, 1.0),
+            (compute_score, 1.0),
+            (render_latency_score, 1.0),
+            (render_jitter_score, 1.0),
+            (candidate_score, 1.25),
+            (display_score, 1.25),
+            (lead_switch_score, 1.5),
+            (geometry_gap_score, 1.25),
+            (geometry_residual_score, 1.0),
+            (geometry_jump_score, 1.0),
+        ]
+    )
+    band = _score_band(overall_score_10)
+    return {
+        "overall_score_10": _round_or_none(overall_score_10, digits=2),
+        "overall_score_100": _round_or_none(None if overall_score_10 is None else overall_score_10 * 10.0, digits=1),
+        "grade": band["grade"],
+        "label": band["label"],
+        "tone": band["tone"],
+        "summary": _performance_summary_text(overall_score_10),
+        "categories": category_scores,
+        "kpis": kpis,
+    }
+
+
+def _fmt_pct_ratio(value):
+    if value is None:
+        return "n/a"
+    return f"{float(value) * 100:.1f}%"
+
+
+def _round_value_text(value, unit: str = ""):
+    if value is None:
+        return "n/a"
+    suffix = f" {unit}" if unit else ""
+    return f"{float(value):.2f}".rstrip("0").rstrip(".") + suffix
 
 
 def _build_performance_summary(
@@ -360,6 +992,84 @@ def _build_performance_summary(
     candidate_to_confirmed_ratio = _safe_rate(candidate_mean, confirmed_mean)
     display_to_confirmed_ratio = _safe_rate(display_mean, confirmed_mean)
 
+    render_geometry_points, render_geometry_source = _collect_lead_points(
+        render_records,
+        ["display_tracks", "tentative_display_tracks", "tentative_tracks"],
+    )
+    processed_geometry_points, processed_geometry_source = _collect_lead_points(
+        processed_records,
+        ["confirmed_tracks", "tentative_tracks"],
+    )
+    render_geometry = _build_path_geometry(
+        render_geometry_points,
+        total_record_count=len(render_records),
+        gap_break_frames=2,
+    )
+    processed_geometry = _build_path_geometry(
+        processed_geometry_points,
+        total_record_count=len(processed_records),
+        gap_break_frames=2,
+    )
+
+    def attach_geometry_scores(geometry_stats: dict):
+        gap_score = _score_from_anchors(
+            geometry_stats.get("max_gap_frames"),
+            [(0.0, 10.0), (1.0, 9.5), (3.0, 8.0), (6.0, 6.0), (10.0, 4.0), (20.0, 1.5), (40.0, 0.0)],
+        )
+        residual_score = _score_from_anchors(
+            geometry_stats.get("local_residual_rms_m"),
+            [(0.02, 10.0), (0.04, 9.0), (0.07, 8.0), (0.12, 6.0), (0.20, 3.0), (0.35, 0.0)],
+        )
+        jump_score = _score_from_anchors(
+            geometry_stats.get("jump_ratio"),
+            [(0.0, 10.0), (0.03, 9.0), (0.07, 8.0), (0.15, 6.0), (0.30, 3.0), (0.50, 0.0)],
+        )
+        cleanliness = _weighted_average_score(
+            [
+                (gap_score, 1.1),
+                (residual_score, 1.0),
+                (jump_score, 0.9),
+            ]
+        )
+        scored = dict(geometry_stats)
+        scored["path_cleanliness_score_10"] = _round_or_none(cleanliness, digits=2)
+        scored["path_cleanliness_score_100"] = _round_or_none(
+            None if cleanliness is None else cleanliness * 10.0,
+            digits=1,
+        )
+        return scored
+
+    render_geometry = attach_geometry_scores(render_geometry)
+    processed_geometry = attach_geometry_scores(processed_geometry)
+
+    geometry_reference_source = "processed_lead"
+    geometry_reference = processed_geometry
+    if (render_geometry.get("point_count") or 0) >= 3:
+        geometry_reference_source = "render_lead"
+        geometry_reference = render_geometry
+
+    geometry_gap_score = _score_from_anchors(
+        geometry_reference.get("max_gap_frames"),
+        [(0.0, 10.0), (1.0, 9.5), (3.0, 8.0), (6.0, 6.0), (10.0, 4.0), (20.0, 1.5), (40.0, 0.0)],
+    )
+    geometry_residual_score = _score_from_anchors(
+        geometry_reference.get("local_residual_rms_m"),
+        [(0.02, 10.0), (0.04, 9.0), (0.07, 8.0), (0.12, 6.0), (0.20, 3.0), (0.35, 0.0)],
+    )
+    geometry_jump_score = _score_from_anchors(
+        geometry_reference.get("jump_ratio"),
+        [(0.0, 10.0), (0.03, 9.0), (0.07, 8.0), (0.15, 6.0), (0.30, 3.0), (0.50, 0.0)],
+    )
+    path_cleanliness_score_10 = _weighted_average_score(
+        [
+            (geometry_gap_score, 1.1),
+            (geometry_residual_score, 1.0),
+            (geometry_jump_score, 0.9),
+        ]
+    )
+
+    geometry_reference_payload = dict(geometry_reference)
+
     performance = {
         "frame_budget": {
             "cfg_path": None if cfg_path is None else str(cfg_path),
@@ -411,8 +1121,21 @@ def _build_performance_summary(
             "unique_confirmed_track_ids": _unique_track_id_count(processed_records, "confirmed_tracks"),
             "unique_display_track_ids": _unique_track_id_count(render_records, "display_tracks"),
         },
+        "geometry": {
+            "reference_source": geometry_reference_source,
+            "reference": geometry_reference_payload,
+            "render_lead": {
+                "source_key": render_geometry_source,
+                **render_geometry,
+            },
+            "processed_lead": {
+                "source_key": processed_geometry_source,
+                **processed_geometry,
+            },
+        },
         "highlights": [],
     }
+    performance["scoring"] = _build_performance_scoring(performance)
 
     highlights = performance["highlights"]
     if compute_utilization_p95 is not None:
@@ -428,6 +1151,12 @@ def _build_performance_summary(
         highlights.append("lead confirmed ID switch가 많아 continuity 품질이 아직 약합니다.")
     if _p95_minus_p50(render_latency_stats) not in (None, 0) and _p95_minus_p50(render_latency_stats) >= 30:
         highlights.append("render latency 변동폭이 커서 체감 품질이 세션 중 흔들릴 수 있습니다.")
+    if (geometry_reference.get("max_gap_frames") or 0) >= 5:
+        highlights.append("lead path가 길게 비는 구간이 있어, 화면에서 경로가 끊겨 보일 가능성이 큽니다.")
+    if (geometry_reference.get("local_residual_rms_m") or 0.0) >= 0.12:
+        highlights.append("lead path의 local residual이 커, 직선/대각선 테스트에서도 지그재그가 눈에 띌 수 있습니다.")
+    if (geometry_reference.get("jump_ratio") or 0.0) >= 0.10:
+        highlights.append("일부 프레임에서 대표점이 갑자기 점프하는 비율이 높아, 코너나 방향 전환에서 경로가 말릴 수 있습니다.")
     if not highlights:
         highlights.append("핵심 KPI는 대체로 안정적이며, 다음 비교 세션과의 추세 확인이 중요합니다.")
 
@@ -533,6 +1262,10 @@ def build_summary(session_dir: Path):
     render_candidate_counts = [int(record.get("candidate_count", 0)) for record in render_records]
     render_display_counts = [
         _extract_count(record, "display_track_count", "display_tracks")
+        for record in render_records
+    ]
+    render_held_display_counts = [
+        int(record.get("display_held_track_count", 0))
         for record in render_records
     ]
     render_tentative_display_counts = [
@@ -642,6 +1375,7 @@ def build_summary(session_dir: Path):
                 digits=3,
             ),
             "display_track_count": _summarize_numeric(render_display_counts, digits=3),
+            "display_held_track_count": _summarize_numeric(render_held_display_counts, digits=3),
             "tentative_display_track_count": _summarize_numeric(
                 render_tentative_display_counts,
                 digits=3,

@@ -30,12 +30,14 @@ class SessionLogger:
         *,
         project_root: str | Path,
         log_root: str | Path,
+        raw_capture_root: str | Path | None = None,
         variant: str,
         scenario_id: str,
         input_mode: str,
         source_capture: str,
         notes: str,
         enabled: bool = True,
+        write_raw_capture: bool = True,
         write_processed_frames: bool = True,
         write_render_frames: bool = True,
         write_status_log: bool = True,
@@ -46,8 +48,14 @@ class SessionLogger:
     ):
         self.project_root = Path(project_root)
         self.log_root = Path(log_root)
+        self.raw_capture_root = (
+            Path(raw_capture_root)
+            if raw_capture_root is not None
+            else self.project_root / 'logs' / 'raw'
+        )
         self.created_at = datetime.now()
         self.session_dir = self.log_root / self.created_at.strftime('%Y%m%d_%H%M%S')
+        self.raw_capture_dir = self.raw_capture_root / self.session_dir.name
         self.session_meta_path = self.session_dir / 'session_meta.json'
         self.processed_log_path = self.session_dir / 'processed_frames.jsonl'
         self.render_log_path = self.session_dir / 'render_frames.jsonl'
@@ -56,6 +64,9 @@ class SessionLogger:
         self.runtime_config_path = self.session_dir / 'runtime_config.json'
         self.system_snapshot_path = self.session_dir / 'system_snapshot.json'
         self.report_generation_log_path = self.session_dir / 'report_generation.log'
+        self.raw_capture_manifest_path = self.raw_capture_dir / 'capture_manifest.json'
+        self.raw_capture_index_path = self.raw_capture_dir / 'raw_frames_index.jsonl'
+        self.raw_capture_data_path = self.raw_capture_dir / 'raw_frames.i16'
 
         self.variant = str(variant)
         self.scenario_id = str(scenario_id)
@@ -63,6 +74,7 @@ class SessionLogger:
         self.source_capture = str(source_capture)
         self.notes = str(notes)
         self.enabled = bool(enabled)
+        self.write_raw_capture = bool(write_raw_capture)
         self.write_processed_frames = bool(write_processed_frames)
         self.write_render_frames = bool(write_render_frames)
         self.write_status_log = bool(write_status_log)
@@ -81,7 +93,7 @@ class SessionLogger:
         git_branch = _run_git_command(self.project_root, 'rev-parse', '--abbrev-ref', 'HEAD')
         git_status = _run_git_command(self.project_root, 'status', '--short')
         return {
-            'schema_version': 4,
+            'schema_version': 5,
             'session_id': self.session_dir.name,
             'created_at': self.created_at.isoformat(timespec='seconds'),
             'variant': self.variant,
@@ -95,6 +107,7 @@ class SessionLogger:
             'git_dirty': bool(git_status),
             'logging': {
                 'enabled': self.enabled,
+                'write_raw_capture': self.write_raw_capture,
                 'write_processed_frames': self.write_processed_frames,
                 'write_render_frames': self.write_render_frames,
                 'write_status_log': self.write_status_log,
@@ -103,6 +116,35 @@ class SessionLogger:
                 'capture_system_snapshot': self.capture_system_snapshot_enabled,
                 'report_generation_mode': self.report_generation_mode,
             },
+            'raw_capture_dir': str(self.raw_capture_dir) if self.write_raw_capture else None,
+        }
+
+    def build_raw_capture_manifest(self, runtime_summary: dict):
+        return {
+            'schema_version': 1,
+            'session_id': self.session_dir.name,
+            'created_at': self.created_at.isoformat(timespec='seconds'),
+            'source_session_dir': str(self.session_dir),
+            'variant': self.variant,
+            'scenario_id': self.scenario_id,
+            'input_mode': self.input_mode,
+            'source_capture': self.source_capture,
+            'notes': self.notes,
+            'raw_capture': {
+                'data_file': self.raw_capture_data_path.name,
+                'index_file': self.raw_capture_index_path.name,
+                'frame_length_samples': runtime_summary.get('frame_length'),
+                'config_path': runtime_summary.get('cfg'),
+                'adc_sample': runtime_summary.get('adc_sample'),
+                'chirp_loops': runtime_summary.get('chirp_loops'),
+                'tx_num': runtime_summary.get('tx_num'),
+                'rx_num': runtime_summary.get('rx_num'),
+                'virtual_antennas': runtime_summary.get('virtual_antennas'),
+                'invert_lateral_axis': runtime_summary.get('invert_lateral_axis'),
+                'range_resolution_m': runtime_summary.get('range_resolution_m'),
+                'max_range_m': runtime_summary.get('max_range_m'),
+            },
+            'runtime_summary': runtime_summary,
         }
 
     def _normalized_report_generation_mode(self):
@@ -155,6 +197,15 @@ class SessionLogger:
             json.dump(self.session_metadata, meta_file, indent=2, ensure_ascii=False)
         with self.runtime_config_path.open('w', encoding='utf-8') as runtime_file:
             json.dump(runtime_summary, runtime_file, indent=2, ensure_ascii=False)
+        if self.write_raw_capture:
+            self.raw_capture_dir.mkdir(parents=True, exist_ok=True)
+            with self.raw_capture_manifest_path.open('w', encoding='utf-8') as manifest_file:
+                json.dump(
+                    self.build_raw_capture_manifest(runtime_summary),
+                    manifest_file,
+                    indent=2,
+                    ensure_ascii=False,
+                )
 
         if self.write_render_frames:
             self.render_log_file = self.render_log_path.open('a', encoding='utf-8', buffering=1)
@@ -181,8 +232,19 @@ class SessionLogger:
                 'event_log': self.event_log_path.name if self.write_event_log else None,
                 'legacy_status_log': self.status_log_path.name if self.write_status_log else None,
                 'system_snapshot': self.system_snapshot_path.name if system_snapshot is not None else None,
+                'raw_capture_manifest': self.raw_capture_manifest_path.name if self.write_raw_capture else None,
+                'raw_capture_index': self.raw_capture_index_path.name if self.write_raw_capture else None,
+                'raw_capture_data': self.raw_capture_data_path.name if self.write_raw_capture else None,
             },
         )
+        if self.write_raw_capture:
+            self.log_event(
+                'raw_capture_prepared',
+                frame_index=0,
+                raw_capture_dir=str(self.raw_capture_dir),
+                raw_capture_data=self.raw_capture_data_path.name,
+                raw_capture_index=self.raw_capture_index_path.name,
+            )
         if system_snapshot is not None:
             power = system_snapshot.get('power') or {}
             process = system_snapshot.get('process') or {}

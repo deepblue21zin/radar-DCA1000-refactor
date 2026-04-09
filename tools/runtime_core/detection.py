@@ -202,6 +202,47 @@ def _body_center_patch_for_range(
     return range_radius_bins, angle_radius_bins, relative_floor
 
 
+def _candidate_merge_window_for_range(
+    range_m,
+    merge_bands,
+    default_merge_radius_m=0.40,
+    default_range_bin_radius=1,
+    default_doppler_bin_radius=2,
+):
+    merge_radius_m = float(default_merge_radius_m)
+    range_bin_radius = int(default_range_bin_radius)
+    doppler_bin_radius = int(default_doppler_bin_radius)
+
+    if not merge_bands:
+        return merge_radius_m, range_bin_radius, doppler_bin_radius
+
+    for band in merge_bands:
+        try:
+            r_min = float(band.get("r_min", 0.0))
+            r_max = band.get("r_max")
+        except (TypeError, ValueError, AttributeError):
+            continue
+
+        if range_m < r_min:
+            continue
+        if r_max is not None and float(range_m) >= float(r_max):
+            continue
+
+        try:
+            merge_radius_m = max(0.05, float(band.get("merge_radius_m", merge_radius_m)))
+            range_bin_radius = max(0, int(band.get("range_bin_radius", range_bin_radius)))
+            doppler_bin_radius = max(0, int(band.get("doppler_bin_radius", doppler_bin_radius)))
+        except (TypeError, ValueError, AttributeError):
+            return (
+                float(default_merge_radius_m),
+                int(default_range_bin_radius),
+                int(default_doppler_bin_radius),
+            )
+        break
+
+    return merge_radius_m, range_bin_radius, doppler_bin_radius
+
+
 def _connected_component_mask(binary_mask, seed_row, seed_col):
     rows, cols = binary_mask.shape
     if rows == 0 or cols == 0:
@@ -264,6 +305,17 @@ def _refine_angle_centroid(
     )
     refined_angle_bin = _nearest_axis_bin(angle_axis_rad, refined_angle_rad)
     return refined_angle_bin, refined_angle_rad
+
+
+def _doppler_bin_distance(left_bin, right_bin, fft_size):
+    delta = abs(int(left_bin) - int(right_bin))
+    try:
+        fft_size = int(fft_size)
+    except (TypeError, ValueError):
+        return delta
+    if fft_size <= 0:
+        return delta
+    return min(delta, max(fft_size - delta, 0))
 
 
 def _refine_body_center_from_patch(
@@ -371,6 +423,117 @@ def _refine_body_center_from_patch(
     return range_bin, angle_bin, range_m, angle_rad, x_m, y_m
 
 
+def _merge_candidate_pool(
+    candidate_pool,
+    runtime_config,
+    merge_bands=None,
+    default_merge_radius_m=0.40,
+    default_range_bin_radius=1,
+    default_doppler_bin_radius=2,
+):
+    if len(candidate_pool) <= 1:
+        return list(candidate_pool)
+
+    def _create_group(candidate):
+        weight = max(float(candidate.score), 1e-3)
+        return {
+            "weight_sum": weight,
+            "x_sum": float(candidate.x_m) * weight,
+            "y_sum": float(candidate.y_m) * weight,
+            "doppler_sum": float(candidate.doppler_bin) * weight,
+            "score_max": float(candidate.score),
+            "rdi_peak_max": float(candidate.rdi_peak),
+            "rai_peak_max": float(candidate.rai_peak),
+            "member_count": 1,
+            "x_m": float(candidate.x_m),
+            "y_m": float(candidate.y_m),
+            "range_m": float(candidate.range_m),
+            "range_bin": int(candidate.range_bin),
+            "angle_bin": int(candidate.angle_bin),
+            "angle_deg": float(candidate.angle_deg),
+            "doppler_bin": int(candidate.doppler_bin),
+        }
+
+    def _recompute_group(group):
+        weight_sum = max(float(group["weight_sum"]), 1e-6)
+        x_m = float(group["x_sum"] / weight_sum)
+        y_m = float(group["y_sum"] / weight_sum)
+        range_m = float(hypot(x_m, y_m))
+        angle_rad = float(atan2(x_m, max(y_m, 1e-6)))
+        group["x_m"] = x_m
+        group["y_m"] = y_m
+        group["range_m"] = range_m
+        group["range_bin"] = _nearest_axis_bin(runtime_config.range_axis_m, range_m)
+        group["angle_bin"] = _nearest_axis_bin(runtime_config.angle_axis_rad, angle_rad)
+        group["angle_deg"] = float(np.degrees(angle_rad))
+        group["doppler_bin"] = int(round(group["doppler_sum"] / weight_sum))
+
+    groups = []
+    for candidate in candidate_pool:
+        best_group_index = None
+        best_distance = None
+
+        for group_index, group in enumerate(groups):
+            reference_range_m = max(float(candidate.range_m), float(group["range_m"]))
+            merge_radius_m, range_bin_radius, doppler_bin_radius = _candidate_merge_window_for_range(
+                reference_range_m,
+                merge_bands,
+                default_merge_radius_m=default_merge_radius_m,
+                default_range_bin_radius=default_range_bin_radius,
+                default_doppler_bin_radius=default_doppler_bin_radius,
+            )
+            cart_distance = float(hypot(candidate.x_m - group["x_m"], candidate.y_m - group["y_m"]))
+            if cart_distance > merge_radius_m:
+                continue
+            if abs(int(candidate.range_bin) - int(group["range_bin"])) > range_bin_radius:
+                continue
+            if _doppler_bin_distance(candidate.doppler_bin, group["doppler_bin"], runtime_config.doppler_fft_size) > doppler_bin_radius:
+                continue
+            if best_distance is None or cart_distance < best_distance:
+                best_distance = cart_distance
+                best_group_index = group_index
+
+        if best_group_index is None:
+            groups.append(_create_group(candidate))
+            continue
+
+        group = groups[best_group_index]
+        weight = max(float(candidate.score), 1e-3)
+        group["weight_sum"] += weight
+        group["x_sum"] += float(candidate.x_m) * weight
+        group["y_sum"] += float(candidate.y_m) * weight
+        group["doppler_sum"] += float(candidate.doppler_bin) * weight
+        group["score_max"] = max(float(group["score_max"]), float(candidate.score))
+        group["rdi_peak_max"] = max(float(group["rdi_peak_max"]), float(candidate.rdi_peak))
+        group["rai_peak_max"] = max(float(group["rai_peak_max"]), float(candidate.rai_peak))
+        group["member_count"] = int(group["member_count"]) + 1
+        _recompute_group(group)
+
+    merged_candidates = []
+    for group in groups:
+        score_scale = min(1.20, 1.0 + 0.05 * max(int(group["member_count"]) - 1, 0))
+        merged_candidates.append(
+            DetectionCandidate(
+                range_bin=int(group["range_bin"]),
+                doppler_bin=int(group["doppler_bin"]),
+                angle_bin=int(group["angle_bin"]),
+                range_m=float(group["range_m"]),
+                angle_deg=float(group["angle_deg"]),
+                x_m=float(group["x_m"]),
+                y_m=float(group["y_m"]),
+                rdi_peak=float(group["rdi_peak_max"]),
+                rai_peak=float(group["rai_peak_max"]),
+                score=float(group["score_max"]) * score_scale,
+            )
+        )
+
+    merged_candidates.sort(
+        key=lambda candidate: (candidate.score, candidate.rdi_peak, candidate.rai_peak),
+        reverse=True,
+    )
+    return merged_candidates
+
+
 def _cluster_detection_candidates(
     candidate_pool,
     runtime_config,
@@ -399,6 +562,12 @@ def _cluster_detection_candidates(
         adaptive_eps_bands=detection_region.adaptive_eps_bands,
     )
     if not clusters:
+        if candidate_pool and detection_region.max_targets <= 1:
+            fallback = max(
+                candidate_pool,
+                key=lambda candidate: (candidate.score, candidate.rdi_peak, candidate.rai_peak),
+            )
+            return [fallback]
         return []
 
     detections = []
@@ -464,6 +633,7 @@ def detect_targets(
     min_cartesian_separation_m=0.45,
     angle_centroid_radius_bands=None,
     body_center_patch_bands=None,
+    candidate_merge_bands=None,
 ):
     rdi_roi = np.asarray(rdi_map[min_range_bin:max_range_bin], dtype=np.float64)
     if rdi_roi.size == 0:
@@ -504,7 +674,7 @@ def detect_targets(
 
     candidate_scores = power_map[candidate_indices[:, 0], candidate_indices[:, 1]]
     ordered_indices = candidate_indices[np.argsort(candidate_scores)[::-1]]
-    candidate_pool = []
+    coarse_candidate_pool = []
     rdi_peak_ceiling = float(np.max(power_map))
 
     for range_bin_rel, doppler_bin in ordered_indices:
@@ -550,36 +720,13 @@ def detect_targets(
             angle_mask,
             radius=centroid_radius,
         )
-        patch_range_radius, patch_angle_radius, patch_relative_floor = _body_center_patch_for_range(
-            range_m,
-            body_center_patch_bands,
-            default_range_radius_bins=1,
-            default_angle_radius_bins=max(2, centroid_radius + 1),
-            default_relative_floor=0.55,
-        )
-        (
-            range_bin,
-            angle_bin,
-            range_m,
-            angle_rad,
-            x_m,
-            y_m,
-        ) = _refine_body_center_from_patch(
-            rai_map,
-            runtime_config,
-            range_bin,
-            angle_bin,
-            angle_mask,
-            angle_floor=angle_floor,
-            range_radius_bins=patch_range_radius,
-            angle_radius_bins=patch_angle_radius,
-            relative_floor=patch_relative_floor,
-        )
+        x_m = float(range_m * np.sin(angle_rad))
+        y_m = float(range_m * np.cos(angle_rad))
         rdi_peak = float(rdi_map[range_bin, int(doppler_bin)])
         normalized_rdi = float(power_map[range_bin_rel, int(doppler_bin)] / max(rdi_peak_ceiling, 1e-6))
         candidate_score = normalized_rdi * min(angle_contrast, 3.0)
 
-        candidate_pool.append(
+        coarse_candidate_pool.append(
             DetectionCandidate(
                 range_bin=range_bin,
                 doppler_bin=int(doppler_bin),
@@ -594,9 +741,108 @@ def detect_targets(
             )
         )
 
-    candidate_pool.sort(
+    coarse_candidate_pool.sort(
         key=lambda candidate: (candidate.score, candidate.rdi_peak, candidate.rai_peak),
         reverse=True,
+    )
+    coarse_candidate_pool = _merge_candidate_pool(
+        coarse_candidate_pool,
+        runtime_config,
+        merge_bands=candidate_merge_bands,
+        default_merge_radius_m=max(min_cartesian_separation_m * 0.75, 0.25),
+        default_range_bin_radius=1,
+        default_doppler_bin_radius=max(2, int(runtime_config.doppler_guard_bins)),
+    )
+    if not coarse_candidate_pool:
+        return []
+
+    refined_candidate_pool = []
+    for coarse_candidate in coarse_candidate_pool:
+        range_bin = int(np.clip(coarse_candidate.range_bin, 0, rai_map.shape[0] - 1))
+        range_m = float(runtime_config.range_axis_m[range_bin])
+        angle_mask = _angle_roi_mask(
+            range_m,
+            runtime_config.angle_axis_rad,
+            detection_region,
+        )
+        if not np.any(angle_mask):
+            continue
+
+        angle_profile = np.asarray(rai_map[range_bin], dtype=np.float64)
+        masked_angle_profile = np.where(angle_mask, angle_profile, 0.0)
+        roi_angle_values = masked_angle_profile[angle_mask]
+        if roi_angle_values.size == 0:
+            continue
+
+        peak_angle_bin = int(np.clip(coarse_candidate.angle_bin, 0, masked_angle_profile.shape[0] - 1))
+        if (not bool(angle_mask[peak_angle_bin])) or float(masked_angle_profile[peak_angle_bin]) <= 0.0:
+            peak_angle_bin = int(np.argmax(masked_angle_profile))
+        rai_peak = float(masked_angle_profile[peak_angle_bin])
+        if rai_peak <= 0.0:
+            continue
+
+        angle_floor = float(np.quantile(roi_angle_values, angle_quantile))
+        centroid_radius = _angle_centroid_radius_for_range(
+            range_m,
+            angle_centroid_radius_bands,
+            default_radius=1,
+        )
+        angle_bin, angle_rad = _refine_angle_centroid(
+            masked_angle_profile,
+            runtime_config.angle_axis_rad,
+            peak_angle_bin,
+            angle_floor,
+            angle_mask,
+            radius=centroid_radius,
+        )
+        patch_range_radius, patch_angle_radius, patch_relative_floor = _body_center_patch_for_range(
+            range_m,
+            body_center_patch_bands,
+            default_range_radius_bins=1,
+            default_angle_radius_bins=max(2, centroid_radius + 1),
+            default_relative_floor=0.55,
+        )
+        (
+            refined_range_bin,
+            refined_angle_bin,
+            refined_range_m,
+            refined_angle_rad,
+            refined_x_m,
+            refined_y_m,
+        ) = _refine_body_center_from_patch(
+            rai_map,
+            runtime_config,
+            range_bin,
+            angle_bin,
+            angle_mask,
+            angle_floor=angle_floor,
+            range_radius_bins=patch_range_radius,
+            angle_radius_bins=patch_angle_radius,
+            relative_floor=patch_relative_floor,
+        )
+        refined_candidate_pool.append(
+            DetectionCandidate(
+                range_bin=refined_range_bin,
+                doppler_bin=int(coarse_candidate.doppler_bin),
+                angle_bin=refined_angle_bin,
+                range_m=refined_range_m,
+                angle_deg=float(np.degrees(refined_angle_rad)),
+                x_m=refined_x_m,
+                y_m=refined_y_m,
+                rdi_peak=float(coarse_candidate.rdi_peak),
+                rai_peak=max(float(coarse_candidate.rai_peak), rai_peak),
+                score=float(coarse_candidate.score),
+            )
+        )
+
+    candidate_pool = refined_candidate_pool or coarse_candidate_pool
+    candidate_pool = _merge_candidate_pool(
+        candidate_pool,
+        runtime_config,
+        merge_bands=candidate_merge_bands,
+        default_merge_radius_m=max(min_cartesian_separation_m * 0.75, 0.25),
+        default_range_bin_radius=1,
+        default_doppler_bin_radius=max(2, int(runtime_config.doppler_guard_bins)),
     )
     clustered_detections = _cluster_detection_candidates(
         candidate_pool,

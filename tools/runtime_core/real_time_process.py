@@ -95,6 +95,20 @@ def _append_jsonl(log_path, record):
         log_file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _load_jsonl_records(log_path):
+    records = []
+    log_path = Path(log_path)
+    if not log_path.exists():
+        return records
+    with log_path.open("r", encoding="utf-8") as log_file:
+        for line in log_file:
+            line = line.strip()
+            if not line:
+                continue
+            records.append(json.loads(line))
+    return records
+
+
 def _round_stage_timings(stage_timings_ms):
     return {
         key: round(float(value), 3)
@@ -124,8 +138,154 @@ def _parse_dca1000_packet(packet_bytes):
     return sequence_id, byte_count, packet_bytes[DCA1000_HEADER_BYTES:]
 
 
+class RawFrameCaptureWriter:
+    def __init__(self, raw_data_path, raw_index_path):
+        self.raw_data_path = Path(raw_data_path)
+        self.raw_index_path = Path(raw_index_path)
+        self.raw_data_path.parent.mkdir(parents=True, exist_ok=True)
+        self.raw_index_path.parent.mkdir(parents=True, exist_ok=True)
+        self.raw_data_file = self.raw_data_path.open("ab")
+        self.raw_index_file = self.raw_index_path.open("a", encoding="utf-8", buffering=1)
+        self.first_capture_ts = None
+        self.bytes_written = int(self.raw_data_path.stat().st_size if self.raw_data_path.exists() else 0)
+
+    def write_frame(self, frame_packet: FramePacket):
+        iq_payload = np.asarray(frame_packet.iq, dtype=np.dtype("<i2")).tobytes(order="C")
+        byte_offset = self.bytes_written
+        self.raw_data_file.write(iq_payload)
+        self.bytes_written += len(iq_payload)
+
+        if self.first_capture_ts is None:
+            self.first_capture_ts = float(frame_packet.capture_ts)
+
+        record = {
+            "frame_id": int(frame_packet.frame_id),
+            "capture_ts": round(float(frame_packet.capture_ts), 6),
+            "assembled_ts": round(float(frame_packet.assembled_ts), 6),
+            "capture_elapsed_s": round(float(frame_packet.capture_ts - self.first_capture_ts), 6),
+            "assembled_elapsed_s": round(float(frame_packet.assembled_ts - self.first_capture_ts), 6),
+            "byte_offset": int(byte_offset),
+            "byte_length": int(len(iq_payload)),
+            "sample_count": int(frame_packet.iq.size),
+            "packets_in_frame": int(frame_packet.packets_in_frame),
+            "sequence_start": frame_packet.sequence_start,
+            "sequence_end": frame_packet.sequence_end,
+            "byte_count_start": frame_packet.byte_count_start,
+            "byte_count_end": frame_packet.byte_count_end,
+            "udp_gap_count": int(frame_packet.udp_gap_count),
+            "byte_mismatch_count": int(frame_packet.byte_mismatch_count),
+            "out_of_sequence_count": int(frame_packet.out_of_sequence_count),
+            "invalid": bool(frame_packet.invalid),
+            "invalid_reason": frame_packet.invalid_reason,
+        }
+        self.raw_index_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def close(self):
+        if self.raw_data_file is not None:
+            self.raw_data_file.close()
+            self.raw_data_file = None
+        if self.raw_index_file is not None:
+            self.raw_index_file.close()
+            self.raw_index_file = None
+
+
+class RawCaptureReplaySource(th.Thread):
+    def __init__(self, name, frame_queue, capture_dir, playback_speed=1.0, loop=False, autostart=False):
+        th.Thread.__init__(self, name=name)
+        self.frame_queue = frame_queue
+        self.capture_dir = Path(capture_dir)
+        self.playback_speed = max(float(playback_speed), 0.01)
+        self.loop = bool(loop)
+        self._stop_requested = th.Event()
+        self._start_requested = th.Event()
+        if autostart:
+            self._start_requested.set()
+        self.capture_manifest_path = self.capture_dir / "capture_manifest.json"
+        self.raw_index_path = self.capture_dir / "raw_frames_index.jsonl"
+        self.raw_data_path = self.capture_dir / "raw_frames.i16"
+
+    def start_streaming(self):
+        self._start_requested.set()
+
+    def close(self):
+        self._stop_requested.set()
+        self._start_requested.set()
+
+    def _load_capture(self):
+        if not self.capture_dir.exists():
+            raise FileNotFoundError(f"Replay capture directory not found: {self.capture_dir}")
+        if not self.capture_manifest_path.exists():
+            raise FileNotFoundError(f"Replay capture manifest not found: {self.capture_manifest_path}")
+        if not self.raw_index_path.exists():
+            raise FileNotFoundError(f"Replay capture index not found: {self.raw_index_path}")
+        if not self.raw_data_path.exists():
+            raise FileNotFoundError(f"Replay capture data not found: {self.raw_data_path}")
+
+        capture_manifest = json.loads(self.capture_manifest_path.read_text(encoding="utf-8"))
+        index_records = _load_jsonl_records(self.raw_index_path)
+        if not index_records:
+            raise RuntimeError(f"No replay frames found in {self.raw_index_path}")
+        return capture_manifest, index_records
+
+    def run(self):
+        capture_manifest, index_records = self._load_capture()
+        frame_length_hint = int((capture_manifest.get("raw_capture") or {}).get("frame_length_samples") or 0)
+
+        while not self._stop_requested.is_set():
+            if not self._start_requested.wait(timeout=0.1):
+                continue
+
+            replay_started_at = time.perf_counter()
+            with self.raw_data_path.open("rb") as raw_data_file:
+                for record in index_records:
+                    if self._stop_requested.is_set():
+                        break
+
+                    capture_elapsed_s = float(record.get("capture_elapsed_s", 0.0))
+                    assembled_elapsed_s = float(record.get("assembled_elapsed_s", capture_elapsed_s))
+                    scheduled_capture_ts = replay_started_at + (capture_elapsed_s / self.playback_speed)
+                    while not self._stop_requested.is_set():
+                        remaining_s = scheduled_capture_ts - time.perf_counter()
+                        if remaining_s <= 0:
+                            break
+                        time.sleep(min(remaining_s, 0.01))
+
+                    raw_data_file.seek(int(record["byte_offset"]))
+                    payload = raw_data_file.read(int(record["byte_length"]))
+                    iq = np.frombuffer(payload, dtype=np.dtype("<i2")).astype(np.int16, copy=True)
+                    if frame_length_hint > 0 and iq.size != frame_length_hint:
+                        print(
+                            "Warning: replay frame length mismatch "
+                            f"(frame_id={record.get('frame_id')}, expected={frame_length_hint}, actual={iq.size})"
+                        )
+
+                    assembled_delta_s = max(assembled_elapsed_s - capture_elapsed_s, 0.0)
+                    frame_packet = FramePacket(
+                        frame_id=int(record.get("frame_id", 0)),
+                        capture_ts=scheduled_capture_ts,
+                        assembled_ts=scheduled_capture_ts + (assembled_delta_s / self.playback_speed),
+                        iq=iq,
+                        packets_in_frame=int(record.get("packets_in_frame", 1)),
+                        sequence_start=record.get("sequence_start"),
+                        sequence_end=record.get("sequence_end"),
+                        byte_count_start=record.get("byte_count_start"),
+                        byte_count_end=record.get("byte_count_end"),
+                        udp_gap_count=int(record.get("udp_gap_count", 0)),
+                        byte_mismatch_count=int(record.get("byte_mismatch_count", 0)),
+                        out_of_sequence_count=int(record.get("out_of_sequence_count", 0)),
+                        invalid=bool(record.get("invalid", False)),
+                        invalid_reason=str(record.get("invalid_reason", "")),
+                    )
+                    _put_latest(self.frame_queue, frame_packet)
+
+            if not self.loop:
+                break
+
+        _put_latest(self.frame_queue, None)
+
+
 class UdpListener(th.Thread):
-    def __init__(self, name, frame_queue, data_frame_length, data_address, buff_size):
+    def __init__(self, name, frame_queue, data_frame_length, data_address, buff_size, raw_capture_writer=None):
         """
         :param name: str
                         Object name
@@ -147,9 +307,24 @@ class UdpListener(th.Thread):
         self.frame_length = data_frame_length
         self.data_address = data_address
         self.socket_buffer_size = max(int(buff_size), 65536)
+        self.raw_capture_writer = raw_capture_writer
+        self._stop_requested = th.Event()
+        self._data_socket = None
         # DCA1000 packets are small; keep the per-read buffer modest and use
         # SO_RCVBUF to absorb bursts at the OS socket layer.
         self.recv_packet_size = 4096
+
+    def close(self):
+        self._stop_requested.set()
+        if self._data_socket is not None:
+            try:
+                self._data_socket.close()
+            except OSError:
+                pass
+            self._data_socket = None
+        if self.raw_capture_writer is not None:
+            self.raw_capture_writer.close()
+            self.raw_capture_writer = None
 
     def run(self):
         dt = np.dtype(np.int16).newbyteorder("<")
@@ -172,126 +347,144 @@ class UdpListener(th.Thread):
         last_payload_size = None
 
         data_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._data_socket = data_socket
         try:
-            data_socket.setsockopt(
-                socket.SOL_SOCKET,
-                socket.SO_RCVBUF,
-                self.socket_buffer_size,
-            )
-        except OSError as exc:
-            print(f"Warning: failed to apply SO_RCVBUF={self.socket_buffer_size}: {exc}")
-        data_socket.bind(self.data_address)
-        print("Create socket successfully")
-        actual_socket_buffer = data_socket.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
-        print(
-            "UDP socket receive buffer "
-            f"(requested={self.socket_buffer_size}, actual={actual_socket_buffer})"
-        )
-        print("Now start data streaming")
-
-        while True:
-            packet_bytes, addr = data_socket.recvfrom(self.recv_packet_size)
-            recv_ts = time.perf_counter()
-            if not first_packet_logged:
-                print(f"Received first UDP packet from {addr}")
-                first_packet_logged = True
-
-            sequence_id, byte_count, payload = _parse_dca1000_packet(packet_bytes)
-            if sequence_id is None:
-                continue
-
-            if current_capture_ts is None:
-                current_capture_ts = recv_ts
-                current_sequence_start = sequence_id
-                current_byte_count_start = byte_count
-
-            packet_gap_count = 0
-            packet_byte_mismatch_count = 0
-            packet_out_of_sequence_count = 0
-            packet_invalid = False
-            packet_invalid_reasons = []
-
-            if last_sequence is not None:
-                sequence_delta = sequence_id - last_sequence
-                if sequence_delta != 1:
-                    packet_out_of_sequence_count = 1
-                    if sequence_delta > 1:
-                        packet_gap_count = sequence_delta - 1
-                    packet_invalid = True
-                    packet_invalid_reasons.append("sequence")
-
-                if last_byte_count is not None and last_payload_size is not None:
-                    expected_byte_count = last_byte_count + last_payload_size
-                    if byte_count != expected_byte_count:
-                        packet_byte_mismatch_count = 1
-                        packet_invalid = True
-                        packet_invalid_reasons.append("byte_count")
-
-            if len(payload) % dt.itemsize != 0:
-                payload = payload[: len(payload) - (len(payload) % dt.itemsize)]
-                packet_invalid = True
-                packet_invalid_reasons.append("payload_alignment")
-
-            if payload:
-                sample_buffer.extend(np.frombuffer(payload, dtype=dt))
-
-            current_packet_count += 1
-            current_gap_count += packet_gap_count
-            current_byte_mismatch_count += packet_byte_mismatch_count
-            current_out_of_sequence_count += packet_out_of_sequence_count
-            current_invalid = current_invalid or packet_invalid
-            for reason in packet_invalid_reasons:
-                if reason not in current_invalid_reasons:
-                    current_invalid_reasons.append(reason)
-
-            last_sequence = sequence_id
-            last_byte_count = byte_count
-            last_payload_size = len(payload)
-
-            while len(sample_buffer) >= self.frame_length:
-                frame_count += 1
-                if frame_count == 1:
-                    print("Received first complete radar frame")
-
-                frame_packet = FramePacket(
-                    frame_id=frame_count,
-                    capture_ts=current_capture_ts if current_capture_ts is not None else recv_ts,
-                    assembled_ts=recv_ts,
-                    iq=np.asarray(sample_buffer[: self.frame_length], dtype=np.int16),
-                    packets_in_frame=max(current_packet_count, 1),
-                    sequence_start=current_sequence_start,
-                    sequence_end=sequence_id,
-                    byte_count_start=current_byte_count_start,
-                    byte_count_end=byte_count,
-                    udp_gap_count=current_gap_count,
-                    byte_mismatch_count=current_byte_mismatch_count,
-                    out_of_sequence_count=current_out_of_sequence_count,
-                    invalid=current_invalid,
-                    invalid_reason=",".join(current_invalid_reasons),
+            try:
+                data_socket.setsockopt(
+                    socket.SOL_SOCKET,
+                    socket.SO_RCVBUF,
+                    self.socket_buffer_size,
                 )
-                _put_latest(self.frame_queue, frame_packet)
-                sample_buffer = sample_buffer[self.frame_length :]
+            except OSError as exc:
+                print(f"Warning: failed to apply SO_RCVBUF={self.socket_buffer_size}: {exc}")
+            data_socket.bind(self.data_address)
+            data_socket.settimeout(0.5)
+            print("Create socket successfully")
+            actual_socket_buffer = data_socket.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+            print(
+                "UDP socket receive buffer "
+                f"(requested={self.socket_buffer_size}, actual={actual_socket_buffer})"
+            )
+            print("Now start data streaming")
 
-                if sample_buffer:
+            while not self._stop_requested.is_set():
+                try:
+                    packet_bytes, addr = data_socket.recvfrom(self.recv_packet_size)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    if self._stop_requested.is_set():
+                        break
+                    raise
+
+                recv_ts = time.perf_counter()
+                if not first_packet_logged:
+                    print(f"Received first UDP packet from {addr}")
+                    first_packet_logged = True
+
+                sequence_id, byte_count, payload = _parse_dca1000_packet(packet_bytes)
+                if sequence_id is None:
+                    continue
+
+                if current_capture_ts is None:
                     current_capture_ts = recv_ts
-                    current_packet_count = 1
-                    current_gap_count = packet_gap_count
-                    current_byte_mismatch_count = packet_byte_mismatch_count
-                    current_out_of_sequence_count = packet_out_of_sequence_count
-                    current_invalid = packet_invalid
-                    current_invalid_reasons = list(packet_invalid_reasons)
                     current_sequence_start = sequence_id
                     current_byte_count_start = byte_count
-                else:
-                    current_capture_ts = None
-                    current_packet_count = 0
-                    current_gap_count = 0
-                    current_byte_mismatch_count = 0
-                    current_out_of_sequence_count = 0
-                    current_invalid = False
-                    current_invalid_reasons = []
-                    current_sequence_start = None
-                    current_byte_count_start = None
+
+                packet_gap_count = 0
+                packet_byte_mismatch_count = 0
+                packet_out_of_sequence_count = 0
+                packet_invalid = False
+                packet_invalid_reasons = []
+
+                if last_sequence is not None:
+                    sequence_delta = sequence_id - last_sequence
+                    if sequence_delta != 1:
+                        packet_out_of_sequence_count = 1
+                        if sequence_delta > 1:
+                            packet_gap_count = sequence_delta - 1
+                        packet_invalid = True
+                        packet_invalid_reasons.append("sequence")
+
+                    if last_byte_count is not None and last_payload_size is not None:
+                        expected_byte_count = last_byte_count + last_payload_size
+                        if byte_count != expected_byte_count:
+                            packet_byte_mismatch_count = 1
+                            packet_invalid = True
+                            packet_invalid_reasons.append("byte_count")
+
+                if len(payload) % dt.itemsize != 0:
+                    payload = payload[: len(payload) - (len(payload) % dt.itemsize)]
+                    packet_invalid = True
+                    packet_invalid_reasons.append("payload_alignment")
+
+                if payload:
+                    sample_buffer.extend(np.frombuffer(payload, dtype=dt))
+
+                current_packet_count += 1
+                current_gap_count += packet_gap_count
+                current_byte_mismatch_count += packet_byte_mismatch_count
+                current_out_of_sequence_count += packet_out_of_sequence_count
+                current_invalid = current_invalid or packet_invalid
+                for reason in packet_invalid_reasons:
+                    if reason not in current_invalid_reasons:
+                        current_invalid_reasons.append(reason)
+
+                last_sequence = sequence_id
+                last_byte_count = byte_count
+                last_payload_size = len(payload)
+
+                while len(sample_buffer) >= self.frame_length:
+                    frame_count += 1
+                    if frame_count == 1:
+                        print("Received first complete radar frame")
+
+                    frame_packet = FramePacket(
+                        frame_id=frame_count,
+                        capture_ts=current_capture_ts if current_capture_ts is not None else recv_ts,
+                        assembled_ts=recv_ts,
+                        iq=np.asarray(sample_buffer[: self.frame_length], dtype=np.int16),
+                        packets_in_frame=max(current_packet_count, 1),
+                        sequence_start=current_sequence_start,
+                        sequence_end=sequence_id,
+                        byte_count_start=current_byte_count_start,
+                        byte_count_end=byte_count,
+                        udp_gap_count=current_gap_count,
+                        byte_mismatch_count=current_byte_mismatch_count,
+                        out_of_sequence_count=current_out_of_sequence_count,
+                        invalid=current_invalid,
+                        invalid_reason=",".join(current_invalid_reasons),
+                    )
+                    if self.raw_capture_writer is not None:
+                        self.raw_capture_writer.write_frame(frame_packet)
+                    _put_latest(self.frame_queue, frame_packet)
+                    sample_buffer = sample_buffer[self.frame_length :]
+
+                    if sample_buffer:
+                        current_capture_ts = recv_ts
+                        current_packet_count = 1
+                        current_gap_count = packet_gap_count
+                        current_byte_mismatch_count = packet_byte_mismatch_count
+                        current_out_of_sequence_count = packet_out_of_sequence_count
+                        current_invalid = packet_invalid
+                        current_invalid_reasons = list(packet_invalid_reasons)
+                        current_sequence_start = sequence_id
+                        current_byte_count_start = byte_count
+                    else:
+                        current_capture_ts = None
+                        current_packet_count = 0
+                        current_gap_count = 0
+                        current_byte_mismatch_count = 0
+                        current_out_of_sequence_count = 0
+                        current_invalid = False
+                        current_invalid_reasons = []
+                        current_sequence_start = None
+                        current_byte_count_start = None
+        finally:
+            self._data_socket = None
+            if self.raw_capture_writer is not None:
+                self.raw_capture_writer.close()
+                self.raw_capture_writer = None
 
 
 class DataProcessor(th.Thread):
@@ -345,6 +538,9 @@ class DataProcessor(th.Thread):
         self.write_processed_frames = bool(write_processed_frames)
         self.include_payloads = bool(include_payloads)
         self.capture_stage_timing = bool(capture_stage_timing)
+
+    def close(self):
+        _put_latest(self.raw_frame_queue, None)
 
     def select_tracker_input(self, frame_packet, detections):
         policy_name = "full"
@@ -444,6 +640,8 @@ class DataProcessor(th.Thread):
         frame_count = 0
         while True:
             raw_frame = self.raw_frame_queue.get()
+            if raw_frame is None:
+                break
             loop_started = time.perf_counter()
             stage_timings_ms = {}
 
@@ -515,6 +713,8 @@ class DataProcessor(th.Thread):
                 tracker_detections,
                 frame_ts=raw_frame.capture_ts,
                 allow_track_birth=allow_track_birth,
+                rai_map=rai,
+                runtime_config=self.runtime_config,
             )
             stage_timings_ms["track_ms"] = (time.perf_counter() - stage_started) * 1000.0
             processed_ts = time.perf_counter()

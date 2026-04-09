@@ -7,11 +7,16 @@ from pathlib import Path
 
 METRICS = [
     ("assessment.overall.score", "Operational score", "higher"),
+    ("performance.scoring.overall_score_100", "Performance score", "higher"),
     ("performance.throughput.render_vs_expected_ratio", "Render FPS vs target", "higher"),
     ("performance.compute.compute_utilization_p95_ratio", "Compute utilization p95", "lower"),
     ("performance.jitter.render_latency_jitter_ms", "Render jitter", "lower"),
     ("performance.continuity.candidate_to_confirmed_ratio", "Candidate/confirmed ratio", "lower"),
     ("performance.continuity.lead_confirmed.switch_count", "Lead confirmed switch", "lower"),
+    ("performance.geometry.reference.path_cleanliness_score_100", "Path cleanliness score", "higher"),
+    ("performance.geometry.reference.max_gap_frames", "Path max gap frames", "lower"),
+    ("performance.geometry.reference.local_residual_rms_m", "Path local residual RMS", "lower"),
+    ("performance.geometry.reference.jump_ratio", "Path jump ratio", "lower"),
     ("processed.invalid_rate", "Processed invalid rate", "lower"),
     ("render.invalid_rate", "Render invalid rate", "lower"),
     ("processed.capture_to_process_ms.mean", "Processed latency mean", "lower"),
@@ -21,6 +26,7 @@ METRICS = [
     ("render.capture_to_render_ms.mean", "Render latency mean", "lower"),
     ("render.capture_to_render_ms.p95", "Render latency p95", "lower"),
     ("render.display_track_count.mean", "Display track mean", "higher"),
+    ("render.display_held_track_count.mean", "Held display mean", "lower"),
     ("render.multi_display_success_rate", "Render multi-target success", "higher"),
     ("render.skipped_render_frames.mean_per_render", "Skipped frames per render", "lower"),
 ]

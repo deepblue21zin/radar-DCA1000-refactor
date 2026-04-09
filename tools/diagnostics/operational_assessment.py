@@ -137,9 +137,37 @@ def _top_reason(reason_counts: dict):
     return top_reason[0], int(top_reason[1])
 
 
+def _assessment_mode(summary: dict):
+    runtime_config = summary.get("runtime_config") or {}
+    tuning_snapshot = runtime_config.get("tuning_snapshot") or {}
+    detection_snapshot = tuning_snapshot.get("detection") or {}
+    max_targets = detection_snapshot.get("max_targets")
+    scenario_id = str((summary.get("session_meta") or {}).get("scenario_id") or "").strip().lower()
+
+    single_hints = ("single", "one-person", "one_person", "circle", "원형", "단일")
+    if max_targets == 1 or any(hint in scenario_id for hint in single_hints):
+        return {
+            "key": "single_person",
+            "label": "단일 인원 continuity 평가",
+            "description": "멀티타깃 가시성보다 한 사람을 하나의 ID로 유지하는 continuity를 더 강하게 봅니다.",
+        }
+
+    return {
+        "key": "multi_target",
+        "label": "멀티타깃 가시성 평가",
+        "description": "여러 타깃이 동시에 있을 때 내부 추적과 화면 표시가 얼마나 잘 유지되는지 봅니다.",
+    }
+
+
 def build_operational_assessment(summary: dict, event_summary: dict):
     processed = summary.get("processed", {})
     render = summary.get("render", {})
+    performance = summary.get("performance", {})
+    continuity = performance.get("continuity", {}) or {}
+    lead_confirmed = continuity.get("lead_confirmed") or {}
+    candidate_to_confirmed_ratio = continuity.get("candidate_to_confirmed_ratio")
+    lead_confirmed_switch_rate = lead_confirmed.get("switch_rate")
+    evaluation_mode = _assessment_mode(summary)
 
     render_p95 = render.get("capture_to_render_ms", {}).get("p95")
     render_mean = render.get("capture_to_render_ms", {}).get("mean")
@@ -165,11 +193,20 @@ def build_operational_assessment(summary: dict, event_summary: dict):
         + _score_lower(birth_block_rate, [(0.001, 8), (0.005, 7), (0.02, 6), (0.05, 4), (0.10, 2)])
         + _score_lower(skipped_mean, [(0.0, 6), (0.05, 4), (0.2, 2)])
     )
-    visibility_score = (
-        _score_higher(processed_multi_success, [(0.9, 6), (0.75, 5), (0.5, 3), (0.25, 1)])
-        + _score_higher(render_multi_success, [(0.7, 8), (0.5, 6), (0.35, 4), (0.2, 2), (0.05, 1)])
-        + _score_higher(display_to_confirmed_ratio, [(0.85, 6), (0.65, 5), (0.5, 4), (0.35, 2), (0.15, 1)])
-    )
+    if evaluation_mode["key"] == "single_person":
+        visibility_label = "단일 인원 continuity"
+        visibility_score = (
+            _score_lower(candidate_to_confirmed_ratio, [(1.2, 6), (1.5, 5), (2.0, 3), (3.0, 1)])
+            + _score_higher(display_to_confirmed_ratio, [(0.85, 6), (0.7, 5), (0.5, 4), (0.35, 2), (0.15, 1)])
+            + _score_lower(lead_confirmed_switch_rate, [(0.02, 8), (0.05, 7), (0.10, 5), (0.18, 3), (0.30, 1)])
+        )
+    else:
+        visibility_label = "표시/추적 가시성"
+        visibility_score = (
+            _score_higher(processed_multi_success, [(0.9, 6), (0.75, 5), (0.5, 3), (0.25, 1)])
+            + _score_higher(render_multi_success, [(0.7, 8), (0.5, 6), (0.35, 4), (0.2, 2), (0.05, 1)])
+            + _score_higher(display_to_confirmed_ratio, [(0.85, 6), (0.65, 5), (0.5, 4), (0.35, 2), (0.15, 1)])
+        )
     readiness_score = (
         _score_lower(first_render_elapsed_s, [(0.5, 4), (1.0, 3), (2.0, 2)])
         + (4 if not event_summary.get("session_error") else 0)
@@ -208,13 +245,15 @@ def build_operational_assessment(summary: dict, event_summary: dict):
             },
         },
         "visibility": {
-            "label": "표시/추적 가시성",
+            "label": visibility_label,
             "score": visibility_score,
             "max_score": 20,
             "metrics": {
                 "processed_multi_success_rate": processed_multi_success,
                 "render_multi_success_rate": render_multi_success,
                 "display_to_confirmed_ratio": round_or_none(display_to_confirmed_ratio, digits=3),
+                "candidate_to_confirmed_ratio": round_or_none(candidate_to_confirmed_ratio, digits=3),
+                "lead_confirmed_switch_rate": round_or_none(lead_confirmed_switch_rate, digits=3),
             },
         },
         "readiness": {
@@ -259,6 +298,15 @@ def build_operational_assessment(summary: dict, event_summary: dict):
         strengths.append(
             f"내부 추적 단계의 다중 타깃 유지율이 {processed_multi_success * 100:.1f}%로 높습니다."
         )
+    if evaluation_mode["key"] == "single_person":
+        if lead_confirmed_switch_rate is not None and lead_confirmed_switch_rate <= 0.05:
+            strengths.append(
+                f"단일 인원 continuity 기준으로 lead confirmed switch rate가 {lead_confirmed_switch_rate * 100:.1f}%로 낮습니다."
+            )
+        if candidate_to_confirmed_ratio is not None and candidate_to_confirmed_ratio <= 1.3:
+            strengths.append(
+                f"한 사람 기준 detection 분해가 크지 않아 candidate/confirmed 비율이 {candidate_to_confirmed_ratio:.2f}입니다."
+            )
     if not event_summary.get("session_error"):
         strengths.append("세션이 치명적 예외 없이 종료되었습니다.")
 
@@ -295,7 +343,8 @@ def build_operational_assessment(summary: dict, event_summary: dict):
         )
 
     if (
-        processed_multi_success is not None
+        evaluation_mode["key"] == "multi_target"
+        and processed_multi_success is not None
         and render_multi_success is not None
         and processed_multi_success >= 0.7
         and render_multi_success <= 0.25
@@ -311,8 +360,38 @@ def build_operational_assessment(summary: dict, event_summary: dict):
             }
         )
         recommendations.append(
-            "display threshold와 report miss tolerance를 다시 조정해 화면에서 사라지는 트랙을 줄이세요."
+            "display threshold, report miss tolerance, display hysteresis 개입량을 함께 확인해 화면에서 사라지는 트랙을 줄이세요."
         )
+
+    if evaluation_mode["key"] == "single_person":
+        if candidate_to_confirmed_ratio is not None and candidate_to_confirmed_ratio >= 1.5:
+            issues.append(
+                {
+                    "severity": "medium",
+                    "title": "단일 인원 기준 detection 후보가 아직 다소 분해됩니다.",
+                    "detail": (
+                        f"candidate/confirmed 비율이 {candidate_to_confirmed_ratio:.2f}로, "
+                        "한 사람을 여러 candidate로 나눠 보고 있을 가능성이 있습니다."
+                    ),
+                }
+            )
+            recommendations.append(
+                "body-center representative point를 더 강하게 만들고, detection 단계의 local patch merge를 보강하세요."
+            )
+        if lead_confirmed_switch_rate is not None and lead_confirmed_switch_rate >= 0.10:
+            issues.append(
+                {
+                    "severity": "medium",
+                    "title": "단일 인원 continuity가 아직 충분히 안정적이지 않습니다.",
+                    "detail": (
+                        f"lead confirmed switch rate가 {lead_confirmed_switch_rate * 100:.1f}%입니다. "
+                        "원운동이나 방향 전환에서 ID continuity가 깨질 가능성이 있습니다."
+                    ),
+                }
+            )
+            recommendations.append(
+                "track-conditioned local remeasurement 설정과 primary/non-primary 정리 정책을 raw replay 기준으로 다시 튜닝하세요."
+            )
 
     if event_summary.get("opengl_unavailable"):
         issues.append(
@@ -340,12 +419,14 @@ def build_operational_assessment(summary: dict, event_summary: dict):
 
     overall_summary = (
         f"{grade['label']} 수준입니다. "
+        f"평가 모드는 {evaluation_mode['label']}이며, "
         f"지연 점수 {latency_score}/35, 무결성 {integrity_score}/30, "
         f"표시/추적 {visibility_score}/20, 운영 준비도 {readiness_score}/15입니다."
     )
 
     return {
         "rubric_version": 1,
+        "evaluation_mode": evaluation_mode,
         "overall": {
             "score": total_score,
             "max_score": 100,
@@ -360,6 +441,8 @@ def build_operational_assessment(summary: dict, event_summary: dict):
         "recommendations": recommendations,
         "derived_metrics": {
             "display_to_confirmed_ratio": round_or_none(display_to_confirmed_ratio, digits=3),
+            "candidate_to_confirmed_ratio": round_or_none(candidate_to_confirmed_ratio, digits=3),
+            "lead_confirmed_switch_rate": round_or_none(lead_confirmed_switch_rate, digits=3),
             "processed_top_invalid_reason": processed_top_reason,
             "render_top_invalid_reason": render_top_reason,
         },

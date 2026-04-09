@@ -15,11 +15,11 @@ CODE_DIR = PROJECT_DIR / "code"
 REQ_DIR = DOCS_DIR / "REQ"
 
 CURRENT_STATE = {
-    "score_overall": "76/100",
+    "score_overall": "75/100",
     "score_structure": "83/100",
     "score_logging": "94/100",
-    "code_files": 18,
-    "log_artifacts": 10,
+    "code_files": 19,
+    "log_artifacts": 13,
 }
 
 
@@ -30,15 +30,15 @@ FILES = [
         "title": "live_motion_viewer.py",
         "category": "UI / Orchestration",
         "stages": ["Settings", "Control", "UI", "Logging"],
-        "summary": "실시간 데모를 실제로 구동하는 메인 앱이다. 장비 연결, 워커 시작, PyQt 창 구성, 최신 프레임 렌더, SessionLogger 연계를 한 곳에서 조율한다.",
-        "why": "이 프로젝트를 실행하면 가장 먼저 통과하는 진입점이다. 지금도 가장 많은 책임이 모여 있지만, 최근에는 SessionLogger와 stage timing 연계까지 포함해 운영 허브 역할이 더 분명해졌다.",
-        "mentor": "초보자가 볼 때는 화면 파일 같지만 실제로는 앱 컨트롤러에 가깝다. 장비 제어, 워커 연결, 최신 프레임 선택, render 로그 기록, 종료 시 HTML 리포트 트리거까지 모두 이 파일에서 시작한다.",
+        "summary": "실시간 데모를 실제로 구동하는 메인 앱이다. 장비 연결 또는 raw replay 입력 선택, 워커 시작, PyQt 창 구성, 최신 프레임 렌더, SessionLogger 연계를 한 곳에서 조율하고, 최근에는 좌우 축 반전과 raw capture 저장, replay x/y trajectory preview도 런타임에 반영한다.",
+        "why": "이 프로젝트를 실행하면 가장 먼저 통과하는 진입점이다. 지금도 가장 많은 책임이 모여 있지만, 최근에는 live와 replay 입력을 공통 UI/공통 파이프라인으로 묶는 허브 역할까지 맡게 됐다.",
+        "mentor": "초보자가 볼 때는 화면 파일 같지만 실제로는 앱 컨트롤러에 가깝다. live 입력일 때는 장비를 열고 raw를 logs/raw에 저장하고, replay 입력일 때는 저장된 raw capture를 같은 UI로 다시 태우되, 결과는 x/y trajectory preview로 먼저 보여 준다.",
         "before": "runtime_settings.py, radar_config.py",
         "after": "real_time_process.py, app_layout.py",
         "inputs": "런타임 설정, DCA 제어 명령, 처리 큐의 FramePacket, UI 이벤트",
-        "outputs": "렌더링된 화면, render_frames.jsonl, event_log.jsonl, runtime_config.json, 세션 종료 후 HTML 리포트",
-        "debug": "최신 프레임만 소비하는 구조라 render 큐 스킵, OpenGL fallback, stage_timings_ms 전달 여부를 먼저 본다.",
-        "ops": "현업에서는 AppController, SessionLogger, ViewRenderer로 더 나누는 편이 안전하지만, 현재도 세션 기록 책임 일부는 SessionLogger로 빠져 이전보다 낫다.",
+        "outputs": "렌더링된 화면, render_frames.jsonl, event_log.jsonl, runtime_config.json, live일 때 logs/raw raw capture, 세션 종료 후 HTML 리포트",
+        "debug": "최신 프레임만 소비하는 구조라 render 큐 스킵, OpenGL fallback, stage_timings_ms 전달 여부, input_mode에 따라 실제 collector가 live인지 replay인지 먼저 본다.",
+        "ops": "현업에서는 AppController, SessionLogger, ViewRenderer, ReplayRunner로 더 나누는 편이 안전하지만, 현재도 live와 replay를 같은 FramePacket 파이프라인으로 유지하게 되어 회귀 검증 기반이 생겼다.",
         "read_order": [
             "앱 시작 시 어떤 객체를 만들고 어떤 워커를 붙이는지 본다.",
             "__init__와 start_workers를 읽어 설정, tracker, 처리 스레드 wiring을 이해한다.",
@@ -64,20 +64,52 @@ FILES = [
         "related": ["real_time_process", "app_layout", "runtime_settings", "session_logging"],
     },
     {
+        "slug": "live_motion_replay",
+        "source": "real-time/live_motion_replay.py",
+        "title": "live_motion_replay.py",
+        "category": "Replay / UI",
+        "stages": ["Replay", "UI", "Logging"],
+        "summary": "저장된 logs/raw 캡처를 live viewer와 같은 PyQt UI로 다시 재생하고, replay 중에는 x/y trajectory preview를 크게 보여 주며, 종료 후 trajectory_replay.html까지 바로 열어 주는 replay 진입점이다.",
+        "why": "같은 raw 입력으로 알고리즘 전후를 공정하게 비교하려면, rosbag처럼 raw capture를 다시 태우는 경로가 필요하기 때문이다.",
+        "mentor": "이 파일은 새 처리기를 만드는 것이 아니라 기존 MotionViewer를 replay 모드로 여는 얇은 진입점이다. 즉 UI는 같고 입력만 live UDP에서 raw capture로 바뀌며, replay 창에서는 x/y trajectory를 먼저 보여 주고 끝나면 시간축 trajectory report까지 바로 확인하게 해 준다.",
+        "before": "logs/raw/<session_id>, runtime_settings.py",
+        "after": "live_motion_viewer.py",
+        "inputs": "capture 디렉터리 경로, replay 속도, loop 여부",
+        "outputs": "replay UI 세션, replay render/processed 로그, x/y trajectory preview, trajectory_replay.html 자동 오픈",
+        "debug": "capture 경로 해석, shorthand 세션 id 지원, source_capture 설정 fallback, replay 창이 heatmap 대신 x/y trajectory를 그리는지, 종료 후 inline report가 실제로 생성되고 trajectory_replay.html이 열리는지 먼저 본다.",
+        "ops": "현업에서는 live와 replay를 별도 앱으로 완전히 갈라놓기보다, 공통 pipeline을 유지한 채 입력 소스만 바꾸는 쪽이 회귀 검증 신뢰도가 높다.",
+        "read_order": [
+            "parse_args로 어떤 replay 옵션을 받는지 본다.",
+            "resolve_capture_path가 절대 경로와 logs/raw shorthand를 어떻게 풀어 주는지 확인한다.",
+            "main에서 MotionViewer를 replay 모드로 어떻게 호출하는지 본다.",
+        ],
+        "roles": [
+            ("replay 진입점", "저장된 raw capture를 같은 UI로 재생하고 x/y trajectory preview와 trajectory replay report까지 이어 준다."),
+            ("경로 해석", "세션 id shorthand와 절대/상대 경로를 캡처 디렉터리로 바꾼다."),
+            ("회귀 검증", "같은 입력으로 알고리즘 전후를 비교할 기반을 만든다."),
+        ],
+        "landmarks": [
+            ("parse_args", r"^def parse_args", "capture 경로와 replay 옵션을 파싱한다."),
+            ("resolve_capture_path", r"^def resolve_capture_path", "logs/raw 세션 경로를 찾는다."),
+            ("main", r"^def main", "MotionViewer를 replay 모드로 실행한다."),
+        ],
+        "related": ["live_motion_viewer", "real_time_process", "runtime_settings", "session_logging"],
+    },
+    {
         "slug": "real_time_process",
         "source": "tools/runtime_core/real_time_process.py",
         "title": "real_time_process.py",
         "category": "Capture / Processing",
         "stages": ["Capture", "DSP", "Detection", "Tracking", "Logging"],
-        "summary": "UDP 패킷을 프레임으로 조립하고 DSP, detection, tracking까지 이어 붙이는 실시간 처리 파이프라인이다. 최근에는 stage timing과 shared FFT 기반 최적화가 함께 들어갔다.",
+        "summary": "UDP 패킷을 프레임으로 조립하고 DSP, detection, tracking까지 이어 붙이는 실시간 처리 파이프라인이다. 최근에는 raw frame capture 저장기와 raw replay source까지 같은 FramePacket 계약 위에 추가됐다.",
         "why": "invalid rate, latency, track 품질, stage별 병목이 모두 여기에 직접 연결된다.",
-        "mentor": "프로젝트의 심장이라고 보면 된다. 입력은 raw packet이고 출력은 FramePacket이며, 그 안에 health, detection, tracking 결과와 stage timing이 함께 들어간다.",
+        "mentor": "프로젝트의 심장이라고 보면 된다. live에서는 raw packet을 FramePacket으로 만들고 raw capture로도 남기며, replay에서는 저장된 raw frame을 다시 같은 FramePacket으로 복원한다.",
         "before": "radar_runtime.py, detection.py, tracking.py",
         "after": "live_motion_viewer.py",
         "inputs": "DCA1000 UDP payload, runtime config, tracker 파라미터",
-        "outputs": "FramePacket, processed_frames.jsonl, 처리 큐",
-        "debug": "packet health, capture_to_process_ms, shared_fft2_ms, detect_ms, candidate와 confirmed track 사이 손실을 함께 본다.",
-        "ops": "assembly, DSP, detection, tracking이 아직 한 hot path에 직렬로 묶여 있어서, 계측을 본 뒤 단계별 경량화를 계속하는 것이 맞다.",
+        "outputs": "FramePacket, processed_frames.jsonl, logs/raw raw_frames.i16 + raw_frames_index.jsonl, 처리 큐",
+        "debug": "packet health, capture_to_process_ms, shared_fft2_ms, detect_ms, candidate와 confirmed track 사이 손실뿐 아니라 raw capture 기록과 replay 복원 길이가 일치하는지도 함께 본다.",
+        "ops": "assembly, DSP, detection, tracking이 아직 한 hot path에 직렬로 묶여 있지만, 이제는 raw replay로 같은 입력을 반복 검증할 수 있어 최적화 회귀를 더 공정하게 측정할 수 있다.",
         "read_order": [
             "FramePacket 구조를 먼저 읽고 어떤 데이터가 흘러가는지 본다.",
             "UdpListener가 패킷을 어떻게 모으는지 본다.",
@@ -106,7 +138,7 @@ FILES = [
         "title": "radar_runtime.py",
         "category": "DSP / Geometry",
         "stages": ["Settings", "DSP", "Detection"],
-        "summary": "raw IQ를 radar cube와 시각화용 맵으로 바꾸는 수학 계층이다. 축 정의, clutter 제거, ROI 적용, 벡터화된 shape 변환을 담당한다.",
+        "summary": "raw IQ를 radar cube와 시각화용 맵으로 바꾸는 수학 계층이다. 축 정의, clutter 제거, ROI 적용, 벡터화된 shape 변환을 담당하고, 최근에는 장착 방향 차이를 lateral axis sign으로 흡수한다.",
         "why": "여기서 shape와 axis가 틀리면 뒤 단계가 모두 어긋나고, 여기서 copy가 많으면 DSP 전체가 느려진다.",
         "mentor": "이 파일은 파이프라인의 공통 언어를 만든다. detection과 tracking은 이 파일이 만든 좌표계와 배열 구조를 믿고 움직이며, 최근에는 reshape와 motion collapse도 더 가볍게 정리됐다.",
         "before": "runtime_settings.py, DSP.py",
@@ -143,15 +175,15 @@ FILES = [
         "title": "detection.py",
         "category": "Detection",
         "stages": ["Detection"],
-        "summary": "RDI와 RAI에서 실제 타깃 후보를 고르는 검출 계층이다. CFAR, angle ROI, clustering 결과가 여기서 합쳐지며, 최근에는 seed 주변 range-angle local patch centroid를 도입해 strong reflection 후보를 body-center 쪽으로 다시 보정하기 시작했다.",
+        "summary": "RDI와 RAI에서 실제 타깃 후보를 고르는 검출 계층이다. CFAR, angle ROI, clustering 결과가 여기서 합쳐지며, 최근에는 coarse candidate를 먼저 줄인 뒤 seed 주변 range-angle local patch centroid를 survivor에만 적용해 strong reflection 후보를 body-center 쪽으로 다시 보정하기 시작했다.",
         "why": "tracker가 아무리 좋아도 detection이 한 사람을 여러 후보로 나누면 전체 성능이 무너진다.",
-        "mentor": "화면의 점이 왜 여기 찍혔는지 알고 싶을 때 가장 먼저 봐야 하는 파일이다. 지금 DetectionCandidate는 예전처럼 단순 strongest peak 결과는 아니고, seed 주변 local patch에서 connected blob centroid까지 계산한 대표점이다. 그래도 아직 track-conditioned local update까지 가진 완전한 body-center measurement는 아니다.",
+        "mentor": "화면의 점이 왜 여기 찍혔는지 알고 싶을 때 가장 먼저 봐야 하는 파일이다. 지금 DetectionCandidate는 예전처럼 단순 strongest peak 결과는 아니고, coarse candidate를 먼저 줄인 뒤 seed 주변 local patch에서 connected blob centroid까지 계산한 대표점이다. 이후 tracking.py의 track-conditioned local remeasurement가 이 대표점을 한 번 더 시간축 기준으로 보정한다.",
         "before": "radar_runtime.py, dbscan_cluster.py",
         "after": "tracking.py, live_motion_viewer.py",
         "inputs": "RDI magnitude, RAI magnitude, ROI 설정, clustering 결과",
         "outputs": "DetectionCandidate 리스트",
         "debug": "CFAR threshold, angle ROI, cluster 기준, adaptive band의 min_samples override가 과도하지 않은지 함께 본다.",
-        "ops": "최근 첫 단계로 local patch body-center refinement가 들어갔고, 다음 중요한 단계는 이것을 기존 track 예측 위치와 연결된 track-conditioned local measurement까지 확장하는 것이다.",
+        "ops": "최근에는 coarse pre-merge를 body-center refinement 앞단으로 옮겨 survivor에만 비싼 계산을 하도록 바뀌었고, 이어서 tracking.py에서 기존 track 예측 위치와 연결된 track-conditioned local measurement의 1차 구현도 들어갔다.",
         "read_order": [
             "DetectionRegion과 DetectionCandidate를 먼저 본다.",
             "cfar_threshold_2d로 픽셀 수준 gating을 이해한다.",
@@ -209,31 +241,32 @@ FILES = [
         "title": "tracking.py",
         "category": "Tracking",
         "stages": ["Tracking"],
-        "summary": "프레임 간 detection을 이어 붙여 일관된 track ID를 유지하는 다중 타깃 tracker다. 최근에는 대표 track 유지, 근접 birth 억제, lateral smoothing 정책이 들어가 궤적 안정화 역할이 더 커졌고, detection도 local patch refinement로 좋아졌지만 원운동에서는 여전히 multi-ID split이 남는다.",
+        "summary": "프레임 간 detection을 이어 붙여 일관된 track ID를 유지하는 다중 타깃 tracker다. 최근에는 대표 track 유지, 근접 birth 억제, lateral smoothing에 더해 track-conditioned local RAI remeasurement까지 들어가 궤적 안정화 역할이 더 커졌다.",
         "why": "사용자 입장에서 중요한 것은 같은 사람이 같은 ID로 유지되는가, 그리고 좌우로 덜 튀는가이다. 현재 현업형 핵심 문제도 바로 이 continuity다.",
-        "mentor": "이 파일은 단순히 점을 따라가는 것이 아니라, 어떤 가설을 유지하고 버리고 확정할지 결정하는 정책 묶음이다. 최근에는 대표 track을 더 오래 유지하고 근처 새 ID 생성을 억제하는 안정화 계층으로도 작동하지만, detection이 local patch centroid로 좋아진 현재도 아직 body-center를 직접 재측정하는 구조는 아니다.",
+        "mentor": "이 파일은 단순히 점을 따라가는 것이 아니라, 어떤 가설을 유지하고 버리고 확정할지 결정하는 정책 묶음이다. 최근에는 대표 track을 더 오래 유지하고 근처 새 ID 생성을 억제하는 안정화 계층으로도 작동하며, 매칭된 track 주변 RAI patch를 다시 읽어 measurement를 완만하게 보정하는 1차 local remeasurement도 맡는다.",
         "before": "detection.py",
         "after": "live_motion_viewer.py, session_report.py",
         "inputs": "DetectionCandidate 리스트, gating과 aging 파라미터",
         "outputs": "confirmed track, tentative track, lifecycle 상태",
         "debug": "track birth가 늦지 않은지, ID switch가 잦지 않은지, association이 깨지지 않는지, primary track이 과도하게 바뀌지 않는지, non-primary가 너무 오래 살아남지 않는지 본다.",
-        "ops": "로그가 좋아진 지금은 이 파일의 파라미터 변화 영향을 수치로 보기 쉬워졌지만, 장기적으로는 global detection을 그대로 잇는 구조에서 벗어나 track-conditioned local measurement를 추가하는 것이 더 중요하다.",
+        "ops": "로그가 좋아진 지금은 이 파일의 파라미터 변화 영향을 수치로 보기 쉬워졌다. 이제 track-conditioned local measurement의 1차 구현이 들어갔으므로 raw replay 기준으로 Path Cleanliness, Local Residual RMS, lead switch를 함께 검증해야 한다.",
         "read_order": [
             "TrackState와 TrackEstimate로 상태 구조를 본다.",
             "MultiTargetTracker가 내부 리스트를 어떻게 유지하는지 확인한다.",
-            "_measurement_covariance와 _stabilize_lateral_state를 읽어 왜 x 축을 덜 믿는지 이해한다.",
+            "_measurement_covariance, _stabilize_lateral_state, _refine_measurement_near_track를 읽어 왜 x 축과 representative point를 보정하는지 이해한다.",
             "_associate와 update를 읽어 실제 추적 정책과 birth suppression 흐름을 이해한다.",
         ],
         "roles": [
             ("상태 유지", "각 detection이 시간축에서 어떤 사람인지 연결한다."),
             ("확정 정책", "tentative를 confirmed로 올릴지, 오래된 track을 지울지 결정한다."),
             ("다중 타깃 정합", "가까운 후보가 여러 개일 때 어떤 detection을 어떤 track에 잇는지 계산한다."),
-            ("궤적 안정화", "대표 track 유지, 근접 birth 억제, lateral smoothing으로 지그재그를 줄인다."),
+            ("궤적 안정화", "대표 track 유지, 근접 birth 억제, lateral smoothing, local remeasurement로 지그재그를 줄인다."),
         ],
         "landmarks": [
             ("TrackState", r"^class TrackState", "트랙 상태 열거형이다."),
             ("TrackEstimate", r"^class TrackEstimate", "개별 track 추정치 구조다."),
             ("MultiTargetTracker", r"^class MultiTargetTracker", "tracker 메인 클래스다."),
+            ("_refine_measurement_near_track", r"^\s*def _refine_measurement_near_track", "매칭된 track 주변 RAI patch로 measurement를 한 번 더 보정한다."),
             ("_associate", r"^\s*def _associate", "detection과 track 매칭 단계다."),
             ("update", r"^\s*def update", "프레임 단위 tracker 갱신 함수다."),
         ],
@@ -245,9 +278,9 @@ FILES = [
         "title": "runtime_settings.py",
         "category": "Configuration",
         "stages": ["Settings", "Logging"],
-        "summary": "프로젝트 전반에서 공통으로 쓰는 런타임 설정을 로드하고 병합하는 설정 계층이다.",
+        "summary": "프로젝트 전반에서 공통으로 쓰는 런타임 설정을 로드하고 병합하는 설정 계층이다. 최근에는 좌우 축 반전 같은 좌표 해석 설정뿐 아니라 raw capture 저장과 replay source 경로도 runtime logging 설정으로 함께 받는다.",
         "why": "환경이 달라도 코드 수정 없이 값을 바꾸게 해 주는 중심점이다.",
-        "mentor": "실험을 반복할수록 설정 파일 품질이 중요해진다. ROI, tracker뿐 아니라 logging on/off, payload 포함 여부, system snapshot 수집 여부까지 설정에서 제어하게 된 점이 현업적으로 좋고, 최근에는 single-person 디버그 모드처럼 max_targets와 clustering 강도를 빠르게 바꿔 볼 수 있다는 점도 중요해졌다.",
+        "mentor": "실험을 반복할수록 설정 파일 품질이 중요해진다. ROI, tracker뿐 아니라 logging on/off, payload 포함 여부, system snapshot 수집 여부, raw capture 저장 여부와 raw root까지 설정에서 제어하게 된 점이 현업적으로 중요하다.",
         "before": "외부 runtime_settings.json",
         "after": "live_motion_viewer.py, radar_runtime.py, real_time_process.py",
         "inputs": "기본값 dict, 사용자 JSON override",
@@ -479,15 +512,15 @@ FILES = [
         "title": "session_logging.py",
         "category": "Logging / Orchestration",
         "stages": ["Logging", "Reports"],
-        "summary": "세션 폴더 생성, 메타데이터 기록, event/render 로그 파일 핸들 관리, 종료 시 HTML 리포트 생성을 맡는 로깅 허브다.",
-        "why": "live_motion_viewer.py에서 세션 준비와 종료 보고를 분리해 운영 책임 경계를 만든 핵심 파일이다.",
-        "mentor": "예전에는 앱 파일이 로그 준비까지 거의 다 들고 있었다. 지금은 SessionLogger가 세션 폴더 구조와 system snapshot, report generation을 묶어 주는 전용 계층이 됐다.",
+        "summary": "세션 폴더 생성, 메타데이터 기록, raw capture manifest, event/render 로그 파일 핸들 관리, 종료 시 HTML 리포트 생성을 맡는 로깅 허브다.",
+        "why": "live_motion_viewer.py에서 세션 준비와 종료 보고를 분리해 운영 책임 경계를 만든 핵심 파일이고, 최근에는 logs/raw 캡처 세션과 live 세션을 연결하는 역할도 맡는다.",
+        "mentor": "예전에는 앱 파일이 로그 준비까지 거의 다 들고 있었다. 지금은 SessionLogger가 세션 폴더 구조와 system snapshot, raw capture manifest, report generation을 묶어 주는 전용 계층이 됐다.",
         "before": "live_motion_viewer.py, runtime_settings.py",
-        "after": "session_meta.json, event_log.jsonl, render_frames.jsonl, summary.json, ops_report.html, performance_report.html",
+        "after": "session_meta.json, event_log.jsonl, render_frames.jsonl, summary.json, ops_report.html, performance_report.html, trajectory_replay.html",
         "inputs": "세션 메타데이터, runtime summary, logging 토글",
-        "outputs": "세션 디렉터리와 로그/리포트 파일",
-        "debug": "enabled 토글, 파일 핸들 생명주기, system snapshot 수집 실패 시 degrade gracefully 되는지 확인한다.",
-        "ops": "세션 경계가 파일 단위로 명확해지면 현장 장애 대응과 로그 보존 정책을 다루기 쉬워진다.",
+        "outputs": "세션 디렉터리와 로그/리포트 파일, logs/raw 캡처 디렉터리와 capture_manifest.json",
+        "debug": "enabled 토글, raw capture 토글, 파일 핸들 생명주기, system snapshot 수집 실패 시 degrade gracefully 되는지 확인한다.",
+        "ops": "세션 경계가 파일 단위로 명확해지면 현장 장애 대응과 로그 보존 정책을 다루기 쉬워지고, raw capture 세션이 별도 폴더로 남아 replay 회귀 실험을 꾸준히 돌리기 쉬워진다.",
         "read_order": [
             "__init__로 어떤 파일을 여는지 본다.",
             "build_session_metadata와 prepare를 읽어 세션 시작 시점 작업을 이해한다.",
@@ -579,19 +612,19 @@ FILES = [
         "title": "log_html_reports.py",
         "category": "Reporting",
         "stages": ["Reports"],
-        "summary": "summary.json과 comparison 결과를 읽어 세션 index, ops_report, performance_report, 루트 대시보드까지 HTML로 생성하는 리포트 렌더러다. 최근에는 대표 lead track 기준 궤적과 gap break 시각화, 성능 KPI 페이지도 포함한다.",
-        "why": "JSON만 있으면 숫자는 남지만, 회의나 현장 설명에서는 한눈에 보이는 HTML 리포트가 훨씬 빠르다. 특히 궤적과 KPI는 같은 데이터를 어떻게 보여 주느냐에 따라 해석이 크게 달라진다.",
-        "mentor": "이 파일은 숫자를 전달 가능한 화면으로 바꾸는 마지막 계층이다. stage timing, system snapshot, operational score뿐 아니라 성능 KPI와 대표 track을 어떻게 보여 줄지도 이 레이어에서 결정한다.",
+        "summary": "summary.json과 comparison 결과를 읽어 세션 index, ops_report, performance_report, trajectory_replay, 루트 대시보드까지 HTML로 생성하는 리포트 렌더러다. 최근에는 대표 lead track 기준 궤적뿐 아니라 프레임 순서대로 움직임을 재생하는 디버그용 trajectory replay와, 로그를 다시 읽어 보간·smoothing한 postprocessed trajectory도 포함한다.",
+        "why": "JSON만 있으면 숫자는 남지만, 회의나 현장 설명에서는 한눈에 보이는 HTML 리포트가 훨씬 빠르다. 특히 궤적과 KPI는 같은 데이터를 어떻게 보여 주느냐에 따라 해석이 크게 달라지고, 발자취만으로 안 보이는 끊김은 시간축 재생이나 로그 기반 후처리 경로가 있어야 구분하기 쉽다.",
+        "mentor": "이 파일은 숫자를 전달 가능한 화면으로 바꾸는 마지막 계층이다. stage timing, system snapshot, operational score뿐 아니라 성능 KPI와 대표 track을 어떻게 보여 줄지, 그리고 시간축 재생이나 로그 기반 후처리로 어떤 프레임에서 끊겼는지를 어떻게 드러낼지도 이 레이어에서 결정한다.",
         "before": "session_report.py, session_compare.py, operational_assessment.py",
-        "after": "index.html, ops_report.html, performance_report.html, 비교용 루트 dashboard",
+        "after": "index.html, ops_report.html, performance_report.html, trajectory_replay.html, 비교용 루트 dashboard",
         "inputs": "summary.json, comparison json, event summary",
         "outputs": "세션별/루트 HTML 리포트",
-        "debug": "legacy session처럼 일부 로그가 비어 있어도 HTML이 깨지지 않는지, lead-only trajectory와 gap break가 의도대로 보이는지, 링크가 올바른지 확인한다.",
-        "ops": "현업에서는 팀이 동일한 리포트를 보고 이야기할 수 있어야 하므로, HTML 레이어 품질도 꽤 중요하다. 대표 track만 보여 주고 빈 구간은 끊어서 그리는 정책도 실제 판단에 큰 영향을 준다.",
+        "debug": "legacy session처럼 일부 로그가 비어 있어도 HTML이 깨지지 않는지, lead-only trajectory와 gap break가 의도대로 보이는지, trajectory replay가 frame 순서대로 잘 움직이는지, postprocessed trajectory가 과도하게 왜곡되지 않는지, 링크가 올바른지 확인한다.",
+        "ops": "현업에서는 팀이 동일한 리포트를 보고 이야기할 수 있어야 하므로, HTML 레이어 품질도 꽤 중요하다. 대표 track만 보여 주고 빈 구간은 끊어서 그리는 정책뿐 아니라, 실제로 언제 끊겼는지 재생으로 보여 주는 기능도 판단에 큰 영향을 준다.",
         "read_order": [
             "COMMON_STYLE과 COMMON_SCRIPT로 리포트 공통 뼈대를 본다.",
             "_build_performance_html과 _performance_overview_cards로 KPI 페이지 구성을 본다.",
-            "_build_track_trajectory_bundle과 renderTrajectoryChart를 읽어 궤적 시각화 규칙을 본다.",
+            "_build_track_trajectory_bundle, _build_track_playback_bundle, _build_postprocessed_trajectory_bundle, renderTrajectoryChart, renderTrajectoryReplay를 읽어 정적 궤적과 시간축 재생과 로그 후처리 규칙을 함께 본다.",
             "_build_session_html과 _build_ops_html에서 세션 페이지 구성을 읽는다.",
             "generate_reports로 실제 파일 생성 흐름을 확인한다.",
         ],
@@ -599,6 +632,8 @@ FILES = [
             ("세션 대시보드 생성", "한 세션의 핵심 지표를 index.html로 만든다."),
             ("운영 평가 시각화", "ops_report.html로 점수와 권고를 보여 준다."),
             ("성능 KPI 시각화", "performance_report.html로 예산 대비 처리량과 지터와 continuity를 보여 준다."),
+            ("시간축 움직임 재생", "trajectory_replay.html로 render/processed 기준 움직임을 프레임 순서대로 디버깅한다."),
+            ("로그 기반 후처리 궤적", "render/processed report에 보간과 smoothing을 적용한 postprocessed trajectory를 함께 보여 준다."),
             ("루트 비교 허브", "여러 세션을 한눈에 비교하는 상위 index를 만든다."),
             ("궤적 해석 보조", "대표 track과 gap break 규칙으로 과장된 선분을 줄인다."),
         ],
@@ -722,14 +757,14 @@ FLOW_DETAILS = {
     "session_logging": [
         ("SessionLogger.build_session_metadata", "git 정보와 logging 토글을 세션 메타데이터로 묶는다.", "session metadata", "prepare"),
         ("SessionLogger.prepare", "세션 폴더, runtime_config, system_snapshot, 로그 파일 핸들을 준비한다.", "session directory + file handles", "live_motion_viewer.py"),
-        ("SessionLogger.close", "로그 파일을 닫고 derived summary와 HTML 리포트를 생성한다.", "summary.json + index.html + ops_report.html + performance_report.html", "사용자 검토"),
+        ("SessionLogger.close", "로그 파일을 닫고 derived summary와 HTML 리포트를 생성한다.", "summary.json + index.html + ops_report.html + performance_report.html + trajectory_replay.html", "사용자 검토"),
     ],
     "system_snapshot": [
         ("_build_windows_runtime_snapshot", "Windows NIC, 방화벽, IP, priority 관련 정보를 수집한다.", "network/process snapshot", "capture_system_snapshot"),
         ("capture_system_snapshot", "전원 계획과 Python 환경까지 합쳐 system_snapshot.json 구조를 만든다.", "system snapshot dict", "session_logging.py / session_report.py"),
     ],
     "log_html_reports": [
-        ("generate_reports", "summary.json과 비교 결과를 읽어 세션 HTML과 루트 dashboard를 다시 만든다.", "index.html / ops_report.html / performance_report.html", "사용자 검토"),
+        ("generate_reports", "summary.json과 비교 결과를 읽어 세션 HTML과 루트 dashboard를 다시 만든다.", "index.html / ops_report.html / performance_report.html / trajectory_replay.html", "사용자 검토"),
         ("_collect_session_rows", "루트 dashboard에 들어갈 세션 목록과 점수를 모은다.", "dashboard rows", "index.html"),
     ],
     "legacy_xwr1843_app": [
@@ -1567,7 +1602,7 @@ def render_project_index() -> str:
 
       <section class="section" id="goal">
         <h2>프로젝트 목표 정리</h2>
-        <p class="intro">한 문장으로 줄이면, 이 프로젝트는 실시간 객체 추적 레이더 데모를 만들고 그것을 환경 스냅샷과 운영 점수까지 포함해 재현 가능하게 측정하는 시스템으로 진화했다. 최근에는 detection에 local patch body-center refinement까지 들어갔지만, 최신 clean session 기준 핵심 리스크는 여전히 single-person 원운동에서 한 사람을 여러 ID로 쪼개는 continuity 문제다.</p>
+        <p class="intro">한 문장으로 줄이면, 이 프로젝트는 실시간 객체 추적 레이더 데모를 만들고 그것을 환경 스냅샷과 운영 점수까지 포함해 재현 가능하게 측정하는 시스템으로 진화했다. 최근에는 detection의 local patch body-center refinement와 adaptive candidate pre-merge에 이어 tracking의 track-conditioned local remeasurement, render의 display hysteresis까지 들어갔고, 최신 핵심 리스크는 이 보정들이 실제 raw replay에서 single-person continuity를 얼마나 개선하는지 검증하는 것이다.</p>
         <div class="grid3">
           <article class="card"><h3>실시간 검출</h3><p>UDP로 들어오는 raw frame에서 움직이는 후보를 안정적으로 찾아야 한다.</p></article>
           <article class="card"><h3>실시간 추적</h3><p>같은 사람을 여러 프레임에서 같은 ID로 유지해야 한다.</p></article>
@@ -1586,7 +1621,7 @@ def render_project_index() -> str:
         <div class="flow" style="margin-top:16px;">
           <article class="flow-step"><span>4. 실시간 표시</span><strong>live_motion_viewer.py + app_layout.py</strong><p>최신 프레임만 골라 UI에 올린다.</p></article>
           <article class="flow-step"><span>5. 로그</span><strong>session_meta / processed / render / event / system_snapshot</strong><p>처리 로그와 렌더 로그를 분리해 남기고 실행 환경도 함께 저장한다.</p></article>
-          <article class="flow-step"><span>6. 리포트</span><strong>session_report.py + operational_assessment.py + log_html_reports.py</strong><p>summary, 운영 점수, 성능 KPI, HTML 대시보드를 만든다.</p></article>
+          <article class="flow-step"><span>6. 리포트</span><strong>session_report.py + operational_assessment.py + log_html_reports.py</strong><p>summary, 운영 점수, 성능 KPI, trajectory replay, HTML 대시보드를 만든다.</p></article>
         </div>
       </section>
 
@@ -1596,7 +1631,7 @@ def render_project_index() -> str:
         <div class="grid3">
           <article class="card"><h3>이전 상태</h3><p>UI가 최신 프레임만 소비하면 중간 처리 프레임이 스킵되고, 알고리즘 자체 성능이 로그에 충분히 남지 않았다.</p></article>
           <article class="card"><h3>현재 상태</h3><p>processed_frames.jsonl은 처리기 기준 전체 프레임을, render_frames.jsonl은 사용자 체감 기준 프레임을, system_snapshot.json은 실행 환경 상태를 남긴다.</p></article>
-          <article class="card"><h3>의미</h3><p>이제 알고리즘 개선, UI 병목, 실행 환경 문제를 분리해서 측정할 수 있다. session_report와 performance_report와 ops_report가 그 차이를 숫자와 점수와 KPI로 보여 준다.</p></article>
+          <article class="card"><h3>의미</h3><p>이제 알고리즘 개선, UI 병목, 실행 환경 문제를 분리해서 측정할 수 있다. session_report와 performance_report와 ops_report가 그 차이를 숫자와 점수와 KPI로 보여 주고, trajectory_replay는 끊김이 정확히 어느 프레임에서 생겼는지 시간축으로 드러낸다.</p></article>
         </div>
       </section>
 
@@ -1646,11 +1681,11 @@ def render_project_index() -> str:
 
       <section class="section">
         <h2>현업 시점 평가</h2>
-        <p class="intro">관측성과 실험 추적 능력은 분명히 좋아졌고, shared FFT와 stage timing, trajectory stabilization처럼 성능 개선 기반도 생겼다. 다만 최신 실험에서는 네트워크보다 detection과 tracking continuity가 더 큰 문제로 올라왔고, 구조 분리와 replay 기반 회귀 검증도 아직 더 필요하다.</p>
+        <p class="intro">관측성과 실험 추적 능력은 분명히 좋아졌고, shared FFT와 stage timing, trajectory stabilization, raw capture/replay처럼 성능 개선 기반도 생겼다. 다만 최신 실험에서는 네트워크보다 detection과 tracking continuity가 더 큰 문제로 올라왔고, 이제는 replay 기반 회귀 검증을 실제 품질 개선 루프에 더 강하게 붙이는 단계가 남아 있다.</p>
         <div class="grid3">
-          <article class="card"><h3>좋아진 점</h3><p>processed, render, event, system snapshot, summary, ops report, performance report 구조가 생기면서 개선 판단 근거가 훨씬 강해졌고, 대표 track 유지와 lead-only trajectory로 궤적 해석도 덜 흔들리게 됐다.</p></article>
-          <article class="card"><h3>여전히 아쉬운 점</h3><p>한 사람 원운동에서도 detection이 여러 점으로 살아남아 confirmed track이 2~3개로 분해되고, tracker는 그 조각 사이에서 ID를 자주 갈아탄다. MotionViewer 책임 집중과 processing hot path 직렬 계산도 여전히 남아 있다.</p></article>
-          <article class="card"><h3>다음 우선순위</h3><p>최근 local patch body-center refinement가 들어갔으므로, 다음 단계는 track-conditioned local update, detection-merge 회귀 검증, replay 입력 경로 정리, CFAR/후보 루프 벡터화, regression threshold 추가다.</p></article>
+          <article class="card"><h3>좋아진 점</h3><p>processed, render, event, system snapshot, summary, ops report, performance report 구조가 생기면서 개선 판단 근거가 훨씬 강해졌고, 대표 track 유지, trajectory replay, track-conditioned remeasurement까지 들어가 끊김과 방향 전환을 시간축으로 해석하고 수정하기 쉬워졌다.</p></article>
+          <article class="card"><h3>여전히 아쉬운 점</h3><p>한 사람 원운동에서도 detection representative가 완전한 몸 중심으로 고정되지는 않을 수 있다. display hysteresis는 화면 fail-safe라서 실제 tracking 개선과 구분해 봐야 하고, MotionViewer 책임 집중과 processing hot path 직렬 계산도 여전히 남아 있다.</p></article>
+          <article class="card"><h3>다음 우선순위</h3><p>최근 local patch body-center refinement와 adaptive candidate pre-merge, raw capture/replay, track-conditioned local remeasurement가 들어갔으므로, 다음 단계는 raw replay 기반 회귀 검증, two-person 분리 회귀 실험, CFAR/후보 루프 벡터화, regression threshold 추가다.</p></article>
         </div>
       </section>
     </div>
@@ -1676,7 +1711,7 @@ def render_req_index() -> str:
           <div>
             <span class="eyebrow">REQ / Improvement Spec</span>
             <h1>실무형 리팩터링 요구사항</h1>
-            <p>이 문서는 지금 구조에서 무엇이 부족하고 무엇을 어떤 순서로 고쳐야 하는지 구현 관점에서 정리한 명세서다. 최근에는 로그 분리, system snapshot, stage timing, operational report, shared FFT 최적화, primary track 안정화, detection local patch body-center refinement가 반영되었고, 지금은 single-person 원운동 continuity와 track-conditioned local update가 다음 핵심 과제로 올라와 있다.</p>
+            <p>이 문서는 지금 구조에서 무엇이 부족하고 무엇을 어떤 순서로 고쳐야 하는지 구현 관점에서 정리한 명세서다. 최근에는 로그 분리, system snapshot, stage timing, operational report, shared FFT 최적화, primary track 안정화, detection local patch body-center refinement, adaptive candidate pre-merge, track-conditioned local remeasurement, display hysteresis가 반영되었고, 지금은 raw replay 기준으로 single-person continuity 개선을 검증하는 단계다.</p>
           </div>
           <div class="hero-meta">
             <div class="meta"><span>Overall</span><strong>{CURRENT_STATE['score_overall']}</strong></div>
@@ -1693,8 +1728,8 @@ def render_req_index() -> str:
         <div class="grid3">
           <article class="card"><h3>완료 1</h3><p>processed_frames.jsonl, render_frames.jsonl, event_log.jsonl, session_meta.json 구조가 추가되었다.</p></article>
           <article class="card"><h3>완료 2</h3><p>session_report.py가 system_snapshot, stage timing, operational assessment, performance KPI를 포함한 summary.json을 생성한다.</p></article>
-          <article class="card"><h3>완료 3</h3><p>log_html_reports.py가 index.html, ops_report.html, performance_report.html을 만들고, 최근에는 lead-only trajectory와 gap break 시각화까지 반영되었다.</p></article>
-          <article class="card"><h3>완료 4</h3><p>tracking.py에 primary track 유지, 근접 birth 억제, lateral deadband/smoothing이 들어가 한 사람 궤적 안정화를 위한 기본 장치가 추가되었다.</p></article>
+          <article class="card"><h3>완료 3</h3><p>log_html_reports.py가 index.html, ops_report.html, performance_report.html, trajectory_replay.html을 만들고, 최근에는 lead-only trajectory와 gap break 시각화에 더해 frame-by-frame 재생과 로그 기반 후처리 경로까지 반영되었다.</p></article>
+          <article class="card"><h3>완료 4</h3><p>raw frame capture가 logs/raw에 저장되고, live_motion_replay.py로 같은 raw 입력을 다시 태워 회귀 실험을 반복할 수 있게 됐다.</p></article>
         </div>
       </section>
 
@@ -1705,9 +1740,9 @@ def render_req_index() -> str:
           <table>
             <thead><tr><th>REQ</th><th>상태</th><th>목표</th><th>구현 포인트</th></tr></thead>
             <tbody>
-              <tr><td>Single-person continuity / body-center 측정</td><td>In Progress</td><td>원운동에서도 한 사람을 ID 하나로 유지한다.</td><td>local patch body-center refinement, stronger candidate merge, track-conditioned local update, non-primary decay</td></tr>
+              <tr><td>Single-person continuity / body-center 측정</td><td>In Progress</td><td>원운동에서도 한 사람을 ID 하나로 유지한다.</td><td>local patch body-center refinement, adaptive candidate pre-merge, track-conditioned local remeasurement, display hysteresis 검증</td></tr>
               <tr><td>Processing hot-path 경량화</td><td>In Progress</td><td>real_time_process.py의 직렬 계산 비용을 더 줄인다.</td><td>CFAR 벡터화, 후보 pruning, logging writer 분리</td></tr>
-              <tr><td>Replay 입력 경로</td><td>Pending</td><td>같은 raw 입력으로 전후 비교 가능하게 만든다.</td><td>read_binfile.py 기반 session_replay 경로 추가</td></tr>
+              <tr><td>Replay 입력 경로</td><td>Implemented</td><td>같은 raw 입력으로 전후 비교 가능하게 만든다.</td><td>logs/raw raw frame capture + live_motion_replay.py + source_capture/session_id 기반 비교</td></tr>
               <tr><td>Regression Threshold</td><td>Pending</td><td>요약 비교 결과를 pass와 fail로 판정한다.</td><td>session_compare.py에 임계값 규칙 추가</td></tr>
               <tr><td>MotionViewer 책임 분리</td><td>Pending</td><td>UI, 앱 제어, 세션 로그 책임을 더 명확히 나눈다.</td><td>AppController / ViewRenderer / SessionLogger 경계 강화</td></tr>
               <tr><td>DCA / NIC preflight 검증</td><td>Pending</td><td>WinError 10049 같은 bind 실패를 실행 전에 잡는다.</td><td>bind 가능 IP 검사, 활성 NIC 안내, startup failure banner</td></tr>
@@ -1721,8 +1756,8 @@ def render_req_index() -> str:
         <h2>우선순위 상세</h2>
         <p class="intro">현업 기준으로는 아래 순서가 가장 안전하다. 지금은 다중 인원 완성도보다 one-person continuity를 먼저 안정화하는 것이 우선이다.</p>
         <div class="grid2">
-          <article class="card"><h3>1. continuity 안정화</h3><p>한 사람 원운동에서 detection이 여러 점으로 갈라지는 것을 먼저 막아야 한다. local patch body-center refinement 검증과 cluster 병합 강화, 이후 track-conditioned update가 우선이다.</p></article>
-          <article class="card"><h3>2. 재현 실험 가능화</h3><p>실제 전후 비교는 동일 입력이 있어야 의미가 있다. read_binfile.py를 기반으로 replay 경로를 만들고 session_meta에 source_capture를 강제 기록한다.</p></article>
+          <article class="card"><h3>1. continuity 안정화</h3><p>한 사람 원운동에서 detection이 여러 점으로 갈라지는 것을 먼저 막아야 한다. local patch body-center refinement와 adaptive candidate pre-merge, track-conditioned local remeasurement가 들어갔으므로 이제 raw replay 기준 품질 검증이 우선이다.</p></article>
+          <article class="card"><h3>2. 재현 실험 가능화</h3><p>실제 전후 비교는 동일 입력이 있어야 의미가 있다. 이제 logs/raw 세션 캡처와 live_motion_replay.py가 있으므로, 다음 단계는 source_capture와 scenario_id 기준 자동 비교를 더 강하게 묶는 것이다.</p></article>
           <article class="card"><h3>3. processing 병목 제거</h3><p>shared FFT는 들어갔지만 detect_targets, CFAR, logging write 비용은 아직 크다. continuity 문제를 가리지 않게 여기서도 추가 벡터화와 비동기화를 진행한다.</p></article>
           <article class="card"><h3>4. startup / 비교 자동화 강화</h3><p>DCA bind preflight, regression threshold, failure banner를 추가해 실험 실패와 회귀를 더 빨리 구분한다.</p></article>
         </div>

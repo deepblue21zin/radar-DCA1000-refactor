@@ -1,4 +1,5 @@
 import os
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
@@ -26,8 +27,13 @@ from tools.runtime_core.radar_runtime import (
     parse_runtime_config,
     radial_bin_limit,
 )
-from tools.runtime_core.real_time_process import DataProcessor, UdpListener
-from tools.runtime_core.runtime_settings import load_runtime_settings
+from tools.runtime_core.real_time_process import (
+    DataProcessor,
+    RawCaptureReplaySource,
+    RawFrameCaptureWriter,
+    UdpListener,
+)
+from tools.runtime_core.runtime_settings import load_runtime_settings, resolve_project_path
 from session_logging import SessionLogger
 from spatial_view import SpatialViewController, build_heatmap_lookup_table
 from tools.runtime_core.tracking import MultiTargetTracker
@@ -51,6 +57,7 @@ FPGA_PORT = int(STATIC['network']['fpga_port'])
 BUFFER_SIZE = int(STATIC['network']['buffer_size'])
 REMOVE_STATIC = bool(TUNING['processing']['remove_static'])
 DOPPLER_GUARD_BINS = int(TUNING['processing']['doppler_guard_bins'])
+INVERT_LATERAL_AXIS = bool(TUNING['processing'].get('invert_lateral_axis', False))
 ROI_LATERAL_M = float(TUNING['roi']['lateral_m'])
 ROI_FORWARD_M = float(TUNING['roi']['forward_m'])
 ROI_MIN_FORWARD_M = float(TUNING['roi']['min_forward_m'])
@@ -76,6 +83,11 @@ TRACK_LATERAL_DEADBAND_M = float(TUNING['tracking']['lateral_deadband_m'])
 TRACK_LATERAL_DEADBAND_RANGE_SCALE = float(TUNING['tracking']['lateral_deadband_range_scale'])
 TRACK_LATERAL_SMOOTHING_ALPHA = float(TUNING['tracking']['lateral_smoothing_alpha'])
 TRACK_LATERAL_VELOCITY_DAMPING = float(TUNING['tracking']['lateral_velocity_damping'])
+TRACK_LOCAL_REMEASUREMENT_ENABLED = bool(TUNING['tracking'].get('local_remeasurement_enabled', False))
+TRACK_LOCAL_REMEASUREMENT_BLEND = float(TUNING['tracking'].get('local_remeasurement_blend', 0.0))
+TRACK_LOCAL_REMEASUREMENT_MAX_SHIFT_M = float(TUNING['tracking'].get('local_remeasurement_max_shift_m', 0.0))
+TRACK_LOCAL_REMEASUREMENT_TRACK_BIAS = float(TUNING['tracking'].get('local_remeasurement_track_bias', 0.0))
+TRACK_LOCAL_REMEASUREMENT_PATCH_BANDS = list(TUNING['tracking'].get('local_remeasurement_patch_bands', []))
 DISPLAY_MIN_CONFIDENCE = float(TUNING['detection']['display_min_confidence'])
 PIPELINE_QUEUE_SIZE = int(TUNING['pipeline']['queue_size'])
 BLOCK_TRACK_BIRTH_ON_INVALID = bool(TUNING['pipeline']['block_track_birth_on_invalid'])
@@ -99,6 +111,7 @@ DETECTION_TUNING = {
     'min_cartesian_separation_m': float(DETECTION_ALGORITHM['min_cartesian_separation_m']),
     'angle_centroid_radius_bands': list(DETECTION_ALGORITHM.get('angle_centroid_radius_bands', [])),
     'body_center_patch_bands': list(DETECTION_ALGORITHM.get('body_center_patch_bands', [])),
+    'candidate_merge_bands': list(DETECTION_ALGORITHM.get('candidate_merge_bands', [])),
 }
 LOG_ROOT = PROJECT_ROOT / 'logs' / 'live_motion_viewer'
 SPATIAL_VIEW_HEIGHT = int(STATIC['spatial_view']['height'])
@@ -108,12 +121,17 @@ SPATIAL_POINT_CONFIDENCE_SCALE_M = float(STATIC['spatial_view']['point_confidenc
 SHOW_TENTATIVE_TRACKS = bool(TUNING['visualization']['show_tentative_tracks'])
 TENTATIVE_MIN_CONFIDENCE = float(TUNING['visualization']['tentative_min_confidence'])
 TENTATIVE_MIN_HITS = int(TUNING['visualization']['tentative_min_hits'])
+DISPLAY_HYSTERESIS_FRAMES = int(TUNING['visualization'].get('display_hysteresis_frames', 0))
+DISPLAY_HYSTERESIS_CONFIDENCE_FLOOR = float(TUNING['visualization'].get('display_hysteresis_confidence_floor', 0.0))
+DISPLAY_PRIMARY_BONUS_FRAMES = int(TUNING['visualization'].get('display_primary_bonus_frames', 0))
 LOG_VARIANT = str(RUNTIME['logging']['variant'])
 LOG_SCENARIO_ID = str(RUNTIME['logging']['scenario_id'])
 LOG_INPUT_MODE = str(RUNTIME['logging']['input_mode'])
 LOG_SOURCE_CAPTURE = str(RUNTIME['logging']['source_capture'])
 LOG_NOTES = str(RUNTIME['logging']['notes'])
 LOG_ENABLED = bool(RUNTIME['logging'].get('enabled', True))
+LOG_WRITE_RAW_CAPTURE = bool(RUNTIME['logging'].get('write_raw_capture', True))
+LOG_RAW_CAPTURE_ROOT = str(RUNTIME['logging'].get('raw_capture_root', 'logs/raw'))
 LOG_WRITE_PROCESSED_FRAMES = bool(RUNTIME['logging'].get('write_processed_frames', True))
 LOG_WRITE_RENDER_FRAMES = bool(RUNTIME['logging'].get('write_render_frames', True))
 LOG_WRITE_STATUS_LOG = bool(RUNTIME['logging'].get('write_status_log', True))
@@ -124,11 +142,33 @@ LOG_CAPTURE_STAGE_TIMING = bool(RUNTIME['logging'].get('capture_stage_timing', T
 LOG_REPORT_GENERATION_MODE = str(RUNTIME['logging'].get('report_generation_mode', 'deferred'))
 
 class MotionViewer:
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        input_mode=None,
+        source_capture=None,
+        replay_speed=1.0,
+        replay_loop=False,
+        auto_start=False,
+        write_raw_capture=None,
+    ):
+        self.input_mode = str(input_mode if input_mode is not None else LOG_INPUT_MODE).strip().lower()
+        self.source_capture = str(source_capture if source_capture is not None else LOG_SOURCE_CAPTURE).strip()
+        self.replay_speed = max(float(replay_speed), 0.01)
+        self.replay_loop = bool(replay_loop)
+        self.auto_start = bool(auto_start)
+        self.hardware_enabled = self.input_mode != 'replay'
+        self.report_generation_mode = 'inline' if self.input_mode == 'replay' else LOG_REPORT_GENERATION_MODE
+        self.replay_completion_requested = False
+        self.write_raw_capture = bool(
+            LOG_WRITE_RAW_CAPTURE if write_raw_capture is None else write_raw_capture
+        ) and self.hardware_enabled
+        self.raw_capture_root = resolve_project_path(PROJECT_ROOT, LOG_RAW_CAPTURE_ROOT)
         self.runtime_config = parse_runtime_config(
             CONFIG_PATH,
             remove_static=REMOVE_STATIC,
             doppler_guard_bins=DOPPLER_GUARD_BINS,
+            lateral_axis_sign=(-1.0 if INVERT_LATERAL_AXIS else 1.0),
         )
         self.track_angle_resolution_rad = self.estimate_track_angle_resolution_rad()
         self.raw_frame_queue = Queue(maxsize=PIPELINE_QUEUE_SIZE)
@@ -144,6 +184,12 @@ class MotionViewer:
         self.rdi_tentative_scatter = None
         self.rai_tentative_scatter = None
         self.spatial_label = None
+        self.replay_plot = None
+        self.replay_origin_scatter = None
+        self.replay_origin_label = None
+        self.replay_track_history = {}
+        self.replay_track_items = {}
+        self.display_hysteresis_state = {}
         self.spatial_view = SpatialViewController(
             roi_lateral_m=ROI_LATERAL_M,
             roi_forward_m=ROI_FORWARD_M,
@@ -183,19 +229,21 @@ class MotionViewer:
         self.session_logger = SessionLogger(
             project_root=PROJECT_ROOT,
             log_root=LOG_ROOT,
+            raw_capture_root=self.raw_capture_root,
             variant=LOG_VARIANT,
             scenario_id=LOG_SCENARIO_ID,
-            input_mode=LOG_INPUT_MODE,
-            source_capture=LOG_SOURCE_CAPTURE,
+            input_mode=self.input_mode,
+            source_capture=self.source_capture,
             notes=LOG_NOTES,
             enabled=LOG_ENABLED,
+            write_raw_capture=self.write_raw_capture,
             write_processed_frames=LOG_WRITE_PROCESSED_FRAMES,
             write_render_frames=LOG_WRITE_RENDER_FRAMES,
             write_status_log=LOG_WRITE_STATUS_LOG,
             write_event_log=LOG_WRITE_EVENT_LOG,
             include_payloads=LOG_INCLUDE_PAYLOADS,
             capture_system_snapshot_enabled=LOG_CAPTURE_SYSTEM_SNAPSHOT,
-            report_generation_mode=LOG_REPORT_GENERATION_MODE,
+            report_generation_mode=self.report_generation_mode,
         )
         self.processed_log_path = (
             self.session_logger.processed_log_path
@@ -216,10 +264,13 @@ class MotionViewer:
             'cfg': str(CONFIG_PATH),
             'adc_sample': self.runtime_config.adc_sample,
             'chirp_loops': self.runtime_config.chirp_loops,
+            'frame_length': self.runtime_config.frame_length,
             'tx_num': self.runtime_config.tx_num,
             'rx_num': self.runtime_config.rx_num,
             'virtual_antennas': self.runtime_config.virtual_antennas,
             'remove_static': self.runtime_config.remove_static,
+            'invert_lateral_axis': INVERT_LATERAL_AXIS,
+            'lateral_axis_sign': self.runtime_config.lateral_axis_sign,
             'range_resolution_m': round(self.runtime_config.range_resolution_m, 4),
             'max_range_m': round(self.runtime_config.max_range_m, 2),
             'roi_lateral_m': ROI_LATERAL_M,
@@ -247,6 +298,11 @@ class MotionViewer:
             'track_lateral_deadband_range_scale': TRACK_LATERAL_DEADBAND_RANGE_SCALE,
             'track_lateral_smoothing_alpha': TRACK_LATERAL_SMOOTHING_ALPHA,
             'track_lateral_velocity_damping': TRACK_LATERAL_VELOCITY_DAMPING,
+            'track_local_remeasurement_enabled': TRACK_LOCAL_REMEASUREMENT_ENABLED,
+            'track_local_remeasurement_blend': TRACK_LOCAL_REMEASUREMENT_BLEND,
+            'track_local_remeasurement_max_shift_m': TRACK_LOCAL_REMEASUREMENT_MAX_SHIFT_M,
+            'track_local_remeasurement_track_bias': TRACK_LOCAL_REMEASUREMENT_TRACK_BIAS,
+            'track_local_remeasurement_patch_bands': TRACK_LOCAL_REMEASUREMENT_PATCH_BANDS,
             'pipeline_queue_size': PIPELINE_QUEUE_SIZE,
             'block_track_birth_on_invalid': BLOCK_TRACK_BIRTH_ON_INVALID,
             'invalid_policy': dict(INVALID_POLICY),
@@ -255,12 +311,24 @@ class MotionViewer:
             'show_tentative_tracks': SHOW_TENTATIVE_TRACKS,
             'tentative_min_confidence': TENTATIVE_MIN_CONFIDENCE,
             'tentative_min_hits': TENTATIVE_MIN_HITS,
+            'display_hysteresis_frames': DISPLAY_HYSTERESIS_FRAMES,
+            'display_hysteresis_confidence_floor': DISPLAY_HYSTERESIS_CONFIDENCE_FLOOR,
+            'display_primary_bonus_frames': DISPLAY_PRIMARY_BONUS_FRAMES,
             'log_variant': LOG_VARIANT,
             'log_scenario_id': LOG_SCENARIO_ID,
-            'log_input_mode': LOG_INPUT_MODE,
-            'log_source_capture': LOG_SOURCE_CAPTURE,
+            'log_input_mode': self.input_mode,
+            'log_source_capture': self.source_capture,
+            'log_replay_speed': self.replay_speed if self.input_mode == 'replay' else None,
+            'log_replay_loop': self.replay_loop if self.input_mode == 'replay' else None,
             'log_notes': LOG_NOTES,
             'log_enabled': LOG_ENABLED,
+            'log_write_raw_capture': self.write_raw_capture,
+            'log_raw_capture_root': str(self.raw_capture_root),
+            'raw_capture_dir': (
+                str(self.session_logger.raw_capture_dir)
+                if self.write_raw_capture
+                else None
+            ),
             'log_write_processed_frames': LOG_WRITE_PROCESSED_FRAMES,
             'log_write_render_frames': LOG_WRITE_RENDER_FRAMES,
             'log_write_status_log': LOG_WRITE_STATUS_LOG,
@@ -268,7 +336,7 @@ class MotionViewer:
             'log_include_payloads': LOG_INCLUDE_PAYLOADS,
             'log_capture_system_snapshot': LOG_CAPTURE_SYSTEM_SNAPSHOT,
             'log_capture_stage_timing': LOG_CAPTURE_STAGE_TIMING,
-            'log_report_generation_mode': LOG_REPORT_GENERATION_MODE,
+            'log_report_generation_mode': self.report_generation_mode,
         }
 
     def log_event(self, event_type, **payload):
@@ -278,6 +346,49 @@ class MotionViewer:
             stream_started_at=self.stream_started_at,
             **payload,
         )
+
+    def build_tracker(self):
+        return MultiTargetTracker(
+            process_var=TRACK_PROCESS_VAR,
+            measurement_var=TRACK_MEASUREMENT_VAR,
+            range_measurement_scale=TRACK_RANGE_MEASUREMENT_SCALE,
+            confidence_measurement_scale=TRACK_CONFIDENCE_MEASUREMENT_SCALE,
+            angle_resolution_rad=self.track_angle_resolution_rad,
+            association_gate=TRACK_ASSOCIATION_GATE,
+            doppler_center_bin=self.runtime_config.doppler_fft_size // 2,
+            doppler_zero_guard_bins=TRACK_DOPPLER_ZERO_GUARD_BINS,
+            doppler_gate_bins=TRACK_DOPPLER_GATE_BINS,
+            doppler_cost_weight=TRACK_DOPPLER_COST_WEIGHT,
+            min_confirmed_hits=TRACK_CONFIRM_HITS,
+            max_missed_frames=TRACK_MAX_MISSES,
+            report_miss_tolerance=TRACK_REPORT_MISS_TOLERANCE,
+            lost_gate_factor=TRACK_LOST_GATE_FACTOR,
+            tentative_gate_factor=TRACK_TENTATIVE_GATE_FACTOR,
+            birth_suppression_radius_m=TRACK_BIRTH_SUPPRESSION_RADIUS_M,
+            primary_track_birth_scale=TRACK_PRIMARY_TRACK_BIRTH_SCALE,
+            birth_suppression_miss_tolerance=TRACK_BIRTH_SUPPRESSION_MISS_TOLERANCE,
+            primary_track_hold_frames=TRACK_PRIMARY_TRACK_HOLD_FRAMES,
+            lateral_deadband_m=TRACK_LATERAL_DEADBAND_M,
+            lateral_deadband_range_scale=TRACK_LATERAL_DEADBAND_RANGE_SCALE,
+            lateral_smoothing_alpha=TRACK_LATERAL_SMOOTHING_ALPHA,
+            lateral_velocity_damping=TRACK_LATERAL_VELOCITY_DAMPING,
+            local_remeasurement_enabled=TRACK_LOCAL_REMEASUREMENT_ENABLED,
+            local_remeasurement_blend=TRACK_LOCAL_REMEASUREMENT_BLEND,
+            local_remeasurement_max_shift_m=TRACK_LOCAL_REMEASUREMENT_MAX_SHIFT_M,
+            local_remeasurement_track_bias=TRACK_LOCAL_REMEASUREMENT_TRACK_BIAS,
+            local_remeasurement_patch_bands=TRACK_LOCAL_REMEASUREMENT_PATCH_BANDS,
+        )
+
+    def resolve_source_capture_path(self):
+        if not self.source_capture:
+            raise ValueError("Replay mode requires a source_capture path.")
+        candidate = resolve_project_path(PROJECT_ROOT, self.source_capture)
+        if candidate.exists():
+            return candidate
+        shorthand_candidate = PROJECT_ROOT / 'logs' / 'raw' / self.source_capture
+        if shorthand_candidate.exists():
+            return shorthand_candidate
+        raise FileNotFoundError(f"Replay capture directory not found: {candidate}")
 
     @staticmethod
     def serialize_detection(detection):
@@ -326,6 +437,7 @@ class MotionViewer:
         display_tracks,
         tentative_tracks,
         tentative_display_tracks,
+        display_held_track_count=0,
     ):
         elapsed_s = None
         if self.stream_started_at is not None:
@@ -373,6 +485,7 @@ class MotionViewer:
             'candidate_count': len(detections),
             'tracker_input_count': int(tracker_input_count),
             'display_track_count': len(display_tracks),
+            'display_held_track_count': int(display_held_track_count),
             'tentative_track_count': len(tentative_tracks),
             'tentative_display_track_count': len(tentative_display_tracks),
         }
@@ -400,6 +513,7 @@ class MotionViewer:
         display_tracks,
         tentative_tracks,
         tentative_display_tracks,
+        display_held_track_count=0,
     ):
         self.log_render_snapshot(
             status_text,
@@ -411,6 +525,7 @@ class MotionViewer:
             display_tracks,
             tentative_tracks,
             tentative_display_tracks,
+            display_held_track_count=display_held_track_count,
         )
 
     def configure_dca1000(self):
@@ -436,14 +551,32 @@ class MotionViewer:
         ):
             self.log_event('workers_already_running')
             return
-        data_address = (HOST_IP, DATA_PORT)
-        self.collector = UdpListener(
-            'Listener',
-            self.raw_frame_queue,
-            self.runtime_config.frame_length,
-            data_address,
-            BUFFER_SIZE,
-        )
+        if self.input_mode == 'replay':
+            capture_path = self.resolve_source_capture_path()
+            self.collector = RawCaptureReplaySource(
+                'ReplaySource',
+                self.raw_frame_queue,
+                capture_path,
+                playback_speed=self.replay_speed,
+                loop=self.replay_loop,
+                autostart=False,
+            )
+        else:
+            data_address = (HOST_IP, DATA_PORT)
+            raw_capture_writer = None
+            if self.write_raw_capture:
+                raw_capture_writer = RawFrameCaptureWriter(
+                    self.session_logger.raw_capture_data_path,
+                    self.session_logger.raw_capture_index_path,
+                )
+            self.collector = UdpListener(
+                'Listener',
+                self.raw_frame_queue,
+                self.runtime_config.frame_length,
+                data_address,
+                BUFFER_SIZE,
+                raw_capture_writer=raw_capture_writer,
+            )
         self.processor = DataProcessor(
             'Processor',
             self.runtime_config,
@@ -452,31 +585,7 @@ class MotionViewer:
             self.detection_region,
             self.min_range_bin,
             self.max_range_bin,
-            MultiTargetTracker(
-                process_var=TRACK_PROCESS_VAR,
-                measurement_var=TRACK_MEASUREMENT_VAR,
-                range_measurement_scale=TRACK_RANGE_MEASUREMENT_SCALE,
-                confidence_measurement_scale=TRACK_CONFIDENCE_MEASUREMENT_SCALE,
-                angle_resolution_rad=self.track_angle_resolution_rad,
-                association_gate=TRACK_ASSOCIATION_GATE,
-                doppler_center_bin=self.runtime_config.doppler_fft_size // 2,
-                doppler_zero_guard_bins=TRACK_DOPPLER_ZERO_GUARD_BINS,
-                doppler_gate_bins=TRACK_DOPPLER_GATE_BINS,
-                doppler_cost_weight=TRACK_DOPPLER_COST_WEIGHT,
-                min_confirmed_hits=TRACK_CONFIRM_HITS,
-                max_missed_frames=TRACK_MAX_MISSES,
-                report_miss_tolerance=TRACK_REPORT_MISS_TOLERANCE,
-                lost_gate_factor=TRACK_LOST_GATE_FACTOR,
-                tentative_gate_factor=TRACK_TENTATIVE_GATE_FACTOR,
-                birth_suppression_radius_m=TRACK_BIRTH_SUPPRESSION_RADIUS_M,
-                primary_track_birth_scale=TRACK_PRIMARY_TRACK_BIRTH_SCALE,
-                birth_suppression_miss_tolerance=TRACK_BIRTH_SUPPRESSION_MISS_TOLERANCE,
-                primary_track_hold_frames=TRACK_PRIMARY_TRACK_HOLD_FRAMES,
-                lateral_deadband_m=TRACK_LATERAL_DEADBAND_M,
-                lateral_deadband_range_scale=TRACK_LATERAL_DEADBAND_RANGE_SCALE,
-                lateral_smoothing_alpha=TRACK_LATERAL_SMOOTHING_ALPHA,
-                lateral_velocity_damping=TRACK_LATERAL_VELOCITY_DAMPING,
-            ),
+            self.build_tracker(),
             block_track_birth_on_invalid=BLOCK_TRACK_BIRTH_ON_INVALID,
             invalid_policy=INVALID_POLICY,
             processed_frame_log_path=self.processed_log_path,
@@ -492,13 +601,45 @@ class MotionViewer:
         self.log_event(
             'workers_started',
             queue_size=PIPELINE_QUEUE_SIZE,
+            input_mode=self.input_mode,
+            source_capture=self.source_capture if self.input_mode == 'replay' else None,
             processed_log=None if self.processed_log_path is None else str(self.processed_log_path.name),
             logging_enabled=LOG_ENABLED,
+            raw_capture_enabled=self.write_raw_capture,
+            raw_capture_dir=(
+                str(self.session_logger.raw_capture_dir)
+                if self.write_raw_capture
+                else None
+            ),
             include_payloads=LOG_INCLUDE_PAYLOADS,
             capture_stage_timing=LOG_CAPTURE_STAGE_TIMING,
         )
 
     def open_radar(self):
+        if self.input_mode == 'replay':
+            capture_path = self.resolve_source_capture_path()
+            self.stream_started_at = time.perf_counter()
+            self.waiting_for_data_logged = False
+            self.first_image_logged = False
+            self.frame_index = 0
+            self.skipped_render_frames = 0
+            self.replay_completion_requested = False
+            self.replay_track_history.clear()
+            self.display_hysteresis_state.clear()
+            for items in self.replay_track_items.values():
+                items['trail'].setData([], [])
+                items['start'].setData([])
+                items['current'].setData([])
+            self.log_event(
+                'replay_start',
+                source_capture=str(capture_path),
+                replay_speed=self.replay_speed,
+                replay_loop=self.replay_loop,
+            )
+            if isinstance(self.collector, RawCaptureReplaySource):
+                self.collector.start_streaming()
+            self.update_figure()
+            return
         self.log_event(
             'radar_open_start',
             cli_port=CLI_PORT,
@@ -516,6 +657,7 @@ class MotionViewer:
         self.first_image_logged = False
         self.frame_index = 0
         self.skipped_render_frames = 0
+        self.display_hysteresis_state.clear()
         self.log_event('radar_open_complete')
         self.update_figure()
 
@@ -535,6 +677,22 @@ class MotionViewer:
         try:
             frame_packet, skipped_frames = self.pull_latest_processed_frame()
         except Empty:
+            if (
+                self.input_mode == 'replay'
+                and self.stream_started_at is not None
+                and not self.replay_completion_requested
+                and self.collector is not None
+                and not self.collector.is_alive()
+                and self.processor is not None
+                and not self.processor.is_alive()
+            ):
+                self.replay_completion_requested = True
+                self.log_event('replay_complete')
+                self.ui.statusbar.showMessage(
+                    'Replay complete. Generating trajectory replay report...'
+                )
+                QtCore.QTimer.singleShot(0, self.app.instance().exit)
+                return
             if (
                 self.stream_started_at is not None
                 and not self.first_image_logged
@@ -571,26 +729,102 @@ class MotionViewer:
             min_forward_m=ROI_MIN_FORWARD_M,
         )
 
-        self.img_rdi.setImage(cropped_rdi.T, axisOrder='row-major')
-        self.img_rai.setImage(np.flipud(roi_rai.T), axisOrder='row-major')
+        if self.img_rdi is not None:
+            self.img_rdi.setImage(cropped_rdi.T, axisOrder='row-major')
+        if self.img_rai is not None:
+            self.img_rai.setImage(np.flipud(roi_rai.T), axisOrder='row-major')
         render_ts = time.perf_counter()
         self.update_detection_overlay(frame_packet, detections, render_ts, skipped_frames)
         QtCore.QTimer.singleShot(1, self.update_figure)
+
+    @staticmethod
+    def display_track_sort_key(track):
+        return (
+            bool(track.is_primary),
+            float(track.confidence),
+            float(track.score),
+            int(track.hits),
+        )
+
+    def select_display_tracks(self, confirmed_tracks):
+        current_frame = int(self.frame_index)
+        selected_tracks = []
+        selected_ids = set()
+        held_track_count = 0
+
+        for track in confirmed_tracks:
+            if (
+                track.misses <= TRACK_REPORT_MISS_TOLERANCE
+                and track.confidence >= DISPLAY_MIN_CONFIDENCE
+            ):
+                selected_tracks.append(track)
+                selected_ids.add(int(track.track_id))
+                self.display_hysteresis_state[int(track.track_id)] = {
+                    'track': replace(track),
+                    'last_seen_frame': current_frame,
+                    'is_primary': bool(track.is_primary),
+                }
+
+        for track in confirmed_tracks:
+            track_id = int(track.track_id)
+            if track_id in selected_ids:
+                continue
+            state = self.display_hysteresis_state.get(track_id)
+            if not state:
+                continue
+            bonus_frames = DISPLAY_PRIMARY_BONUS_FRAMES if (
+                bool(track.is_primary) or bool(state.get('is_primary', False))
+            ) else 0
+            grace_frames = DISPLAY_HYSTERESIS_FRAMES + bonus_frames
+            frames_since = current_frame - int(state.get('last_seen_frame', current_frame))
+            if (
+                grace_frames > 0
+                and 0 < frames_since <= grace_frames
+                and track.confidence >= DISPLAY_HYSTERESIS_CONFIDENCE_FLOOR
+            ):
+                held_track = replace(track)
+                selected_tracks.append(held_track)
+                selected_ids.add(track_id)
+                held_track_count += 1
+                self.display_hysteresis_state[track_id] = {
+                    'track': held_track,
+                    'last_seen_frame': int(state.get('last_seen_frame', current_frame)),
+                    'is_primary': bool(track.is_primary),
+                }
+
+        current_track_ids = {int(track.track_id) for track in confirmed_tracks}
+        for track_id, state in list(self.display_hysteresis_state.items()):
+            if track_id in selected_ids or track_id in current_track_ids:
+                continue
+            bonus_frames = DISPLAY_PRIMARY_BONUS_FRAMES if bool(state.get('is_primary', False)) else 0
+            grace_frames = DISPLAY_HYSTERESIS_FRAMES + bonus_frames
+            frames_since = current_frame - int(state.get('last_seen_frame', current_frame))
+            if grace_frames <= 0 or frames_since <= 0 or frames_since > grace_frames:
+                continue
+            last_track = state.get('track')
+            if last_track is None:
+                continue
+            held_track = replace(last_track, misses=int(last_track.misses) + frames_since)
+            selected_tracks.append(held_track)
+            selected_ids.add(track_id)
+            held_track_count += 1
+
+        max_keep_frames = DISPLAY_HYSTERESIS_FRAMES + DISPLAY_PRIMARY_BONUS_FRAMES + 2
+        self.display_hysteresis_state = {
+            track_id: state
+            for track_id, state in self.display_hysteresis_state.items()
+            if current_frame - int(state.get('last_seen_frame', current_frame)) <= max_keep_frames
+        }
+        return (
+            sorted(selected_tracks, key=self.display_track_sort_key, reverse=True),
+            held_track_count,
+        )
 
     def update_detection_overlay(self, frame_packet, detections, render_ts, skipped_frames):
         tracker_input_count = int(frame_packet.tracker_input_count)
         confirmed_tracks = list(frame_packet.confirmed_tracks)
         tentative_tracks = list(frame_packet.tentative_tracks)
-        display_tracks = [
-            track for track in confirmed_tracks
-            if track.misses <= TRACK_REPORT_MISS_TOLERANCE
-            and track.confidence >= DISPLAY_MIN_CONFIDENCE
-        ]
-        display_tracks = sorted(
-            display_tracks,
-            key=lambda track: (track.is_primary, track.confidence, track.score, track.hits),
-            reverse=True,
-        )
+        display_tracks, display_held_track_count = self.select_display_tracks(confirmed_tracks)
         rdi_points = [
             {
                 'pos': (
@@ -621,7 +855,7 @@ class MotionViewer:
             ]
             tentative_display_tracks = sorted(
                 tentative_display_tracks,
-                key=lambda track: (track.is_primary, track.confidence, track.score, track.hits),
+                key=self.display_track_sort_key,
                 reverse=True,
             )
 
@@ -644,11 +878,19 @@ class MotionViewer:
             for track in tentative_display_tracks
         ]
 
-        self.rdi_scatter.setData(rdi_points)
-        self.rai_scatter.setData(rai_points)
-        self.rdi_tentative_scatter.setData(tentative_rdi_points)
-        self.rai_tentative_scatter.setData(tentative_rai_points)
-        self.spatial_view.update(display_tracks, tentative_display_tracks)
+        if self.rdi_scatter is not None:
+            self.rdi_scatter.setData(rdi_points)
+        if self.rai_scatter is not None:
+            self.rai_scatter.setData(rai_points)
+        if self.rdi_tentative_scatter is not None:
+            self.rdi_tentative_scatter.setData(tentative_rdi_points)
+        if self.rai_tentative_scatter is not None:
+            self.rai_tentative_scatter.setData(tentative_rai_points)
+
+        if self.replay_plot is not None:
+            self.update_replay_trajectory_plot(confirmed_tracks, tentative_tracks)
+        else:
+            self.spatial_view.update(display_tracks, tentative_display_tracks)
 
         integrity_suffix = ''
         if frame_packet.invalid:
@@ -678,6 +920,8 @@ class MotionViewer:
             )
             if tentative_display_tracks:
                 status_text += f' | tentative={len(tentative_display_tracks)}'
+            if display_held_track_count:
+                status_text += f' | held={display_held_track_count}'
             self.ui.statusbar.showMessage(status_text)
         else:
             status_text = (
@@ -698,6 +942,7 @@ class MotionViewer:
             display_tracks,
             tentative_tracks,
             tentative_display_tracks,
+            display_held_track_count=display_held_track_count,
         )
 
     def range_bin_for_track(self, track):
@@ -732,86 +977,229 @@ class MotionViewer:
         center_diffs = finite_diffs[center_start:center_end]
         return float(np.mean(center_diffs))
 
+    def replay_track_color(self, track_id, tentative=False):
+        palette = [
+            (31, 119, 180),
+            (255, 127, 14),
+            (44, 160, 44),
+            (214, 39, 40),
+            (148, 103, 189),
+            (140, 86, 75),
+            (227, 119, 194),
+            (127, 127, 127),
+        ]
+        r, g, b = palette[(max(int(track_id), 1) - 1) % len(palette)]
+        alpha = 140 if tentative else 230
+        return r, g, b, alpha
+
+    def setup_replay_trajectory_plot(self):
+        self.ui.label.setGeometry(QtCore.QRect(220, 18, 360, 36))
+        self.ui.label.setText('Radar XY Trajectory Replay')
+        self.ui.label_2.hide()
+        self.ui.graphicsView.setGeometry(QtCore.QRect(30, 60, 741, 520))
+        self.ui.graphicsView_2.hide()
+        self.ui.graphicsView.setBackground('w')
+        self.ui.pushButton_start.setGeometry(QtCore.QRect(30, 600, 151, 31))
+        self.ui.pushButton_exit.setGeometry(QtCore.QRect(680, 600, 91, 31))
+
+        self.replay_plot = self.ui.graphicsView.addPlot(row=0, col=0)
+        self.replay_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.replay_plot.setLabel('bottom', 'x: left / right (m)')
+        self.replay_plot.setLabel('left', 'y: forward (m)')
+        self.replay_plot.setXRange(-ROI_LATERAL_M, ROI_LATERAL_M, padding=0.04)
+        self.replay_plot.setYRange(0.0, ROI_FORWARD_M, padding=0.04)
+        self.replay_plot.hideButtons()
+        self.replay_plot.setMenuEnabled(False)
+        self.replay_plot.getAxis('bottom').setPen(pg.mkPen(90, 110, 140))
+        self.replay_plot.getAxis('left').setPen(pg.mkPen(90, 110, 140))
+        self.replay_plot.getAxis('bottom').setTextPen(pg.mkColor(90, 110, 140))
+        self.replay_plot.getAxis('left').setTextPen(pg.mkColor(90, 110, 140))
+
+        center_line = pg.InfiniteLine(pos=0.0, angle=90, pen=pg.mkPen(120, 144, 180, width=2))
+        center_line.setZValue(-20)
+        self.replay_plot.addItem(center_line)
+
+        self.replay_origin_scatter = pg.ScatterPlotItem(
+            x=[0.0],
+            y=[0.0],
+            pen=pg.mkPen(10, 15, 25, width=2),
+            brush=pg.mkBrush(10, 15, 25),
+            size=14,
+        )
+        self.replay_plot.addItem(self.replay_origin_scatter)
+        self.replay_origin_label = pg.TextItem(text='radar', color=(40, 45, 55))
+        self.replay_origin_label.setPos(0.02, 0.05)
+        self.replay_plot.addItem(self.replay_origin_label)
+
+    def ensure_replay_track_items(self, track_id, tentative=False):
+        item_key = int(track_id)
+        if item_key in self.replay_track_items:
+            return self.replay_track_items[item_key]
+
+        color = self.replay_track_color(track_id, tentative=tentative)
+        pen = pg.mkPen(color, width=2.0 if not tentative else 1.5)
+        trail_item = self.replay_plot.plot([], [], pen=pen)
+        start_item = pg.ScatterPlotItem(
+            pen=pg.mkPen(color[:3], width=2),
+            brush=pg.mkBrush(0, 0, 0, 0),
+            size=10,
+        )
+        current_item = pg.ScatterPlotItem(
+            pen=pg.mkPen(color[:3], width=1.5),
+            brush=pg.mkBrush(*color[:3], 210 if not tentative else 140),
+            size=10 if not tentative else 8,
+        )
+        self.replay_plot.addItem(start_item)
+        self.replay_plot.addItem(current_item)
+        self.replay_track_items[item_key] = {
+            'trail': trail_item,
+            'start': start_item,
+            'current': current_item,
+        }
+        return self.replay_track_items[item_key]
+
+    def update_replay_trajectory_plot(self, confirmed_tracks, tentative_tracks):
+        if self.replay_plot is None:
+            return
+
+        active_keys = set()
+        plotted_tracks = []
+        if confirmed_tracks:
+            plotted_tracks.extend((track, False) for track in confirmed_tracks)
+        else:
+            plotted_tracks.extend((track, True) for track in tentative_tracks)
+
+        for track, tentative in plotted_tracks:
+            item_key = int(track.track_id)
+            history_state = self.replay_track_history.setdefault(
+                item_key,
+                {'points': [], 'last_frame_index': None},
+            )
+            last_frame_index = history_state['last_frame_index']
+            if (
+                last_frame_index is not None
+                and self.frame_index - last_frame_index > 1
+                and history_state['points']
+                and history_state['points'][-1] != (np.nan, np.nan)
+            ):
+                history_state['points'].append((np.nan, np.nan))
+            history_state['points'].append((float(track.x_m), float(track.y_m)))
+            history_state['last_frame_index'] = self.frame_index
+
+            if len(history_state['points']) > 480:
+                history_state['points'] = history_state['points'][-480:]
+
+            items = self.ensure_replay_track_items(track.track_id, tentative=tentative)
+            points = np.asarray(history_state['points'], dtype=float)
+            if points.size:
+                items['trail'].setData(points[:, 0], points[:, 1])
+                valid_points = points[~np.isnan(points).any(axis=1)]
+                if valid_points.size:
+                    start_x, start_y = valid_points[0]
+                    items['start'].setData([{'pos': (float(start_x), float(start_y))}])
+                    items['current'].setData([{'pos': (float(track.x_m), float(track.y_m))}])
+                else:
+                    items['start'].setData([])
+                    items['current'].setData([])
+            else:
+                items['trail'].setData([], [])
+                items['start'].setData([])
+                items['current'].setData([])
+            active_keys.add(item_key)
+
+        for item_key, items in self.replay_track_items.items():
+            if item_key in active_keys:
+                continue
+            items['current'].setData([])
+
     def build_window(self):
         self.app = QtWidgets.QApplication(sys.argv)
         self.main_window = QtWidgets.QMainWindow()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self.main_window)
         self.main_window.resize(802, 680)
+        if self.input_mode == 'replay':
+            self.main_window.setWindowTitle('Replay Radar')
+            self.ui.pushButton_start.setText('Start Replay')
+            self.setup_replay_trajectory_plot()
+        else:
+            self.ui.label.setGeometry(QtCore.QRect(110, 235, 211, 41))
+            self.ui.label_2.setGeometry(QtCore.QRect(500, 235, 211, 41))
+            self.ui.graphicsView.setGeometry(QtCore.QRect(30, 275, 361, 300))
+            self.ui.graphicsView_2.setGeometry(QtCore.QRect(410, 275, 361, 300))
+            self.ui.pushButton_start.setGeometry(QtCore.QRect(30, 600, 151, 31))
+            self.ui.pushButton_exit.setGeometry(QtCore.QRect(680, 600, 91, 31))
 
-        self.ui.label.setGeometry(QtCore.QRect(110, 235, 211, 41))
-        self.ui.label_2.setGeometry(QtCore.QRect(500, 235, 211, 41))
-        self.ui.graphicsView.setGeometry(QtCore.QRect(30, 275, 361, 300))
-        self.ui.graphicsView_2.setGeometry(QtCore.QRect(410, 275, 361, 300))
-        self.ui.pushButton_start.setGeometry(QtCore.QRect(30, 600, 151, 31))
-        self.ui.pushButton_exit.setGeometry(QtCore.QRect(680, 600, 91, 31))
+            self.spatial_label = QtWidgets.QLabel(self.ui.centralwidget)
+            self.spatial_label.setGeometry(QtCore.QRect(255, 8, 300, 32))
+            spatial_font = self.ui.label.font()
+            self.spatial_label.setFont(spatial_font)
+            self.spatial_view.attach(self.ui.centralwidget, self.spatial_label)
 
-        self.spatial_label = QtWidgets.QLabel(self.ui.centralwidget)
-        self.spatial_label.setGeometry(QtCore.QRect(255, 8, 300, 32))
-        spatial_font = self.ui.label.font()
-        self.spatial_label.setFont(spatial_font)
-        self.spatial_view.attach(self.ui.centralwidget, self.spatial_label)
+            self.ui.label.setText('Moving Range-Doppler')
+            self.ui.label_2.setText('Moving Range-Angle')
+            self.ui.pushButton_start.setText('Send Radar Config')
+            view_rdi = self.ui.graphicsView.addViewBox()
+            view_rai = self.ui.graphicsView_2.addViewBox()
+            view_rdi.setAspectLocked(False)
+            view_rai.setAspectLocked(False)
 
-        self.ui.label.setText('Moving Range-Doppler')
-        self.ui.label_2.setText('Moving Range-Angle')
-
-        view_rdi = self.ui.graphicsView.addViewBox()
-        view_rai = self.ui.graphicsView_2.addViewBox()
-        view_rdi.setAspectLocked(False)
-        view_rai.setAspectLocked(False)
-
-        self.img_rdi = pg.ImageItem(border='w')
-        self.img_rai = pg.ImageItem(border='w')
-        self.rdi_scatter = pg.ScatterPlotItem(
-            pen=pg.mkPen(255, 60, 60, width=2),
-            brush=pg.mkBrush(0, 0, 0, 0),
-            size=14,
-        )
-        self.rai_scatter = pg.ScatterPlotItem(
-            pen=pg.mkPen(255, 60, 60, width=2),
-            brush=pg.mkBrush(0, 0, 0, 0),
-            size=14,
-        )
-        self.rdi_tentative_scatter = pg.ScatterPlotItem(
-            pen=pg.mkPen(255, 205, 64, width=1.5),
-            brush=pg.mkBrush(0, 0, 0, 0),
-            size=11,
-        )
-        self.rai_tentative_scatter = pg.ScatterPlotItem(
-            pen=pg.mkPen(255, 205, 64, width=1.5),
-            brush=pg.mkBrush(0, 0, 0, 0),
-            size=11,
-        )
-        lookup_table = build_heatmap_lookup_table()
-        self.img_rdi.setLookupTable(lookup_table)
-        self.img_rai.setLookupTable(lookup_table)
-        view_rdi.addItem(self.img_rdi)
-        view_rai.addItem(self.img_rai)
-        view_rdi.addItem(self.rdi_tentative_scatter)
-        view_rai.addItem(self.rai_tentative_scatter)
-        view_rdi.addItem(self.rdi_scatter)
-        view_rai.addItem(self.rai_scatter)
-        view_rdi.setRange(
-            QtCore.QRectF(
-                0,
-                0,
-                self.display_range_bins,
-                self.runtime_config.doppler_fft_size,
+            self.img_rdi = pg.ImageItem(border='w')
+            self.img_rai = pg.ImageItem(border='w')
+            self.rdi_scatter = pg.ScatterPlotItem(
+                pen=pg.mkPen(255, 60, 60, width=2),
+                brush=pg.mkBrush(0, 0, 0, 0),
+                size=14,
             )
-        )
-        view_rai.setRange(
-            QtCore.QRectF(
-                0,
-                0,
-                self.display_range_bins,
-                self.runtime_config.angle_fft_size,
+            self.rai_scatter = pg.ScatterPlotItem(
+                pen=pg.mkPen(255, 60, 60, width=2),
+                brush=pg.mkBrush(0, 0, 0, 0),
+                size=14,
             )
-        )
+            self.rdi_tentative_scatter = pg.ScatterPlotItem(
+                pen=pg.mkPen(255, 205, 64, width=1.5),
+                brush=pg.mkBrush(0, 0, 0, 0),
+                size=11,
+            )
+            self.rai_tentative_scatter = pg.ScatterPlotItem(
+                pen=pg.mkPen(255, 205, 64, width=1.5),
+                brush=pg.mkBrush(0, 0, 0, 0),
+                size=11,
+            )
+            lookup_table = build_heatmap_lookup_table()
+            self.img_rdi.setLookupTable(lookup_table)
+            self.img_rai.setLookupTable(lookup_table)
+            view_rdi.addItem(self.img_rdi)
+            view_rai.addItem(self.img_rai)
+            view_rdi.addItem(self.rdi_tentative_scatter)
+            view_rai.addItem(self.rai_tentative_scatter)
+            view_rdi.addItem(self.rdi_scatter)
+            view_rai.addItem(self.rai_scatter)
+            view_rdi.setRange(
+                QtCore.QRectF(
+                    0,
+                    0,
+                    self.display_range_bins,
+                    self.runtime_config.doppler_fft_size,
+                )
+            )
+            view_rai.setRange(
+                QtCore.QRectF(
+                    0,
+                    0,
+                    self.display_range_bins,
+                    self.runtime_config.angle_fft_size,
+                )
+            )
 
         self.ui.pushButton_start.clicked.connect(self.open_radar)
         self.ui.pushButton_exit.clicked.connect(self.app.instance().exit)
         self.main_window.show()
-        if not self.spatial_view.available and self.spatial_view.import_error is not None:
+        if (
+            self.input_mode != 'replay'
+            and not self.spatial_view.available
+            and self.spatial_view.import_error is not None
+        ):
             self.ui.statusbar.showMessage(
                 f'3D view unavailable: {self.spatial_view.import_error}'
             )
@@ -820,6 +1208,10 @@ class MotionViewer:
 
     def shutdown(self):
         self.log_event('shutdown_start')
+        if self.collector is not None:
+            close_collector = getattr(self.collector, 'close', None)
+            if callable(close_collector):
+                close_collector()
         if self.dca_client is not None:
             self.dca_client.stop_stream()
             self.dca_client.close()
@@ -830,6 +1222,14 @@ class MotionViewer:
                 self.radar_ctrl.StopRadar()
             except OSError:
                 pass
+        if self.processor is not None:
+            close_processor = getattr(self.processor, 'close', None)
+            if callable(close_processor):
+                close_processor()
+        if self.collector is not None and self.collector.is_alive():
+            self.collector.join(timeout=1.0)
+        if self.processor is not None and self.processor.is_alive():
+            self.processor.join(timeout=1.0)
         self.session_logger.close(
             frame_index=self.frame_index,
             skipped_render_frames_total=self.skipped_render_frames,
@@ -838,9 +1238,12 @@ class MotionViewer:
     def run(self):
         print('Runtime config:', self.runtime_summary())
         try:
-            self.configure_dca1000()
+            if self.hardware_enabled:
+                self.configure_dca1000()
             self.start_workers()
             app = self.build_window()
+            if self.input_mode == 'replay' and self.auto_start:
+                QtCore.QTimer.singleShot(0, self.open_radar)
             app.instance().exec_()
         except Exception as exc:
             self.log_event('session_error', error=repr(exc))

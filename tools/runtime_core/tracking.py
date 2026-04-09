@@ -9,6 +9,8 @@ import sys
 
 import numpy as np
 
+from .detection import _refine_body_center_from_patch
+
 try:
     from scipy.optimize import linear_sum_assignment as _scipy_linear_sum_assignment
 except ImportError:
@@ -172,6 +174,10 @@ def _linear_sum_assignment(cost_matrix: np.ndarray) -> Tuple[np.ndarray, np.ndar
     return _hungarian_fallback(cost_matrix)
 
 
+def _nearest_axis_bin(axis_values, value) -> int:
+    return int(np.argmin(np.abs(np.asarray(axis_values) - float(value))))
+
+
 class TrackState(Enum):
     TENTATIVE = auto()
     CONFIRMED = auto()
@@ -243,6 +249,11 @@ class MultiTargetTracker:
         lateral_deadband_range_scale=0.0,
         lateral_smoothing_alpha=1.0,
         lateral_velocity_damping=1.0,
+        local_remeasurement_enabled=False,
+        local_remeasurement_blend=0.0,
+        local_remeasurement_max_shift_m=0.0,
+        local_remeasurement_track_bias=0.0,
+        local_remeasurement_patch_bands=None,
     ):
         if process_var <= 0:
             raise ValueError("process_var must be positive.")
@@ -288,6 +299,12 @@ class MultiTargetTracker:
             raise ValueError("lateral_smoothing_alpha must be in (0, 1].")
         if not (0.0 < lateral_velocity_damping <= 1.0):
             raise ValueError("lateral_velocity_damping must be in (0, 1].")
+        if not (0.0 <= local_remeasurement_blend <= 1.0):
+            raise ValueError("local_remeasurement_blend must be in [0, 1].")
+        if local_remeasurement_max_shift_m < 0:
+            raise ValueError("local_remeasurement_max_shift_m must be non-negative.")
+        if not (0.0 <= local_remeasurement_track_bias <= 1.0):
+            raise ValueError("local_remeasurement_track_bias must be in [0, 1].")
 
         kalman_filter, q_discrete_white_noise = _load_filterpy()
         self._KalmanFilter = kalman_filter
@@ -318,6 +335,11 @@ class MultiTargetTracker:
         self.lateral_deadband_range_scale = float(lateral_deadband_range_scale)
         self.lateral_smoothing_alpha = float(lateral_smoothing_alpha)
         self.lateral_velocity_damping = float(lateral_velocity_damping)
+        self.local_remeasurement_enabled = bool(local_remeasurement_enabled)
+        self.local_remeasurement_blend = float(local_remeasurement_blend)
+        self.local_remeasurement_max_shift_m = float(local_remeasurement_max_shift_m)
+        self.local_remeasurement_track_bias = float(local_remeasurement_track_bias)
+        self.local_remeasurement_patch_bands = tuple(local_remeasurement_patch_bands or ())
 
         self._tracks: List[_Track] = []
         self._next_track_id = 1
@@ -469,6 +491,149 @@ class MultiTargetTracker:
             stabilized_x = float(predicted_x) + (delta_x * self.lateral_smoothing_alpha)
         stabilized_vx = float(updated_vx) * self.lateral_velocity_damping
         return stabilized_x, stabilized_vx
+
+    def _local_remeasurement_patch_for_range(self, range_m: float) -> tuple[int, int, float]:
+        range_radius_bins = 1
+        angle_radius_bins = 2
+        relative_floor = 0.55
+
+        for band in self.local_remeasurement_patch_bands:
+            try:
+                r_min = float(band.get("r_min", 0.0))
+                r_max = band.get("r_max")
+            except (AttributeError, TypeError, ValueError):
+                continue
+
+            if float(range_m) < r_min:
+                continue
+            if r_max is not None and float(range_m) >= float(r_max):
+                continue
+
+            try:
+                range_radius_bins = max(1, int(band.get("range_radius_bins", range_radius_bins)))
+                angle_radius_bins = max(1, int(band.get("angle_radius_bins", angle_radius_bins)))
+                relative_floor = float(band.get("relative_floor", relative_floor))
+            except (TypeError, ValueError):
+                pass
+            break
+
+        return (
+            int(range_radius_bins),
+            int(angle_radius_bins),
+            float(np.clip(relative_floor, 0.0, 0.95)),
+        )
+
+    def _refine_measurement_near_track(
+        self,
+        track: _Track,
+        measurement: dict,
+        rai_map=None,
+        runtime_config=None,
+    ) -> dict:
+        if (
+            not self.local_remeasurement_enabled
+            or self.local_remeasurement_blend <= 0.0
+            or rai_map is None
+            or runtime_config is None
+        ):
+            return measurement
+
+        rai_array = np.asarray(rai_map, dtype=np.float64)
+        if rai_array.ndim != 2 or rai_array.size == 0:
+            return measurement
+
+        try:
+            range_axis = np.asarray(runtime_config.range_axis_m, dtype=np.float64)
+            angle_axis = np.asarray(runtime_config.angle_axis_rad, dtype=np.float64)
+        except AttributeError:
+            return measurement
+        if range_axis.size == 0 or angle_axis.size == 0:
+            return measurement
+        if range_axis.size < rai_array.shape[0] or angle_axis.size < rai_array.shape[1]:
+            return measurement
+
+        predicted_x = float(track.kf.x[0][0])
+        predicted_y = float(track.kf.x[1][0])
+        track_bias = self.local_remeasurement_track_bias
+        seed_x = (float(measurement["x_m"]) * (1.0 - track_bias)) + (predicted_x * track_bias)
+        seed_y = (float(measurement["y_m"]) * (1.0 - track_bias)) + (predicted_y * track_bias)
+        seed_range_m = float(hypot(seed_x, seed_y))
+        seed_angle_rad = float(atan2(seed_x, max(seed_y, 1e-6)))
+        seed_range_bin = int(np.clip(_nearest_axis_bin(range_axis, seed_range_m), 0, rai_array.shape[0] - 1))
+        seed_angle_bin = int(np.clip(_nearest_axis_bin(angle_axis, seed_angle_rad), 0, rai_array.shape[1] - 1))
+
+        range_radius_bins, angle_radius_bins, relative_floor = self._local_remeasurement_patch_for_range(
+            max(float(measurement["range_m"]), seed_range_m),
+        )
+        angle_lower = max(seed_angle_bin - angle_radius_bins, 0)
+        angle_upper = min(seed_angle_bin + angle_radius_bins + 1, rai_array.shape[1])
+        range_lower = max(seed_range_bin - range_radius_bins, 0)
+        range_upper = min(seed_range_bin + range_radius_bins + 1, rai_array.shape[0])
+        local_patch = rai_array[range_lower:range_upper, angle_lower:angle_upper]
+        if local_patch.size == 0 or not np.any(np.isfinite(local_patch)):
+            return measurement
+
+        finite_patch = local_patch[np.isfinite(local_patch)]
+        finite_patch = finite_patch[finite_patch > 0.0]
+        if finite_patch.size == 0:
+            return measurement
+
+        angle_mask = np.ones_like(angle_axis, dtype=bool)
+        angle_floor = float(np.quantile(finite_patch, 0.45))
+        (
+            refined_range_bin,
+            refined_angle_bin,
+            refined_range_m,
+            _refined_angle_rad,
+            refined_x_m,
+            refined_y_m,
+        ) = _refine_body_center_from_patch(
+            rai_array,
+            runtime_config,
+            seed_range_bin,
+            seed_angle_bin,
+            angle_mask,
+            angle_floor=angle_floor,
+            range_radius_bins=range_radius_bins,
+            angle_radius_bins=angle_radius_bins,
+            relative_floor=relative_floor,
+        )
+
+        if not (np.isfinite(refined_x_m) and np.isfinite(refined_y_m)):
+            return measurement
+
+        shift_x = float(refined_x_m) - float(measurement["x_m"])
+        shift_y = float(refined_y_m) - float(measurement["y_m"])
+        shift_distance = float(hypot(shift_x, shift_y))
+        max_shift_m = self.local_remeasurement_max_shift_m
+        if max_shift_m > 0.0 and shift_distance > max_shift_m:
+            scale = max_shift_m / max(shift_distance, 1e-6)
+            refined_x_m = float(measurement["x_m"]) + (shift_x * scale)
+            refined_y_m = float(measurement["y_m"]) + (shift_y * scale)
+            refined_range_m = float(hypot(refined_x_m, refined_y_m))
+            refined_range_bin = _nearest_axis_bin(range_axis, refined_range_m)
+            refined_angle_bin = _nearest_axis_bin(angle_axis, atan2(refined_x_m, max(refined_y_m, 1e-6)))
+
+        blend = self.local_remeasurement_blend
+        blended_x_m = (float(measurement["x_m"]) * (1.0 - blend)) + (float(refined_x_m) * blend)
+        blended_y_m = (float(measurement["y_m"]) * (1.0 - blend)) + (float(refined_y_m) * blend)
+        blended_range_m = float(hypot(blended_x_m, blended_y_m))
+
+        refined_measurement = dict(measurement)
+        refined_measurement["x_m"] = blended_x_m
+        refined_measurement["y_m"] = blended_y_m
+        refined_measurement["range_m"] = blended_range_m
+        refined_measurement["rdi_peak"] = float(measurement["rdi_peak"])
+        refined_measurement["rai_peak"] = float(
+            max(
+                float(measurement["rai_peak"]),
+                float(rai_array[
+                    int(np.clip(refined_range_bin, 0, rai_array.shape[0] - 1)),
+                    int(np.clip(refined_angle_bin, 0, rai_array.shape[1] - 1)),
+                ]),
+            )
+        )
+        return refined_measurement
 
     @staticmethod
     def _measurement_from_detection(detection) -> dict:
@@ -701,6 +866,8 @@ class MultiTargetTracker:
         detections,
         frame_ts: Optional[float] = None,
         allow_track_birth: bool = True,
+        rai_map=None,
+        runtime_config=None,
     ):
         measurements = [
             self._measurement_from_detection(detection)
@@ -716,10 +883,16 @@ class MultiTargetTracker:
         for track_index, measurement_index in matched_pairs:
             track = self._tracks[track_index]
             measurement = measurements[measurement_index]
-            z = np.array([[measurement["x_m"]], [measurement["y_m"]]], dtype=float)
 
             previous_state = track.state
             predicted_x = float(track.kf.x[0][0])
+            measurement = self._refine_measurement_near_track(
+                track,
+                measurement,
+                rai_map=rai_map,
+                runtime_config=runtime_config,
+            )
+            z = np.array([[measurement["x_m"]], [measurement["y_m"]]], dtype=float)
             track.kf.R = self._measurement_covariance(
                 measurement["range_m"],
                 measurement["confidence"],

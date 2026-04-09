@@ -184,6 +184,56 @@ COMMON_STYLE = """
     font: inherit;
     background: #fff;
   }
+  .replay-shell { display: grid; gap: 16px; }
+  .replay-stage {
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 16px;
+    background: var(--panel-soft);
+  }
+  .replay-controls {
+    display: grid;
+    grid-template-columns: auto minmax(220px, 1fr) auto auto auto;
+    gap: 12px;
+    align-items: center;
+  }
+  .replay-controls button,
+  .replay-controls select {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 10px 12px;
+    font: inherit;
+    background: #fff;
+    color: var(--text);
+  }
+  .replay-controls input[type="range"] { width: 100%; }
+  .replay-frame-label {
+    color: var(--muted);
+    font-size: 0.92rem;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .replay-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+  }
+  .replay-meta-card {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: #fff;
+    padding: 12px 14px;
+  }
+  .replay-meta-card .label {
+    color: var(--muted);
+    font-size: 0.86rem;
+    margin-bottom: 6px;
+  }
+  .replay-meta-card .value {
+    font-size: 1.12rem;
+    font-weight: 700;
+    line-height: 1.2;
+  }
 """
 
 
@@ -363,6 +413,245 @@ function renderTrajectoryChart(targetId, seriesList, options = {}) {
     + `<p class="subtle" style="margin:10px 0 0;">range/angle 값을 레이더 기준 x/y 좌표로 바꾼 경로입니다. 빈 원은 시작점, 채워진 원은 마지막 위치입니다.</p>`;
 }
 
+function renderTrajectoryReplay(targetId, playback, options = {}) {
+  const target = document.getElementById(targetId);
+  if (!target) return;
+  const frames = Array.isArray(playback?.frames) ? playback.frames : [];
+  const seriesList = Array.isArray(playback?.series) ? playback.series : [];
+  const breakFrameGap = Number.isFinite(Number(playback?.gap_break_frames))
+    ? Number(playback.gap_break_frames)
+    : 2;
+  if (!frames.length) {
+    target.innerHTML = `<div class="empty">${esc(playback?.empty_message || options.emptyMessage || '재생할 프레임 데이터가 없습니다.')}</div>`;
+    return;
+  }
+
+  const width = options.width || 760;
+  const height = options.height || 520;
+  const padding = { top: 18, right: 24, bottom: 40, left: 44 };
+  const palette = ['#0f6cbd', '#ef4444', '#10b981', '#f97316', '#8b5cf6', '#14b8a6'];
+  const frameDelayMs = { '0.5': 700, '1': 380, '2': 190, '4': 95 };
+
+  const allPoints = [];
+  frames.forEach((frame) => {
+    (frame.tracks || []).forEach((track) => {
+      const x = Number(track.x_m);
+      const y = Number(track.y_m);
+      if (Number.isFinite(x) && Number.isFinite(y)) allPoints.push({ x, y });
+    });
+  });
+  if (!allPoints.length) {
+    target.innerHTML = `<div class="empty">${esc(playback?.empty_message || options.emptyMessage || '재생할 좌표 데이터가 없습니다.')}</div>`;
+    return;
+  }
+
+  let maxAbsX = Math.max(...allPoints.map((point) => Math.abs(point.x)), 0.5);
+  let minY = Math.min(...allPoints.map((point) => point.y), 0);
+  let maxY = Math.max(...allPoints.map((point) => point.y), 0.5);
+  maxAbsX = Math.max(0.5, maxAbsX * 1.15);
+  minY = Math.min(0, minY);
+  maxY = Math.max(0.5, maxY * 1.12);
+  if (Math.abs(maxY - minY) < 0.5) maxY = minY + 0.5;
+
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const xFor = (x) => padding.left + ((Number(x) + maxAbsX) / (maxAbsX * 2)) * plotWidth;
+  const yFor = (y) => padding.top + (1 - ((Number(y) - minY) / (maxY - minY))) * plotHeight;
+
+  const seriesMeta = new Map();
+  (seriesList || []).forEach((series, index) => {
+    const trackId = String(series.track_id);
+    seriesMeta.set(trackId, {
+      color: series.color || palette[index % palette.length],
+      label: series.label || `track ${trackId}`,
+    });
+  });
+  frames.forEach((frame) => {
+    (frame.tracks || []).forEach((track) => {
+      const trackId = String(track.track_id);
+      if (!seriesMeta.has(trackId)) {
+        const color = palette[seriesMeta.size % palette.length];
+        seriesMeta.set(trackId, { color, label: track.label || `track ${trackId}` });
+      }
+    });
+  });
+
+  const preparedFrames = frames.map((frame) => {
+    const trackMap = new Map();
+    (frame.tracks || []).forEach((track) => {
+      trackMap.set(String(track.track_id), track);
+    });
+    return { ...frame, trackMap };
+  });
+
+  target.innerHTML = `
+    <div class="replay-shell">
+      <div class="replay-stage">
+        <div id="${targetId}-chart" class="chart"></div>
+      </div>
+      <div class="replay-controls">
+        <button type="button" id="${targetId}-play">재생</button>
+        <input type="range" id="${targetId}-slider" min="0" max="${Math.max(preparedFrames.length - 1, 0)}" step="1" value="0" />
+        <span class="replay-frame-label" id="${targetId}-frame-label"></span>
+        <select id="${targetId}-trail">
+          <option value="12">최근 12프레임</option>
+          <option value="24" selected>최근 24프레임</option>
+          <option value="48">최근 48프레임</option>
+          <option value="9999">전체</option>
+        </select>
+        <select id="${targetId}-speed">
+          <option value="0.5">0.5x</option>
+          <option value="1" selected>1x</option>
+          <option value="2">2x</option>
+          <option value="4">4x</option>
+        </select>
+      </div>
+      <div id="${targetId}-meta" class="replay-meta-grid"></div>
+      <p class="subtle" style="margin:0;">최근 N프레임 궤적과 현재 위치를 함께 보여 줍니다. render 기준은 실제 화면에 보인 결과, processed 기준은 내부 detection/tracker 상태를 의미합니다.</p>
+    </div>
+  `;
+
+  const chartEl = document.getElementById(`${targetId}-chart`);
+  const sliderEl = document.getElementById(`${targetId}-slider`);
+  const playButtonEl = document.getElementById(`${targetId}-play`);
+  const frameLabelEl = document.getElementById(`${targetId}-frame-label`);
+  const trailEl = document.getElementById(`${targetId}-trail`);
+  const speedEl = document.getElementById(`${targetId}-speed`);
+  const metaEl = document.getElementById(`${targetId}-meta`);
+
+  let activeIndex = 0;
+  let timer = null;
+
+  function stopPlayback() {
+    if (timer !== null) {
+      window.clearTimeout(timer);
+      timer = null;
+    }
+    playButtonEl.textContent = '재생';
+  }
+
+  function trackSegmentsForFrame(trackId, frameIndex, trailWindow) {
+    const segments = [];
+    let current = [];
+    const startIndex = Math.max(0, frameIndex - trailWindow + 1);
+    for (let index = startIndex; index <= frameIndex; index += 1) {
+      const point = preparedFrames[index].trackMap.get(trackId);
+      if (!point) {
+        if (current.length) {
+          segments.push(current);
+          current = [];
+        }
+        continue;
+      }
+      if (current.length) {
+        const previousPoint = current[current.length - 1];
+        const frameGap = Number(point.frame_id) - Number(previousPoint.frame_id);
+        if (Number.isFinite(frameGap) && frameGap > breakFrameGap) {
+          segments.push(current);
+          current = [];
+        }
+      }
+      current.push(point);
+    }
+    if (current.length) segments.push(current);
+    return segments;
+  }
+
+  function renderActiveFrame() {
+    const frame = preparedFrames[activeIndex];
+    const trailWindow = Number(trailEl.value) || 24;
+    let svg = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(options.title || 'trajectory replay')}">`;
+    svg += `<rect x="0" y="0" width="${width}" height="${height}" rx="18" fill="#ffffff"></rect>`;
+    for (let step = 0; step <= 4; step += 1) {
+      const yValue = minY + ((maxY - minY) * step) / 4;
+      const y = yFor(yValue);
+      svg += `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" stroke="#d7deea" stroke-width="1"></line>`;
+      svg += `<text x="${padding.left - 8}" y="${y + 4}" text-anchor="end" fill="#5f6f86" font-size="12">${esc(fmt(yValue, 1))}</text>`;
+    }
+    for (let step = 0; step <= 4; step += 1) {
+      const xValue = -maxAbsX + ((maxAbsX * 2) * step) / 4;
+      const x = xFor(xValue);
+      svg += `<line x1="${x}" y1="${padding.top}" x2="${x}" y2="${height - padding.bottom}" stroke="#eef2f7" stroke-width="1"></line>`;
+      svg += `<text x="${x}" y="${height - 14}" text-anchor="middle" fill="#5f6f86" font-size="12">${esc(fmt(xValue, 1))}</text>`;
+    }
+    svg += `<line x1="${xFor(0)}" y1="${padding.top}" x2="${xFor(0)}" y2="${height - padding.bottom}" stroke="#8ea0bb" stroke-width="1.4"></line>`;
+    svg += `<line x1="${padding.left}" y1="${yFor(0)}" x2="${width - padding.right}" y2="${yFor(0)}" stroke="#8ea0bb" stroke-width="1.4"></line>`;
+
+    Array.from(seriesMeta.entries()).forEach(([trackId, meta]) => {
+      const segments = trackSegmentsForFrame(trackId, activeIndex, trailWindow);
+      segments.forEach((segment) => {
+        if (segment.length < 2) return;
+        const polyline = segment.map((point) => `${xFor(point.x_m)},${yFor(point.y_m)}`).join(' ');
+        svg += `<polyline fill="none" stroke="${meta.color}" stroke-width="2.7" stroke-linejoin="round" stroke-linecap="round" opacity="0.92" points="${polyline}"></polyline>`;
+      });
+      const currentPoint = frame.trackMap.get(trackId);
+      if (currentPoint) {
+        svg += `<circle cx="${xFor(currentPoint.x_m)}" cy="${yFor(currentPoint.y_m)}" r="6.4" fill="${meta.color}" stroke="#ffffff" stroke-width="2.2"></circle>`;
+      }
+    });
+
+    svg += `<circle cx="${xFor(0)}" cy="${yFor(0)}" r="6" fill="#0f172a"></circle>`;
+    svg += `<text x="${xFor(0) + 10}" y="${yFor(0) - 8}" fill="#142033" font-size="12">radar</text>`;
+    svg += `<text x="${padding.left}" y="${height - 4}" fill="#5f6f86" font-size="12">x: left / right (m)</text>`;
+    svg += `<text x="${width - padding.right}" y="${padding.top + 12}" text-anchor="end" fill="#5f6f86" font-size="12">y: forward (m)</text>`;
+    svg += `</svg>`;
+
+    const legend = Array.from(seriesMeta.entries()).map(([trackId, meta]) => (
+      `<span><i style="background:${meta.color}"></i>${esc(meta.label)}</span>`
+    )).join('');
+    chartEl.innerHTML = svg + `<div class="legend">${legend}</div>`;
+
+    const metrics = [
+      ['frame', `#${frame.frame_id}`],
+      ['visible track', String((frame.tracks || []).length)],
+      ['invalid', frame.invalid ? 'yes' : 'no'],
+      ['latency', frame.capture_latency_ms === null || frame.capture_latency_ms === undefined ? 'n/a' : `${fmt(frame.capture_latency_ms, 1)} ms`],
+      [playback.count_label || 'track', frame.candidate_count === null || frame.candidate_count === undefined ? 'n/a' : String(frame.candidate_count)],
+      ['status', frame.status_text || frame.tracker_policy || 'n/a'],
+    ];
+    metaEl.innerHTML = metrics.map(([label, value]) => (
+      `<div class="replay-meta-card"><div class="label">${esc(label)}</div><div class="value">${esc(String(value))}</div></div>`
+    )).join('');
+    frameLabelEl.textContent = `${activeIndex + 1} / ${preparedFrames.length}`;
+    sliderEl.value = String(activeIndex);
+  }
+
+  function stepPlayback() {
+    if (activeIndex >= preparedFrames.length - 1) {
+      stopPlayback();
+      return;
+    }
+    activeIndex += 1;
+    renderActiveFrame();
+    timer = window.setTimeout(stepPlayback, frameDelayMs[speedEl.value] || 380);
+  }
+
+  playButtonEl.addEventListener('click', () => {
+    if (timer !== null) {
+      stopPlayback();
+      return;
+    }
+    playButtonEl.textContent = '일시정지';
+    timer = window.setTimeout(stepPlayback, frameDelayMs[speedEl.value] || 380);
+  });
+  sliderEl.addEventListener('input', () => {
+    activeIndex = Number(sliderEl.value) || 0;
+    stopPlayback();
+    renderActiveFrame();
+  });
+  trailEl.addEventListener('change', () => {
+    renderActiveFrame();
+  });
+  speedEl.addEventListener('change', () => {
+    if (timer !== null) {
+      stopPlayback();
+      playButtonEl.textContent = '재생';
+    }
+  });
+
+  renderActiveFrame();
+}
+
 function nestedGet(data, dottedKey) {
   let current = data;
   for (const part of dottedKey.split(".")) {
@@ -387,6 +676,7 @@ TRAJECTORY_SOURCE_LABELS = {
     "tentative_tracks": "tentative track",
     "confirmed_tracks": "confirmed track",
     "detections": "lead detection fallback",
+    "postprocessed": "log postprocess",
 }
 
 TRAJECTORY_COLORS = ["#0f6cbd", "#ef4444", "#10b981", "#f97316", "#8b5cf6", "#14b8a6"]
@@ -492,6 +782,20 @@ def _fmt_pct(value):
     if value is None:
         return "n/a"
     return f"{float(value) * 100:.1f}%"
+
+
+def _extract_record_count(record: dict, count_key: str | None = None, fallback_key: str | None = None):
+    if count_key:
+        value = record.get(count_key)
+        if isinstance(value, (int, float)):
+            return int(value)
+    if fallback_key:
+        fallback = record.get(fallback_key)
+        if isinstance(fallback, list):
+            return len(fallback)
+        if isinstance(fallback, (int, float)):
+            return int(fallback)
+    return None
 
 
 def _pill(label: str, tone: str):
@@ -720,6 +1024,291 @@ def _load_session_trajectory_bundle(session_dir: Path):
     )
 
 
+def _playback_point(item: dict, frame_id: int):
+    point = _trajectory_point(item, frame_id)
+    if point is None:
+        return None
+    point["track_id"] = str(item.get("track_id"))
+    point["label"] = f"track {point['track_id']}"
+    point["confidence"] = _round_or_none(item.get("confidence"), digits=4)
+    point["score"] = _round_or_none(item.get("score"), digits=4)
+    return point
+
+
+def _track_item_rank(item: dict):
+    return (
+        1 if item.get("is_primary") else 0,
+        float(item.get("confidence", 0.0) or 0.0),
+        float(item.get("score", 0.0) or 0.0),
+        -abs(float(item.get("x_m", 0.0) or 0.0)),
+    )
+
+
+def _select_lead_point_from_record(record: dict, priority_keys: list[str]):
+    frame_id = int(record.get("frame_id", record.get("frame_index", 0)) or 0)
+    for key in priority_keys:
+        items = record.get(key) or []
+        if not items:
+            continue
+        if key == "detections":
+            lead = max(items, key=lambda item: float(item.get("score", 0.0) or 0.0))
+            point = _playback_point({**lead, "track_id": "lead"}, frame_id)
+            if point is not None:
+                point["source_key"] = key
+                return point
+            continue
+        lead = max(items, key=_track_item_rank)
+        point = _playback_point(lead, frame_id)
+        if point is not None:
+            point["source_key"] = key
+            return point
+    return None
+
+
+def _interpolate_postprocessed_points(points: list[dict], max_gap_frames: int = 6):
+    if not points:
+        return []
+    merged = [dict(points[0], postprocess_state="measured")]
+    for previous, current in zip(points, points[1:]):
+        gap = int(current["frame_id"]) - int(previous["frame_id"])
+        if 1 < gap <= max_gap_frames:
+            for step in range(1, gap):
+                ratio = step / gap
+                merged.append(
+                    {
+                        "frame_id": int(previous["frame_id"]) + step,
+                        "x_m": round(float(previous["x_m"]) + (float(current["x_m"]) - float(previous["x_m"])) * ratio, 4),
+                        "y_m": round(float(previous["y_m"]) + (float(current["y_m"]) - float(previous["y_m"])) * ratio, 4),
+                        "angle_deg": None,
+                        "range_m": None,
+                        "is_primary": bool(previous.get("is_primary") or current.get("is_primary")),
+                        "track_id": "post",
+                        "label": "postprocessed lead",
+                        "confidence": None,
+                        "score": None,
+                        "source_key": "postprocessed",
+                        "postprocess_state": "interpolated",
+                    }
+                )
+        merged.append(dict(current, postprocess_state="measured"))
+    return merged
+
+
+def _smooth_postprocessed_points(points: list[dict], alpha: float = 0.35):
+    if not points:
+        return []
+    smoothed = []
+    prev_x = None
+    prev_y = None
+    previous_frame_id = None
+    for point in points:
+        current_x = float(point["x_m"])
+        current_y = float(point["y_m"])
+        frame_id = int(point["frame_id"])
+        if (
+            prev_x is None
+            or prev_y is None
+            or previous_frame_id is None
+            or frame_id - previous_frame_id > 1
+        ):
+            smoothed_x = current_x
+            smoothed_y = current_y
+        else:
+            smoothed_x = alpha * current_x + (1.0 - alpha) * prev_x
+            smoothed_y = alpha * current_y + (1.0 - alpha) * prev_y
+        prev_x = smoothed_x
+        prev_y = smoothed_y
+        previous_frame_id = frame_id
+        smoothed.append(
+            {
+                **point,
+                "x_m": round(smoothed_x, 4),
+                "y_m": round(smoothed_y, 4),
+            }
+        )
+    return smoothed
+
+
+def _build_postprocessed_trajectory_bundle(
+    render_records: list[dict],
+    processed_records: list[dict],
+    *,
+    interpolation_gap_frames: int = 6,
+    smoothing_alpha: float = 0.35,
+):
+    render_priority = ["display_tracks", "tentative_display_tracks", "tentative_tracks", "detections"]
+    processed_priority = ["confirmed_tracks", "tentative_tracks", "detections"]
+    measured_points = []
+    source_label = "render lead"
+    priority_label = _trajectory_priority_label(render_priority)
+
+    for record in render_records:
+        point = _select_lead_point_from_record(record, render_priority)
+        if point is not None:
+            measured_points.append(point)
+
+    if len(measured_points) < 2:
+        measured_points = []
+        source_label = "processed lead"
+        priority_label = _trajectory_priority_label(processed_priority)
+        for record in processed_records:
+            point = _select_lead_point_from_record(record, processed_priority)
+            if point is not None:
+                measured_points.append(point)
+
+    measured_points.sort(key=lambda item: item["frame_id"])
+    interpolated_points = _interpolate_postprocessed_points(
+        measured_points,
+        max_gap_frames=interpolation_gap_frames,
+    )
+    smoothed_points = _smooth_postprocessed_points(interpolated_points, alpha=smoothing_alpha)
+
+    if not smoothed_points:
+        return {
+            "series": [],
+            "frames": [],
+            "track_count": 0,
+            "source_key": None,
+            "source_label": source_label,
+            "priority_label": priority_label,
+            "fallback_used": False,
+            "lead_only": True,
+            "gap_break_frames": int(interpolation_gap_frames),
+            "empty_message": "후처리할 lead trajectory가 충분하지 않습니다.",
+            "count_label": "postprocessed lead",
+            "postprocess": {
+                "input_points": 0,
+                "output_points": 0,
+                "interpolated_points": 0,
+                "smoothing_alpha": smoothing_alpha,
+                "interpolation_gap_frames": interpolation_gap_frames,
+            },
+        }
+
+    series_points = _downsample_points(smoothed_points)
+    frames = [
+        {
+            "frame_id": int(point["frame_id"]),
+            "tracks": [point],
+            "source_key": "postprocessed",
+            "invalid": False,
+            "status_text": point.get("postprocess_state", "smoothed"),
+            "tracker_policy": None,
+            "capture_latency_ms": None,
+            "candidate_count": 1,
+        }
+        for point in smoothed_points
+    ]
+    interpolated_count = sum(1 for point in smoothed_points if point.get("postprocess_state") == "interpolated")
+    return {
+        "series": [
+            {
+                "track_id": "post",
+                "label": "postprocessed lead",
+                "color": TRAJECTORY_COLORS[0],
+                "point_count": len(series_points),
+                "full_point_count": len(smoothed_points),
+                "primary_hits": sum(1 for point in smoothed_points if point.get("is_primary")),
+                "longest_run": _longest_contiguous_run(smoothed_points, max_gap_frames=interpolation_gap_frames),
+                "points": series_points,
+            }
+        ],
+        "frames": frames,
+        "track_count": 1,
+        "source_key": "postprocessed",
+        "source_label": source_label,
+        "priority_label": priority_label,
+        "fallback_used": False,
+        "lead_only": True,
+        "gap_break_frames": int(interpolation_gap_frames),
+        "empty_message": "후처리 trajectory 데이터가 없습니다.",
+        "count_label": "postprocessed lead",
+        "postprocess": {
+            "input_points": len(measured_points),
+            "output_points": len(smoothed_points),
+            "interpolated_points": interpolated_count,
+            "smoothing_alpha": smoothing_alpha,
+            "interpolation_gap_frames": interpolation_gap_frames,
+        },
+    }
+
+
+def _build_track_playback_bundle(
+    records: list[dict],
+    priority_keys: list[str],
+    *,
+    max_tracks: int = 4,
+    lead_only: bool = False,
+    gap_break_frames: int = 2,
+    latency_key: str | None = None,
+    count_key: str | None = None,
+    fallback_count_key: str | None = None,
+    count_label: str = "track",
+):
+    trajectory = _build_track_trajectory_bundle(
+        records,
+        priority_keys,
+        max_tracks=max_tracks,
+        lead_only=lead_only,
+        gap_break_frames=gap_break_frames,
+    )
+    selected_track_ids = {str(item.get("track_id")) for item in trajectory.get("series", [])}
+    frames = []
+    used_detection_fallback = bool(trajectory.get("fallback_used"))
+
+    for record in records:
+        frame_id = int(record.get("frame_id", record.get("frame_index", 0)) or 0)
+        frame_tracks = []
+        selected_items = []
+        selected_key = None
+
+        if used_detection_fallback:
+            detections = record.get("detections") or []
+            if detections:
+                lead = max(detections, key=lambda item: float(item.get("score", 0.0) or 0.0))
+                selected_key = "detections"
+                point = _playback_point({**lead, "track_id": "lead"}, frame_id)
+                if point is not None:
+                    frame_tracks.append(point)
+        else:
+            for key in priority_keys:
+                items = record.get(key) or []
+                if items:
+                    selected_key = key
+                    selected_items = items
+                    break
+            for item in selected_items:
+                track_id = item.get("track_id")
+                if track_id is None:
+                    continue
+                if selected_track_ids and str(track_id) not in selected_track_ids:
+                    continue
+                point = _playback_point(item, frame_id)
+                if point is not None:
+                    frame_tracks.append(point)
+
+        frames.append(
+            {
+                "frame_id": frame_id,
+                "tracks": frame_tracks,
+                "source_key": selected_key,
+                "invalid": bool(record.get("invalid")),
+                "status_text": record.get("status_text", ""),
+                "tracker_policy": record.get("tracker_policy"),
+                "capture_latency_ms": record.get(latency_key) if latency_key else None,
+                "candidate_count": _extract_record_count(record, count_key, fallback_count_key)
+                if count_key or fallback_count_key
+                else None,
+            }
+        )
+
+    return {
+        **trajectory,
+        "frames": frames,
+        "count_label": count_label,
+    }
+
+
 def _trajectory_summary_text(bundle: dict):
     if bundle.get("series"):
         fallback_text = " | fallback=detection" if bundle.get("fallback_used") else ""
@@ -731,6 +1320,146 @@ def _trajectory_summary_text(bundle: dict):
             f"tracks={bundle.get('track_count', 0)}{mode_text}{gap_text}{fallback_text}"
         )
     return bundle.get("empty_message") or "궤적 데이터가 없습니다."
+
+
+def _postprocess_summary_text(bundle: dict):
+    meta = bundle.get("postprocess") or {}
+    if not bundle.get("series"):
+        return bundle.get("empty_message") or "후처리 trajectory 데이터가 없습니다."
+    return (
+        f"source={bundle.get('source_label', 'n/a')} | "
+        f"input={meta.get('input_points', 0)} | "
+        f"output={meta.get('output_points', 0)} | "
+        f"interpolated={meta.get('interpolated_points', 0)} | "
+        f"gap_fill<={meta.get('interpolation_gap_frames', 'n/a')} | "
+        f"ema_alpha={meta.get('smoothing_alpha', 'n/a')}"
+    )
+
+
+def _build_trajectory_replay_html(
+    session_dir: Path,
+    render_records: list[dict],
+    processed_records: list[dict],
+):
+    postprocessed_playback = _build_postprocessed_trajectory_bundle(render_records, processed_records)
+    render_playback = _build_track_playback_bundle(
+        render_records,
+        ["display_tracks", "tentative_display_tracks", "tentative_tracks"],
+        max_tracks=4,
+        lead_only=False,
+        latency_key="capture_to_render_ms",
+        count_key="display_track_count",
+        fallback_count_key="display_tracks",
+        count_label="display track",
+    )
+    processed_playback = _build_track_playback_bundle(
+        processed_records,
+        ["confirmed_tracks", "tentative_tracks"],
+        max_tracks=4,
+        lead_only=False,
+        latency_key="capture_to_process_ms",
+        count_key="confirmed_track_count",
+        fallback_count_key="confirmed_tracks",
+        count_label="confirmed track",
+    )
+    payload = {
+        "render": render_playback,
+        "processed": processed_playback,
+        "postprocessed": postprocessed_playback,
+    }
+    script = f"""
+    <script>
+      {COMMON_SCRIPT}
+      const REPLAY_DATA = {json.dumps(payload, ensure_ascii=False)};
+      function replaySummaryText(bundle, modeLabel) {{
+        if (!bundle || !bundle.series || !bundle.series.length) {{
+          return `${{modeLabel}} | ${{
+            (bundle && (bundle.empty_message || bundle.emptyMessage)) || '재생할 데이터가 없습니다.'
+          }}`;
+        }}
+        const fallbackText = bundle.fallback_used ? ' | fallback=detection' : '';
+        const gapText = bundle.gap_break_frames ? ` | gap_break>${{bundle.gap_break_frames}}` : '';
+        return `${{modeLabel}} | priority=${{bundle.priority_label || 'n/a'}} | source=${{bundle.source_label || 'n/a'}} | tracks=${{bundle.track_count || 0}}${{gapText}}${{fallbackText}}`;
+      }}
+      function renderSelectedReplay() {{
+        const selected = document.getElementById('replay-source-select').value;
+        const bundle = REPLAY_DATA[selected] || {{ frames: [], series: [], empty_message: '선택한 재생 데이터가 없습니다.' }};
+        const modeLabel = selected === 'render'
+          ? 'render 기준: 실제 화면에 표시된 track'
+          : selected === 'processed'
+            ? 'processed 기준: 내부 confirmed/tentative track'
+            : '후처리 기준: lead trajectory 보간 + smoothing 결과';
+        document.getElementById('replay-summary').textContent = replaySummaryText(bundle, modeLabel);
+        renderTrajectoryReplay('trajectory-replay-root', bundle, {{
+          title: selected === 'render'
+            ? 'render trajectory replay'
+            : selected === 'processed'
+              ? 'processed trajectory replay'
+              : 'postprocessed trajectory replay'
+        }});
+      }}
+      document.getElementById('replay-source-select').addEventListener('change', renderSelectedReplay);
+      renderSelectedReplay();
+    </script>
+    """
+
+    return f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{session_dir.name} trajectory replay</title>
+  <style>{COMMON_STYLE}</style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <h1>trajectory_replay.html</h1>
+      <p>정적 발자취 대신, 프레임 순서대로 이동을 재생해서 직선/왕복/원형/네모 경로가 실제로 어떻게 무너지는지 디버깅하는 페이지입니다.</p>
+      <nav class="nav">
+        <a href="./index.html">세션 개요</a>
+        <a href="./performance_report.html">성능 KPI 리포트</a>
+        <a href="./processed_report.html">processed 리포트</a>
+        <a href="./render_report.html">render 리포트</a>
+        <a href="./event_report.html">event 리포트</a>
+        <a href="../index.html">전체 비교 대시보드</a>
+      </nav>
+    </header>
+
+    <section class="card">
+      <h2>재생 소스 선택</h2>
+      <div class="controls">
+        <div class="control">
+          <label for="replay-source-select">데이터 기준</label>
+          <select id="replay-source-select">
+            <option value="render">render 기준</option>
+            <option value="processed">processed 기준</option>
+            <option value="postprocessed">로그 후처리 기준</option>
+          </select>
+        </div>
+      </div>
+      <p id="replay-summary" class="subtle" style="margin-top:14px;"></p>
+    </section>
+
+    <section class="card">
+      <h2>시간축 재생</h2>
+      <p class="subtle">최근 N프레임 trail과 현재 위치를 함께 표시합니다. render 기준은 화면에서 실제 보인 결과를, processed 기준은 내부 tracker 상태를, 후처리 기준은 로그에서 lead trajectory를 보간·smoothing한 결과를 보여 줍니다.</p>
+      <div id="trajectory-replay-root"></div>
+    </section>
+
+    <section class="card">
+      <h2>읽는 법</h2>
+      <ol class="steps">
+        <li>우선 <code>render</code> 기준으로 재생해, 사용자가 실제로 본 끊김과 튐이 어디서 생기는지 확인합니다.</li>
+        <li>같은 구간을 <code>processed</code> 기준으로 바꿔서 보면, 내부 track은 유지되는데 display에서만 숨겨졌는지 구분할 수 있습니다.</li>
+        <li><code>로그 후처리 기준</code>은 짧은 gap 보간과 EMA smoothing이 들어간 offline 디버그 경로라, 원본과 얼마나 다른지 비교해 representative point drift를 해석할 때 씁니다.</li>
+        <li><code>최근 12/24/48프레임</code> trail을 바꿔 보면, 직선운동이 왜 원처럼 말려 보였는지와 코너에서 왜 끊겼는지 해석하기 쉽습니다.</li>
+      </ol>
+    </section>
+    {script}
+  </div>
+</body>
+</html>"""
 
 
 def _event_summary(events: list[dict]):
@@ -811,6 +1540,7 @@ def _overview_cards(summary: dict):
         ("Processed Invalid", _fmt_pct(processed.get("invalid_rate")), "처리 입력 무결성 관점", "danger" if (processed.get("invalid_rate") or 0) >= 0.5 else "brand"),
         ("Render Invalid", _fmt_pct(render.get("invalid_rate")), "사용자 체감 품질 관점", "danger" if (render.get("invalid_rate") or 0) >= 0.5 else "brand"),
         ("Display Track Mean", _fmt(render.get("display_track_count", {}).get("mean")), "화면에 실제로 보인 트랙 수", "warn"),
+        ("Held Display Mean", _fmt(render.get("display_held_track_count", {}).get("mean")), "display hysteresis 개입량", "warn"),
         ("Render P95", _fmt(render.get("capture_to_render_ms", {}).get("p95"), suffix=" ms"), "수집부터 표시까지 상위 95%", "brand"),
         ("Power Plan", system.get("power_plan_name") or "n/a", "실험/측정용으로는 High performance 권장", power_tone),
         ("Host IP Match", _yes_no_unknown(system.get("host_ip_present"), yes_text="match", no_text="mismatch"), f"expected={system.get('expected_host_ip') or 'n/a'}", host_ip_tone),
@@ -820,11 +1550,14 @@ def _overview_cards(summary: dict):
 
 def _performance_overview_cards(summary: dict):
     performance = summary.get("performance", {})
+    scoring = performance.get("scoring", {})
     budget = performance.get("frame_budget", {})
     throughput = performance.get("throughput", {})
     compute = performance.get("compute", {})
     jitter = performance.get("jitter", {})
     continuity = performance.get("continuity", {})
+    geometry = performance.get("geometry", {})
+    geometry_reference = geometry.get("reference", {})
 
     processed_ratio = throughput.get("processed_vs_expected_ratio")
     render_ratio = throughput.get("render_vs_expected_ratio")
@@ -832,6 +1565,11 @@ def _performance_overview_cards(summary: dict):
     render_jitter = jitter.get("render_latency_jitter_ms")
     lead_switches = (continuity.get("lead_confirmed") or {}).get("switch_count")
     candidate_ratio = continuity.get("candidate_to_confirmed_ratio")
+    path_cleanliness = geometry_reference.get("path_cleanliness_score_10")
+    path_max_gap = geometry_reference.get("max_gap_frames")
+    path_residual = geometry_reference.get("local_residual_rms_m")
+    overall_score_10 = scoring.get("overall_score_10")
+    overall_score_100 = scoring.get("overall_score_100")
 
     def ratio_tone(value):
         if value is None:
@@ -857,6 +1595,12 @@ def _performance_overview_cards(summary: dict):
 
     return [
         (
+            "Performance Score",
+            f"{_fmt(overall_score_10)}/10",
+            f"{_fmt(overall_score_100)}/100 | {scoring.get('label') or '평가 없음'}",
+            scoring.get("tone", "brand"),
+        ),
+        (
             "Frame Budget",
             _fmt(budget.get("configured_frame_period_ms"), suffix=" ms"),
             f"target={_fmt(budget.get('expected_fps'))} fps",
@@ -865,19 +1609,19 @@ def _performance_overview_cards(summary: dict):
         (
             "Processed FPS",
             _fmt(throughput.get("processed_fps")),
-            f"target 대비 {_fmt_pct(processed_ratio)}",
+            _fps_target_hint(throughput.get("processed_fps"), budget.get("expected_fps"), processed_ratio),
             ratio_tone(processed_ratio),
         ),
         (
             "Render FPS",
             _fmt(throughput.get("render_fps")),
-            f"target 대비 {_fmt_pct(render_ratio)}",
+            _fps_target_hint(throughput.get("render_fps"), budget.get("expected_fps"), render_ratio),
             ratio_tone(render_ratio),
         ),
         (
             "Compute Util P95",
             _fmt_pct(compute_ratio),
-            "frame budget 대비 compute_total p95 비율",
+            _budget_hint((compute.get("compute_total_ms") or {}).get("p95"), budget.get("configured_frame_period_ms"), compute_ratio),
             lower_tone(compute_ratio, 0.6, 0.85, 1.0),
         ),
         (
@@ -904,7 +1648,82 @@ def _performance_overview_cards(summary: dict):
             "화면에 실제로 남는 track 비율",
             ratio_tone(continuity.get("display_to_confirmed_ratio")),
         ),
+        (
+            "Path Cleanliness",
+            f"{_fmt(path_cleanliness)}/10",
+            f"gap={_fmt(path_max_gap, digits=0)} frames | residual={_fmt(path_residual, suffix=' m')}",
+            lower_tone(10.0 - float(path_cleanliness) if path_cleanliness is not None else None, 1, 3, 5),
+        ),
     ]
+
+
+def _fps_target_hint(actual_fps, expected_fps, ratio):
+    if actual_fps is None or expected_fps is None or ratio is None:
+        return "목표 FPS 대비 비율을 계산할 데이터가 부족합니다."
+    return f"실제 {_fmt(actual_fps)} fps / 목표 {_fmt(expected_fps)} fps = {_fmt_pct(ratio)}"
+
+
+def _budget_hint(used_ms, budget_ms, ratio):
+    if used_ms is None or budget_ms is None or ratio is None:
+        return "프레임 예산 대비 사용량을 계산할 데이터가 부족합니다."
+    return f"{_fmt(used_ms, suffix=' ms')} / 예산 {_fmt(budget_ms, suffix=' ms')} = {_fmt_pct(ratio)}"
+
+
+def _performance_category_cards(summary: dict):
+    categories = ((summary.get("performance") or {}).get("scoring") or {}).get("categories") or {}
+    rows = []
+    for key in ("throughput", "efficiency", "stability", "continuity", "geometry"):
+        category = categories.get(key) or {}
+        rows.append(
+            f"""
+            <div class="metric">
+              <div class="label">{category.get('label', key)}</div>
+              <div class="value">{_fmt(category.get('score_10'))}/10</div>
+              <div class="hint">{_fmt(category.get('score_100'))}/100 | {_pill(category.get('grade', 'n/a'), category.get('tone', 'brand'))}</div>
+            </div>
+            """
+        )
+    return "".join(rows)
+
+
+def _performance_kpi_rows(summary: dict):
+    kpis = (((summary.get("performance") or {}).get("scoring") or {}).get("kpis") or {})
+    if not kpis:
+        return '<tr><td colspan="7">성능 KPI 점수를 계산할 데이터가 없습니다.</td></tr>'
+
+    rows = []
+    order = (
+        "processed_vs_target",
+        "render_vs_target",
+        "compute_utilization_p95",
+        "render_latency_p95",
+        "render_jitter",
+        "candidate_to_confirmed",
+        "display_to_confirmed",
+        "lead_confirmed_switch",
+        "path_cleanliness",
+        "path_max_gap_frames",
+        "path_local_residual_rms",
+        "path_jump_ratio",
+    )
+    for key in order:
+        item = kpis.get(key)
+        if not item:
+            continue
+        rows.append(
+            f"""
+            <tr>
+              <td><strong>{item.get('label', key)}</strong><br /><span class="subtle"><code>{key}</code></span></td>
+              <td>{item.get('value_display', 'n/a')}</td>
+              <td>{_fmt(item.get('score_10'))}/10<br />{_pill(_tone_label(item.get('tone', 'brand')), item.get('tone', 'brand'))}</td>
+              <td>{item.get('target', 'n/a')}<br /><span class="subtle">식: <code>{item.get('calculation', 'n/a')}</code></span></td>
+              <td>{item.get('meaning', '')}</td>
+              <td>{item.get('industry_standard', '')}</td>
+              <td>{item.get('interpretation', '')}</td>
+            </tr>
+            """
+        )
+    return "".join(rows)
 
 
 def _build_text_list_html(items: list[str], empty_message: str):
@@ -1237,11 +2056,16 @@ def _system_snapshot_rows(system_summary: dict):
 
 def _build_performance_html(session_dir: Path, summary: dict):
     performance = summary.get("performance", {})
+    scoring = performance.get("scoring", {})
     budget = performance.get("frame_budget", {})
     throughput = performance.get("throughput", {})
     compute = performance.get("compute", {})
     jitter = performance.get("jitter", {})
     continuity = performance.get("continuity", {})
+    geometry = performance.get("geometry", {})
+    geometry_reference = geometry.get("reference", {})
+    render_geometry = geometry.get("render_lead", {})
+    processed_geometry = geometry.get("processed_lead", {})
     overview_cards = "".join(
         f"""
         <div class="metric">
@@ -1252,6 +2076,8 @@ def _build_performance_html(session_dir: Path, summary: dict):
         """
         for label, value, hint, _tone in _performance_overview_cards(summary)
     )
+    category_cards = _performance_category_cards(summary)
+    kpi_rows = _performance_kpi_rows(summary)
     highlights_html = _build_text_list_html(
         performance.get("highlights", []),
         "성능 해석용 하이라이트가 없습니다.",
@@ -1262,6 +2088,7 @@ def _build_performance_html(session_dir: Path, summary: dict):
             "2순위: compute utilization을 봅니다. compute_total p95가 frame budget에 가까우면 계산 최적화가 우선입니다.",
             "3순위: render jitter와 non-compute latency를 같이 봅니다. compute는 여유인데 jitter가 크면 큐, 환경, 표시 경로를 의심합니다.",
             "4순위: continuity 지표를 봅니다. candidate/confirmed 비율이 높고 lead switch가 많으면 detection/tracking 설계 병목일 가능성이 큽니다.",
+            "5순위: geometry/path quality를 봅니다. gap, local residual, jump ratio가 크면 같은 ID여도 눈으로 보는 경로는 지저분할 수 있습니다.",
         ],
         empty_message="표시할 해석 순서가 없습니다.",
     )
@@ -1271,12 +2098,44 @@ def _build_performance_html(session_dir: Path, summary: dict):
         <tr><td><strong>{label}</strong></td><td>{value}</td><td>{hint}</td></tr>
         """
         for label, value, hint in [
-            ("Configured Frame Period", _fmt(budget.get("configured_frame_period_ms"), suffix=" ms"), budget.get("cfg_path") or "cfg unavailable"),
-            ("Expected FPS", _fmt(budget.get("expected_fps")), "설정 frameCfg 기준 입력 목표"),
-            ("Processed FPS", _fmt(throughput.get("processed_fps")), f"target 대비 {_fmt_pct(throughput.get('processed_vs_expected_ratio'))}"),
-            ("Render FPS", _fmt(throughput.get("render_fps")), f"target 대비 {_fmt_pct(throughput.get('render_vs_expected_ratio'))}"),
-            ("Render / Processed", _fmt_pct(throughput.get("render_to_processed_ratio")), "화면 갱신이 처리 출력을 얼마나 따라갔는지"),
-            ("Session Duration", _fmt(throughput.get("session_duration_s"), suffix=" s"), "FPS 계산 기준 세션 길이"),
+            (
+                "Configured Frame Period",
+                _fmt(budget.get("configured_frame_period_ms"), suffix=" ms"),
+                f"설정 파일 기준 1프레임 예산입니다. cfg={budget.get('cfg_path') or 'unavailable'}",
+            ),
+            (
+                "Expected FPS",
+                _fmt(budget.get("expected_fps")),
+                "frameCfg가 기대하는 목표 처리량입니다. 이후 target 대비 xx%는 모두 이 값을 100%로 두고 계산합니다.",
+            ),
+            (
+                "Processed FPS",
+                _fmt(throughput.get("processed_fps")),
+                _fps_target_hint(
+                    throughput.get("processed_fps"),
+                    budget.get("expected_fps"),
+                    throughput.get("processed_vs_expected_ratio"),
+                ) + ". 즉 알고리즘 처리단이 계획한 처리량을 얼마나 따라갔는지 뜻합니다.",
+            ),
+            (
+                "Render FPS",
+                _fmt(throughput.get("render_fps")),
+                _fps_target_hint(
+                    throughput.get("render_fps"),
+                    budget.get("expected_fps"),
+                    throughput.get("render_vs_expected_ratio"),
+                ) + ". 즉 사용자가 실제로 본 화면 갱신이 목표 대비 어느 정도인지 뜻합니다.",
+            ),
+            (
+                "Render / Processed",
+                _fmt_pct(throughput.get("render_to_processed_ratio")),
+                "처리 완료된 프레임 중 실제 화면까지 간 비율입니다. 100%에 가까울수록 UI가 처리 출력을 잘 따라갑니다.",
+            ),
+            (
+                "Session Duration",
+                _fmt(throughput.get("session_duration_s"), suffix=" s"),
+                "FPS와 switch rate 계산에 사용된 세션 길이입니다.",
+            ),
         ]
     )
 
@@ -1285,13 +2144,53 @@ def _build_performance_html(session_dir: Path, summary: dict):
         <tr><td><strong>{label}</strong></td><td>{value}</td><td>{hint}</td></tr>
         """
         for label, value, hint in [
-            ("Compute Total Mean", _fmt((compute.get("compute_total_ms") or {}).get("mean"), suffix=" ms"), f"util={_fmt_pct(compute.get('compute_utilization_mean_ratio'))}"),
-            ("Compute Total P95", _fmt((compute.get("compute_total_ms") or {}).get("p95"), suffix=" ms"), f"util={_fmt_pct(compute.get('compute_utilization_p95_ratio'))}"),
-            ("Pipeline Total P95", _fmt((compute.get("pipeline_total_ms") or {}).get("p95"), suffix=" ms"), f"util={_fmt_pct(compute.get('pipeline_utilization_p95_ratio'))}"),
-            ("Render Overhead Mean", _fmt(compute.get("render_overhead_mean_ms"), suffix=" ms"), "processed 완료 후 실제 표시까지 평균 지연"),
-            ("Non-compute Capture->Process Mean", _fmt(compute.get("non_compute_capture_to_process_mean_ms"), suffix=" ms"), "frame 수집/조립/대기 등 compute 외 구간"),
-            ("Slowest Substage", compute.get("slowest_stage_name") or "n/a", f"p95={_fmt(compute.get('slowest_stage_p95_ms'), suffix=' ms')} | share={_fmt_pct(compute.get('slowest_stage_share_of_compute_p95_ratio'))}"),
-            ("Log Write Mean", _fmt((compute.get("log_write_ms") or {}).get("mean"), suffix=" ms"), f"source={compute.get('source') or 'n/a'}"),
+            (
+                "Compute Total Mean",
+                _fmt((compute.get("compute_total_ms") or {}).get("mean"), suffix=" ms"),
+                _budget_hint(
+                    (compute.get("compute_total_ms") or {}).get("mean"),
+                    budget.get("configured_frame_period_ms"),
+                    compute.get("compute_utilization_mean_ratio"),
+                ) + ". 평균적으로 계산이 프레임 예산을 얼마나 차지하는지 봅니다.",
+            ),
+            (
+                "Compute Total P95",
+                _fmt((compute.get("compute_total_ms") or {}).get("p95"), suffix=" ms"),
+                _budget_hint(
+                    (compute.get("compute_total_ms") or {}).get("p95"),
+                    budget.get("configured_frame_period_ms"),
+                    compute.get("compute_utilization_p95_ratio"),
+                ) + ". 느린 프레임 상위 5%에서의 계산 여유를 보는 핵심 지표입니다.",
+            ),
+            (
+                "Pipeline Total P95",
+                _fmt((compute.get("pipeline_total_ms") or {}).get("p95"), suffix=" ms"),
+                _budget_hint(
+                    (compute.get("pipeline_total_ms") or {}).get("p95"),
+                    budget.get("configured_frame_period_ms"),
+                    compute.get("pipeline_utilization_p95_ratio"),
+                ) + ". compute뿐 아니라 큐/후처리까지 포함한 파이프라인 시간입니다.",
+            ),
+            (
+                "Render Overhead Mean",
+                _fmt(compute.get("render_overhead_mean_ms"), suffix=" ms"),
+                "processed frame이 준비된 뒤 실제 render 제출까지 걸린 평균 시간입니다.",
+            ),
+            (
+                "Non-compute Capture->Process Mean",
+                _fmt(compute.get("non_compute_capture_to_process_mean_ms"), suffix=" ms"),
+                "frame 수집, 조립, 큐 대기 등 compute 바깥 구간의 평균 지연입니다. compute가 낮은데 전체 지연이 크면 이 값을 먼저 봅니다.",
+            ),
+            (
+                "Slowest Substage",
+                compute.get("slowest_stage_name") or "n/a",
+                f"p95={_fmt(compute.get('slowest_stage_p95_ms'), suffix=' ms')} | compute p95 중 {_fmt_pct(compute.get('slowest_stage_share_of_compute_p95_ratio'))} 차지",
+            ),
+            (
+                "Log Write Mean",
+                _fmt((compute.get("log_write_ms") or {}).get("mean"), suffix=" ms"),
+                f"source={compute.get('source') or 'n/a'} | 핫패스 로그 쓰기 비용입니다.",
+            ),
         ]
     )
 
@@ -1300,13 +2199,41 @@ def _build_performance_html(session_dir: Path, summary: dict):
         <tr><td><strong>{label}</strong></td><td>{value}</td><td>{hint}</td></tr>
         """
         for label, value, hint in [
-            ("Processed Latency P50", _fmt(jitter.get("processed_latency_p50_ms"), suffix=" ms"), "capture_to_process 중앙값"),
-            ("Processed Latency P95", _fmt(jitter.get("processed_latency_p95_ms"), suffix=" ms"), "capture_to_process 상위 95%"),
-            ("Processed Jitter", _fmt(jitter.get("processed_latency_jitter_ms"), suffix=" ms"), "p95 - p50"),
-            ("Render Latency P50", _fmt(jitter.get("render_latency_p50_ms"), suffix=" ms"), "capture_to_render 중앙값"),
-            ("Render Latency P95", _fmt(jitter.get("render_latency_p95_ms"), suffix=" ms"), "capture_to_render 상위 95%"),
-            ("Render Jitter", _fmt(jitter.get("render_latency_jitter_ms"), suffix=" ms"), "p95 - p50"),
-            ("Compute Jitter", _fmt(jitter.get("compute_total_jitter_ms"), suffix=" ms"), "compute_total p95 - p50"),
+            (
+                "Processed Latency P50",
+                _fmt(jitter.get("processed_latency_p50_ms"), suffix=" ms"),
+                "capture_to_process 중앙값입니다. 평소에 가장 자주 겪는 처리 지연에 가깝습니다.",
+            ),
+            (
+                "Processed Latency P95",
+                _fmt(jitter.get("processed_latency_p95_ms"), suffix=" ms"),
+                "느린 프레임 상위 5%의 capture_to_process 지연입니다. 평균보다 운영 위험을 더 잘 드러냅니다.",
+            ),
+            (
+                "Processed Jitter",
+                _fmt(jitter.get("processed_latency_jitter_ms"), suffix=" ms"),
+                "processed latency의 p95 - p50입니다. 값이 클수록 세션 중 흔들림이 큽니다.",
+            ),
+            (
+                "Render Latency P50",
+                _fmt(jitter.get("render_latency_p50_ms"), suffix=" ms"),
+                "capture_to_render 중앙값입니다. 평소 화면 체감 지연에 가깝습니다.",
+            ),
+            (
+                "Render Latency P95",
+                _fmt(jitter.get("render_latency_p95_ms"), suffix=" ms"),
+                "느린 화면 프레임 상위 5%의 지연입니다. 데모에서 '갑자기 느린 순간'을 잡는 값입니다.",
+            ),
+            (
+                "Render Jitter",
+                _fmt(jitter.get("render_latency_jitter_ms"), suffix=" ms"),
+                "render latency의 p95 - p50입니다. 20ms 이하가 안정적이고, 40ms를 넘기면 버벅임 체감이 커질 수 있습니다.",
+            ),
+            (
+                "Compute Jitter",
+                _fmt(jitter.get("compute_total_jitter_ms"), suffix=" ms"),
+                "compute_total의 p95 - p50입니다. 계산 경로 자체의 흔들림만 따로 본 값입니다.",
+            ),
         ]
     )
 
@@ -1315,12 +2242,86 @@ def _build_performance_html(session_dir: Path, summary: dict):
         <tr><td><strong>{label}</strong></td><td>{value}</td><td>{hint}</td></tr>
         """
         for label, value, hint in [
-            ("Candidate / Confirmed", _fmt(continuity.get("candidate_to_confirmed_ratio")), "높을수록 detection 분해가 큼"),
-            ("Display / Confirmed", _fmt(continuity.get("display_to_confirmed_ratio")), "높을수록 내부 추적이 화면까지 잘 전달됨"),
-            ("Lead Confirmed Switch", _fmt((continuity.get("lead_confirmed") or {}).get("switch_count"), digits=0), f"coverage={_fmt_pct((continuity.get('lead_confirmed') or {}).get('coverage_rate'))} | unique={_fmt((continuity.get('lead_confirmed') or {}).get('unique_track_id_count'), digits=0)}"),
-            ("Lead Display Switch", _fmt((continuity.get("lead_display") or {}).get("switch_count"), digits=0), f"coverage={_fmt_pct((continuity.get('lead_display') or {}).get('coverage_rate'))} | unique={_fmt((continuity.get('lead_display') or {}).get('unique_track_id_count'), digits=0)}"),
-            ("Unique Confirmed Track IDs", _fmt(continuity.get("unique_confirmed_track_ids"), digits=0), "세션 전체에서 내부 confirmed로 관측된 ID 수"),
-            ("Unique Display Track IDs", _fmt(continuity.get("unique_display_track_ids"), digits=0), "세션 전체에서 화면에 실제 표시된 ID 수"),
+            (
+                "Candidate / Confirmed",
+                _fmt(continuity.get("candidate_to_confirmed_ratio")),
+                "confirmed track 1개를 만들기 위해 candidate가 몇 개 필요한지 보는 값입니다. 단일 인원은 1.0~1.3 수준이 이상적입니다.",
+            ),
+            (
+                "Display / Confirmed",
+                _fmt(continuity.get("display_to_confirmed_ratio")),
+                "내부 confirmed track이 화면 표시까지 얼마나 유지되는지 보는 값입니다. 높을수록 내부 추적이 사용자 화면에 잘 전달됩니다.",
+            ),
+            (
+                "Lead Confirmed Switch",
+                _fmt((continuity.get("lead_confirmed") or {}).get("switch_count"), digits=0),
+                f"coverage={_fmt_pct((continuity.get('lead_confirmed') or {}).get('coverage_rate'))} | switch rate={_fmt_pct((continuity.get('lead_confirmed') or {}).get('switch_rate'))}",
+            ),
+            (
+                "Lead Display Switch",
+                _fmt((continuity.get("lead_display") or {}).get("switch_count"), digits=0),
+                f"coverage={_fmt_pct((continuity.get('lead_display') or {}).get('coverage_rate'))} | switch rate={_fmt_pct((continuity.get('lead_display') or {}).get('switch_rate'))}",
+            ),
+            (
+                "Unique Confirmed Track IDs",
+                _fmt(continuity.get("unique_confirmed_track_ids"), digits=0),
+                "세션 전체에서 내부 confirmed로 관측된 ID 수입니다. 단일 인원인데 값이 크면 ID fragmentation을 의심합니다.",
+            ),
+            (
+                "Unique Display Track IDs",
+                _fmt(continuity.get("unique_display_track_ids"), digits=0),
+                "세션 전체에서 화면에 실제로 보인 ID 수입니다. 내부 continuity와 사용자 체감 continuity를 함께 봅니다.",
+            ),
+        ]
+    )
+
+    geometry_rows = "".join(
+        f"""
+        <tr><td><strong>{label}</strong></td><td>{render_value}</td><td>{processed_value}</td><td>{hint}</td></tr>
+        """
+        for label, render_value, processed_value, hint in [
+            (
+                "Reference Source",
+                geometry.get("reference_source") or "n/a",
+                f"{_fmt(geometry_reference.get('path_cleanliness_score_10'))}/10",
+                "점수 계산에 실제로 사용한 경로 기준입니다. render lead가 충분하면 사용자 화면 기준을 우선하고, 아니면 processed lead를 참조합니다. 오른쪽 값은 그 참조 경로의 cleanliness 점수입니다.",
+            ),
+            (
+                "Path Cleanliness",
+                _fmt((render_geometry or {}).get("path_cleanliness_score_10")),
+                _fmt((processed_geometry or {}).get("path_cleanliness_score_10")),
+                f"이번 점수 계산 기준 값은 {_fmt(geometry_reference.get('path_cleanliness_score_10'))}/10 입니다. gap, local residual, jump ratio를 합친 종합 경로 품질 점수입니다.",
+            ),
+            (
+                "Coverage Ratio",
+                _fmt_pct((render_geometry or {}).get("coverage_ratio")),
+                _fmt_pct((processed_geometry or {}).get("coverage_ratio")),
+                "전체 프레임 중 lead path가 실제 좌표로 남은 비율입니다. 낮을수록 경로가 듬성듬성 비어 보입니다.",
+            ),
+            (
+                "Max Gap Frames",
+                _fmt((render_geometry or {}).get("max_gap_frames"), digits=0),
+                _fmt((processed_geometry or {}).get("max_gap_frames"), digits=0),
+                "lead path가 가장 길게 비는 구간 길이입니다. 0~1이면 매우 좋고, 5를 넘기면 눈으로도 뚜렷한 끊김이 느껴질 수 있습니다.",
+            ),
+            (
+                "Local Residual RMS",
+                _fmt((render_geometry or {}).get("local_residual_rms_m"), suffix=" m"),
+                _fmt((processed_geometry or {}).get("local_residual_rms_m"), suffix=" m"),
+                "인접한 세 점을 이은 local 직선에서 가운데 점이 얼마나 벗어나는지의 RMS입니다. 값이 클수록 지그재그/말림이 큽니다.",
+            ),
+            (
+                "Jump Ratio",
+                _fmt_pct((render_geometry or {}).get("jump_ratio")),
+                _fmt_pct((processed_geometry or {}).get("jump_ratio")),
+                "정상적인 연속 이동보다 갑자기 멀리 튄 스텝 비율입니다. 10%를 넘기면 대표점이 프레임 사이에서 자주 뛰는 것으로 볼 수 있습니다.",
+            ),
+            (
+                "Path Efficiency",
+                _fmt((render_geometry or {}).get("path_efficiency_ratio")),
+                _fmt((processed_geometry or {}).get("path_efficiency_ratio")),
+                "시작-끝 직선 거리 / 실제 누적 경로 길이입니다. 직선/대각선 테스트에서는 1에 가까울수록 자연스럽고, 값이 낮으면 우회/말림이 큽니다.",
+            ),
         ]
     )
 
@@ -1336,7 +2337,7 @@ def _build_performance_html(session_dir: Path, summary: dict):
   <div class="wrap">
     <header class="hero">
       <h1>{session_dir.name} 성능 KPI 리포트</h1>
-      <p>운영 안정성(fail-safe)과 별도로, 실시간 처리 성능을 엔지니어링 관점에서 정리한 페이지입니다. frame budget, 실효 FPS, compute utilization, jitter, continuity를 분리해서 봅니다.</p>
+      <p>운영 안정성(fail-safe)과 별도로, 실시간 처리 성능을 엔지니어링 관점에서 정리한 페이지입니다. 이제 각 KPI마다 10점 만점 점수, target의 정확한 의미, 현업 기준을 함께 보여줍니다.</p>
       <nav class="nav">
         <a href="./index.html">세션 개요</a>
         <a href="./ops_report.html">현업 평가 리포트</a>
@@ -1348,8 +2349,74 @@ def _build_performance_html(session_dir: Path, summary: dict):
     </header>
 
     <section class="card">
+      <h2>종합 성능 점수</h2>
+      <div class="grid">
+        <div class="metric">
+          <div class="label">Performance Score</div>
+          <div class="value">{_fmt(scoring.get('overall_score_10'))}/10</div>
+          <div class="hint">{_fmt(scoring.get('overall_score_100'))}/100 | {_pill(scoring.get('grade', 'n/a'), scoring.get('tone', 'brand'))} | {scoring.get('summary', 'n/a')}</div>
+        </div>
+        <div class="metric">
+          <div class="label">처리량/목표 달성</div>
+          <div class="value">{_fmt(((scoring.get('categories') or {}).get('throughput') or {}).get('score_10'))}/10</div>
+          <div class="hint">FPS가 목표치에 얼마나 가까운지</div>
+        </div>
+        <div class="metric">
+          <div class="label">계산 여유</div>
+          <div class="value">{_fmt(((scoring.get('categories') or {}).get('efficiency') or {}).get('score_10'))}/10</div>
+          <div class="hint">프레임 예산 안에서 compute가 얼마나 여유로운지</div>
+        </div>
+        <div class="metric">
+          <div class="label">지연 안정성</div>
+          <div class="value">{_fmt(((scoring.get('categories') or {}).get('stability') or {}).get('score_10'))}/10</div>
+          <div class="hint">세션 중 latency/jitter가 얼마나 흔들리는지</div>
+        </div>
+        <div class="metric">
+          <div class="label">추적 연속성</div>
+          <div class="value">{_fmt(((scoring.get('categories') or {}).get('continuity') or {}).get('score_10'))}/10</div>
+          <div class="hint">한 사람을 한 ID로 유지하고 화면까지 전달하는 능력</div>
+        </div>
+        <div class="metric">
+          <div class="label">경로 기하 품질</div>
+          <div class="value">{_fmt(((scoring.get('categories') or {}).get('geometry') or {}).get('score_10'))}/10</div>
+          <div class="hint">끊김, 지그재그, 좌표 점프를 얼마나 줄였는지</div>
+        </div>
+      </div>
+      <p class="subtle" style="margin-top:16px;">
+        이 점수는 내부 실험용 루브릭입니다. 절대적인 인증 점수는 아니지만, 세션 간 추세 비교와 병목 우선순위 판단에 쓰기 좋도록 설계했습니다.
+      </p>
+    </section>
+
+    <section class="card">
       <h2>핵심 KPI</h2>
       <div class="grid">{overview_cards}</div>
+    </section>
+
+    <section class="card">
+      <h2>성능 카테고리 점수</h2>
+      <div class="grid">{category_cards}</div>
+    </section>
+
+    <section class="card">
+      <h2>지표별 10점 만점 평가</h2>
+      <p class="subtle">
+        여기서 말하는 <strong>target 대비 92.5%</strong> 같은 값은, 예를 들어 목표가 10fps일 때 실제가 9.25fps였다는 뜻입니다.
+        즉 <strong>실제 값 / 목표 값</strong>으로 계산한 비율이며, 100%면 목표와 동일합니다.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>KPI</th>
+            <th>현재 값</th>
+            <th>점수</th>
+            <th>목표 / 기준</th>
+            <th>무슨 뜻인가</th>
+            <th>현업 기준</th>
+            <th>이번 세션 해석</th>
+          </tr>
+        </thead>
+        <tbody>{kpi_rows}</tbody>
+      </table>
     </section>
 
     <section class="card">
@@ -1386,6 +2453,18 @@ def _build_performance_html(session_dir: Path, summary: dict):
       <table>
         <thead><tr><th>지표</th><th>값</th><th>해석</th></tr></thead>
         <tbody>{continuity_rows}</tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Geometry / Path Quality</h2>
+      <p class="subtle">
+        render lead는 사용자가 실제로 본 경로 기준, processed lead는 내부 tracker가 유지한 경로 기준입니다.
+        같은 ID를 유지해도 이 표의 값이 나쁘면 눈으로 보는 궤적은 여전히 지저분할 수 있습니다.
+      </p>
+      <table>
+        <thead><tr><th>지표</th><th>Render Lead</th><th>Processed Lead</th><th>해석</th></tr></thead>
+        <tbody>{geometry_rows}</tbody>
       </table>
     </section>
 
@@ -1436,6 +2515,17 @@ def _build_session_index_html(session_dir: Path, summary: dict, event_summary: d
             <td><a href="./system_snapshot.json">열기</a></td>
           </tr>
         """
+    replay_nav = ""
+    replay_file_row = ""
+    if str(summary.get("session_meta", {}).get("input_mode") or "").strip().lower() == "replay":
+        replay_nav = '<a href="./replay_report.html">replay 요약</a>'
+        replay_file_row = """
+          <tr>
+            <td><code>replay_report.html</code></td>
+            <td>source capture, replay 속도, 주요 프레임/지연, trajectory replay 바로가기</td>
+            <td><a href="./replay_report.html">열기</a></td>
+          </tr>
+        """
 
     return f"""<!DOCTYPE html>
 <html lang="ko">
@@ -1453,6 +2543,8 @@ def _build_session_index_html(session_dir: Path, summary: dict, event_summary: d
       <nav class="nav">
         <a href="./ops_report.html">현업 평가 리포트</a>
         <a href="./performance_report.html">성능 KPI 리포트</a>
+        <a href="./trajectory_replay.html">움직임 재생</a>
+        {replay_nav}
         <a href="./processed_report.html">processed 리포트</a>
         <a href="./render_report.html">render 리포트</a>
         <a href="./event_report.html">event 리포트</a>
@@ -1527,6 +2619,12 @@ def _build_session_index_html(session_dir: Path, summary: dict, event_summary: d
             <td><a href="./processed_report.html">열기</a></td>
           </tr>
           <tr>
+            <td><code>trajectory_replay.html</code></td>
+            <td>시간축 기준 움직임 재생, render/processed 전환, 최근 N프레임 trail 디버깅</td>
+            <td><a href="./trajectory_replay.html">열기</a></td>
+          </tr>
+          {replay_file_row}
+          <tr>
             <td><code>render_report.html</code></td>
             <td>화면에 실제로 그려진 결과와 지연</td>
             <td><a href="./render_report.html">열기</a></td>
@@ -1550,10 +2648,79 @@ def _build_session_index_html(session_dir: Path, summary: dict, event_summary: d
 </html>"""
 
 
+def _build_replay_report_html(session_dir: Path, summary: dict, event_summary: dict):
+    session_meta = summary.get("session_meta") or {}
+    runtime_config = summary.get("runtime_config") or {}
+    source_capture = session_meta.get("source_capture") or runtime_config.get("log_source_capture") or "n/a"
+    replay_speed = runtime_config.get("log_replay_speed")
+    replay_loop = runtime_config.get("log_replay_loop")
+    processed = summary.get("processed") or {}
+    render = summary.get("render") or {}
+    event = summary.get("event") or event_summary or {}
+    source_capture_path = str(source_capture)
+
+    return f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{session_dir.name} replay report</title>
+  <style>{COMMON_STYLE}</style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <h1>{session_dir.name} replay_report.html</h1>
+      <p>raw capture를 다시 태운 replay 세션의 간단 요약입니다. source capture와 replay 조건, 결과 프레임 수, 즉시 확인할 링크를 한 곳에 모았습니다.</p>
+      <nav class="nav">
+        <a href="./index.html">세션 개요</a>
+        <a href="./trajectory_replay.html">움직임 재생</a>
+        <a href="./performance_report.html">성능 KPI 리포트</a>
+        <a href="./processed_report.html">processed 리포트</a>
+        <a href="./render_report.html">render 리포트</a>
+        <a href="../index.html">전체 비교 대시보드</a>
+      </nav>
+    </header>
+
+    <section class="card">
+      <h2>Replay 입력</h2>
+      <div class="grid">
+        <div class="metric"><div class="label">input mode</div><div class="value">{session_meta.get("input_mode") or "n/a"}</div><div class="hint">live가 아니라 저장된 raw capture를 다시 태운 세션입니다.</div></div>
+        <div class="metric"><div class="label">source capture</div><div class="value"><code>{source_capture_path}</code></div><div class="hint">이번 replay가 읽은 raw capture 경로입니다.</div></div>
+        <div class="metric"><div class="label">replay speed</div><div class="value">{_fmt(replay_speed, digits=2, suffix='x') if replay_speed is not None else "n/a"}</div><div class="hint">1.0x는 녹화 타이밍 그대로, 2.0x는 두 배 빠른 재생입니다.</div></div>
+        <div class="metric"><div class="label">loop</div><div class="value">{_yes_no_unknown(replay_loop, yes_text="on", no_text="off")}</div><div class="hint">loop가 on이면 raw capture를 반복 재생합니다.</div></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Replay 결과 요약</h2>
+      <div class="grid">
+        <div class="metric"><div class="label">processed frames</div><div class="value">{processed.get("frame_count", 0)}</div><div class="hint">raw replay에서 실제 처리된 프레임 수입니다.</div></div>
+        <div class="metric"><div class="label">rendered frames</div><div class="value">{render.get("frame_count", 0)}</div><div class="hint">화면까지 실제 반영된 프레임 수입니다.</div></div>
+        <div class="metric"><div class="label">render p95</div><div class="value">{_fmt((render.get("capture_to_render_ms") or {}).get("p95"), digits=1, suffix=' ms')}</div><div class="hint">replay에서도 처리와 렌더 지연은 다시 측정됩니다.</div></div>
+        <div class="metric"><div class="label">first render</div><div class="value">{_fmt(event.get("first_render_elapsed_s"), digits=3, suffix=' s')}</div><div class="hint">replay 시작 후 첫 결과가 보이기까지 걸린 시간입니다.</div></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>어떻게 읽으면 되나</h2>
+      <div class="note">
+        <strong>1.</strong> <a href="./trajectory_replay.html">trajectory_replay.html</a>에서 시간축으로 실제 경로를 먼저 봅니다.<br />
+        <strong>2.</strong> 경로가 끊기면 <a href="./render_report.html">render_report.html</a>에서 display와 invalid를 확인합니다.<br />
+        <strong>3.</strong> 계산 회귀가 의심되면 <a href="./performance_report.html">performance_report.html</a>에서 detect_ms, compute_total_ms, jitter를 같이 봅니다.<br />
+        <strong>4.</strong> 같은 source capture로 코드 전후를 비교해야 replay의 의미가 있습니다.
+      </div>
+    </section>
+  </div>
+</body>
+</html>"""
+
+
 def _build_ops_html(session_dir: Path, summary: dict, event_summary: dict):
     assessment = summary.get("assessment", {})
     overall = assessment.get("overall", {})
     category_scores = assessment.get("category_scores", {})
+    evaluation_mode = assessment.get("evaluation_mode", {})
     system = summary.get("system", {})
     preferred_stage_timings = summary.get("diagnostics", {}).get("preferred_stage_timings_ms") or {}
     preferred_slowest_stage = preferred_stage_timings.get("slowest_stage") or {}
@@ -1606,6 +2773,7 @@ def _build_ops_html(session_dir: Path, summary: dict, event_summary: dict):
     <header class="hero">
       <h1>{session_dir.name} 현업 평가 리포트</h1>
       <p>최근 세션 로그를 기준으로 운영 적합도를 100점 만점으로 환산한 요약입니다. 절대적인 인증 점수라기보다, 현장 투입 전 품질 판단과 세션 간 비교를 돕기 위한 내부 루브릭입니다.</p>
+      <p class="subtle">평가 모드: <strong>{evaluation_mode.get('label', 'n/a')}</strong> | {evaluation_mode.get('description', '평가 모드 설명이 없습니다.')}</p>
       <nav class="nav">
         <a href="./index.html">세션 개요</a>
         <a href="./performance_report.html">성능 KPI 리포트</a>
@@ -1625,6 +2793,11 @@ def _build_ops_html(session_dir: Path, summary: dict, event_summary: dict):
           <div class="label">Operational Score</div>
           <div class="value">{overall.get('score', 'n/a')}/100</div>
           <div class="hint">{overall.get('summary', '평가 데이터가 없습니다.')}</div>
+        </div>
+        <div class="metric">
+          <div class="label">평가 모드</div>
+          <div class="value">{evaluation_mode.get('label', 'n/a')}</div>
+          <div class="hint">{evaluation_mode.get('description', 'n/a')}</div>
         </div>
         <div class="metric">
           <div class="label">Grade</div>
@@ -1733,6 +2906,10 @@ def _build_processed_html(session_dir: Path, summary: dict, processed_records: l
         ["confirmed_tracks", "tentative_tracks"],
         lead_only=True,
     )
+    postprocessed = _build_postprocessed_trajectory_bundle(
+        _load_render_records_with_fallback(session_dir),
+        processed_records,
+    )
     pattern_rows = _build_processed_pattern_rows(processed_records)
 
     payload = {
@@ -1749,6 +2926,7 @@ def _build_processed_html(session_dir: Path, summary: dict, processed_records: l
             "leadAngleDeg": [row["lead_angle_deg"] for row in simplified],
         },
         "trajectory": trajectory,
+        "postprocessed": postprocessed,
     }
 
     processed = summary.get("processed", {})
@@ -1787,6 +2965,16 @@ def _build_processed_html(session_dir: Path, summary: dict, processed_records: l
           breakFrameGap: REPORT_DATA.trajectory.gap_break_frames || 2
         }}
       );
+
+      renderTrajectoryChart(
+        'processed-postprocessed-chart',
+        REPORT_DATA.postprocessed.series,
+        {{
+          title: 'postprocessed trajectory',
+          emptyMessage: REPORT_DATA.postprocessed.empty_message,
+          breakFrameGap: REPORT_DATA.postprocessed.gap_break_frames || 2
+        }}
+      );
     </script>
     """
 
@@ -1806,6 +2994,7 @@ def _build_processed_html(session_dir: Path, summary: dict, processed_records: l
       <nav class="nav">
         <a href="./index.html">세션 개요</a>
         <a href="./performance_report.html">성능 KPI 리포트</a>
+        <a href="./trajectory_replay.html">움직임 재생</a>
         <a href="./render_report.html">render 리포트</a>
         <a href="./event_report.html">event 리포트</a>
         <a href="../../../docs/log_guides/processed_frames_guide.html">processed 가이드</a>
@@ -1837,6 +3026,14 @@ def _build_processed_html(session_dir: Path, summary: dict, processed_records: l
       <h2>레이더 기준 궤적</h2>
       <p class="subtle">{_trajectory_summary_text(trajectory)}</p>
       <div id="processed-trajectory-chart" class="chart"></div>
+      <p class="subtle" style="margin-top:12px;">발자취만으로 부족하면 <a href="./trajectory_replay.html">trajectory replay</a>에서 시간축 기준으로 frame-by-frame 재생을 확인합니다.</p>
+    </section>
+
+    <section class="card">
+      <h2>로그 기반 후처리 궤적</h2>
+      <p class="subtle">{_postprocess_summary_text(postprocessed)}</p>
+      <div id="processed-postprocessed-chart" class="chart"></div>
+      <p class="subtle" style="margin-top:12px;">이 경로는 실시간 출력이 아니라, 저장된 로그에서 lead trajectory를 다시 골라 짧은 gap을 보간하고 EMA smoothing을 적용한 offline 디버그용 결과입니다.</p>
     </section>
 
     <section class="card">
@@ -1884,6 +3081,10 @@ def _build_render_html(session_dir: Path, summary: dict, render_records: list[di
         ["display_tracks", "tentative_display_tracks", "tentative_tracks"],
         lead_only=True,
     )
+    postprocessed = _build_postprocessed_trajectory_bundle(
+        render_records,
+        _load_jsonl(session_dir / "processed_frames.jsonl"),
+    )
     pattern_rows = _build_render_pattern_rows(render_records)
 
     payload = {
@@ -1897,6 +3098,7 @@ def _build_render_html(session_dir: Path, summary: dict, render_records: list[di
             "leadAngleDeg": [row["lead_angle_deg"] for row in simplified],
         },
         "trajectory": trajectory,
+        "postprocessed": postprocessed,
     }
 
     render = summary.get("render", {})
@@ -1929,6 +3131,16 @@ def _build_render_html(session_dir: Path, summary: dict, render_records: list[di
           breakFrameGap: REPORT_DATA.trajectory.gap_break_frames || 2
         }}
       );
+
+      renderTrajectoryChart(
+        'render-postprocessed-chart',
+        REPORT_DATA.postprocessed.series,
+        {{
+          title: 'postprocessed trajectory',
+          emptyMessage: REPORT_DATA.postprocessed.empty_message,
+          breakFrameGap: REPORT_DATA.postprocessed.gap_break_frames || 2
+        }}
+      );
     </script>
     """
 
@@ -1948,6 +3160,7 @@ def _build_render_html(session_dir: Path, summary: dict, render_records: list[di
       <nav class="nav">
         <a href="./index.html">세션 개요</a>
         <a href="./performance_report.html">성능 KPI 리포트</a>
+        <a href="./trajectory_replay.html">움직임 재생</a>
         <a href="./processed_report.html">processed 리포트</a>
         <a href="./event_report.html">event 리포트</a>
         <a href="../../../docs/log_guides/render_frames_guide.html">render 가이드</a>
@@ -1962,10 +3175,11 @@ def _build_render_html(session_dir: Path, summary: dict, render_records: list[di
         <div class="metric"><div class="label">Render Frame Count</div><div class="value">{render.get("frame_count", 0)}</div></div>
         <div class="metric"><div class="label">Invalid Rate</div><div class="value">{_fmt_pct(render.get("invalid_rate"))}</div></div>
         <div class="metric"><div class="label">Display Track Mean</div><div class="value">{_fmt(render.get("display_track_count", {}).get("mean"))}</div></div>
+        <div class="metric"><div class="label">Held Display Mean</div><div class="value">{_fmt(render.get("display_held_track_count", {}).get("mean"))}</div></div>
         <div class="metric"><div class="label">Render P95</div><div class="value">{_fmt(render.get("capture_to_render_ms", {}).get("p95"), suffix=" ms")}</div></div>
         <div class="metric"><div class="label">Multi Display Success</div><div class="value">{_fmt_pct(render.get("multi_display_success_rate"))}</div></div>
       </div>
-      <p class="note" style="margin-top:16px;"><strong>읽는 법:</strong> candidate는 많은데 display track이 거의 0이면 내부 후보는 있지만 화면에 남는 결과는 거의 없다는 뜻입니다.</p>
+      <p class="note" style="margin-top:16px;"><strong>읽는 법:</strong> candidate는 많은데 display track이 거의 0이면 내부 후보는 있지만 화면에 남는 결과는 거의 없다는 뜻입니다. Held Display가 높으면 display hysteresis가 화면 끊김을 완충한 것이므로 processed 기준 track 품질과 함께 봐야 합니다.</p>
     </section>
 
     <section class="grid">
@@ -1978,6 +3192,14 @@ def _build_render_html(session_dir: Path, summary: dict, render_records: list[di
       <h2>레이더 기준 궤적</h2>
       <p class="subtle">{_trajectory_summary_text(trajectory)}</p>
       <div id="render-trajectory-chart" class="chart"></div>
+      <p class="subtle" style="margin-top:12px;">발자취가 과장되거나 끊겨 보이면 <a href="./trajectory_replay.html">trajectory replay</a>에서 시간축 기준으로 실제 진행 순서를 재생해 봅니다.</p>
+    </section>
+
+    <section class="card">
+      <h2>로그 기반 후처리 궤적</h2>
+      <p class="subtle">{_postprocess_summary_text(postprocessed)}</p>
+      <div id="render-postprocessed-chart" class="chart"></div>
+      <p class="subtle" style="margin-top:12px;">이 경로는 세션 로그를 읽어 lead trajectory를 다시 구성한 offline 디버그용 결과입니다. 원본 render path와 얼마나 다른지 비교하면 display filter와 representative point drift를 분리해서 보기 쉽습니다.</p>
     </section>
 
     <section class="card">
@@ -2137,6 +3359,7 @@ def _collect_session_rows(log_root: Path):
                     "index": f"./{session_dir.name}/index.html",
                     "ops": f"./{session_dir.name}/ops_report.html",
                     "performance": f"./{session_dir.name}/performance_report.html",
+                    "replay": f"./{session_dir.name}/trajectory_replay.html",
                     "processed": f"./{session_dir.name}/processed_report.html",
                     "render": f"./{session_dir.name}/render_report.html",
                     "event": f"./{session_dir.name}/event_report.html",
@@ -2154,16 +3377,18 @@ def _build_root_dashboard_html(session_rows: list[dict]):
           <td>{row['created_at'] or 'n/a'}</td>
           <td>{row['variant'] or 'n/a'}</td>
           <td>{row['scenario_id'] or 'n/a'}</td>
-          <td><strong>{row['summary'].get('assessment', {}).get('overall', {}).get('score', 'n/a')}</strong></td>
-          <td>{_pill(row['summary'].get('assessment', {}).get('overall', {}).get('grade', 'n/a'), row['summary'].get('assessment', {}).get('overall', {}).get('tone', 'brand'))}</td>
+          <td><strong>{row['summary'].get('assessment', {}).get('overall', {}).get('score', 'n/a')}</strong><br />{_pill(row['summary'].get('assessment', {}).get('overall', {}).get('grade', 'n/a'), row['summary'].get('assessment', {}).get('overall', {}).get('tone', 'brand'))}</td>
+          <td><strong>{_fmt(row['summary'].get('performance', {}).get('scoring', {}).get('overall_score_100'))}</strong><br /><span class="subtle">{_fmt(row['summary'].get('performance', {}).get('scoring', {}).get('overall_score_10'))}/10</span></td>
           <td>{_pill(row['health']['label'], row['health']['tone'])}</td>
           <td>{_fmt_pct(row['summary']['render']['invalid_rate'])}</td>
-          <td>{_fmt(row['summary']['render']['display_track_count']['mean'])}</td>
+          <td>{_fmt_pct(row['summary'].get('performance', {}).get('throughput', {}).get('render_vs_expected_ratio'))}</td>
+          <td>{_fmt((row['summary'].get('performance', {}).get('continuity', {}).get('lead_confirmed') or {}).get('switch_count'), digits=0)}</td>
           <td>{_fmt(row['summary']['render']['capture_to_render_ms']['p95'], suffix=' ms')}</td>
           <td>
             <a href="{row['links']['index']}">개요</a> |
             <a href="{row['links']['ops']}">ops</a> |
             <a href="{row['links']['performance']}">perf</a> |
+            <a href="{row['links']['replay']}">replay</a> |
             <a href="{row['links']['processed']}">processed</a> |
             <a href="{row['links']['render']}">render</a> |
             <a href="{row['links']['event']}">event</a>
@@ -2171,7 +3396,7 @@ def _build_root_dashboard_html(session_rows: list[dict]):
         </tr>
         """
         for row in session_rows
-    ) or '<tr><td colspan="11">표시할 세션이 없습니다.</td></tr>'
+    ) or '<tr><td colspan="12">표시할 세션이 없습니다.</td></tr>'
 
     payload = {
         "sessions": session_rows,
@@ -2185,6 +3410,22 @@ def _build_root_dashboard_html(session_rows: list[dict]):
     <script>
       {COMMON_SCRIPT}
       const DASHBOARD = {json.dumps(payload, ensure_ascii=False)};
+
+      function formatMetricValue(row, value) {{
+        if (!Number.isFinite(value)) return 'n/a';
+        const percentKeys = new Set([
+          'performance.throughput.render_vs_expected_ratio',
+          'performance.compute.compute_utilization_p95_ratio',
+          'processed.invalid_rate',
+          'render.invalid_rate',
+          'processed.multi_confirmed_success_rate',
+          'render.multi_display_success_rate'
+        ]);
+        if (percentKeys.has(row.key)) return `${{(value * 100).toFixed(1)}}%`;
+        if (String(row.key || '').includes('ms')) return `${{fmt(value, 1)}} ms`;
+        if (String(row.key || '').includes('switch_count')) return fmt(value, 0);
+        return fmt(value, 3);
+      }}
 
       function comparisonRows(beforeSession, afterSession) {{
         return DASHBOARD.metrics.map((metric) => {{
@@ -2223,10 +3464,10 @@ def _build_root_dashboard_html(session_rows: list[dict]):
         metricsTarget.innerHTML = rows.map((row) => `
           <div class="metric">
             <div class="label">${{esc(row.label)}}</div>
-            <div class="value">${{fmt(row.after, 3)}}</div>
+            <div class="value">${{formatMetricValue(row, row.after)}}</div>
             <div class="hint">
-              before=${{fmt(row.before, 3)}} |
-              delta=${{row.delta === null ? 'n/a' : fmt(row.delta, 3)}} |
+              before=${{formatMetricValue(row, row.before)}} |
+              delta=${{row.delta === null ? 'n/a' : formatMetricValue(row, row.delta)}} |
               <span class="pill ${{judgementPillClass(row.judgement)}}">${{esc(row.judgement)}}</span>
             </div>
           </div>
@@ -2248,8 +3489,8 @@ def _build_root_dashboard_html(session_rows: list[dict]):
               <div>
                 <strong>${{esc(row.label)}}</strong>
                 <div class="compare-meta">
-                  <span>before=${{fmt(row.before, 3)}}</span>
-                  <span>after=${{fmt(row.after, 3)}}</span>
+                  <span>before=${{formatMetricValue(row, row.before)}}</span>
+                  <span>after=${{formatMetricValue(row, row.after)}}</span>
                   <span class="pill ${{judgementPillClass(row.judgement)}}">${{esc(row.judgement)}}</span>
                 </div>
               </div>
@@ -2312,14 +3553,15 @@ def _build_root_dashboard_html(session_rows: list[dict]):
         afterSelect.innerHTML = '';
         DASHBOARD.sessions.forEach((session) => {{
           const score = nestedGet(session.summary, 'assessment.overall.score');
+          const perfScore = nestedGet(session.summary, 'performance.scoring.overall_score_100');
           const beforeOption = document.createElement('option');
           beforeOption.value = session.session_id;
-          beforeOption.textContent = `${{session.session_id}} | score=${{score ?? 'n/a'}} | ${{session.variant || 'n/a'}}`;
+          beforeOption.textContent = `${{session.session_id}} | ops=${{score ?? 'n/a'}} | perf=${{perfScore ?? 'n/a'}} | ${{session.variant || 'n/a'}}`;
           beforeSelect.appendChild(beforeOption);
 
           const afterOption = document.createElement('option');
           afterOption.value = session.session_id;
-          afterOption.textContent = `${{session.session_id}} | score=${{score ?? 'n/a'}} | ${{session.variant || 'n/a'}}`;
+          afterOption.textContent = `${{session.session_id}} | ops=${{score ?? 'n/a'}} | perf=${{perfScore ?? 'n/a'}} | ${{session.variant || 'n/a'}}`;
           afterSelect.appendChild(afterOption);
         }});
         if (DASHBOARD.sessions.length >= 2) {{
@@ -2402,7 +3644,7 @@ def _build_root_dashboard_html(session_rows: list[dict]):
       <table>
         <thead>
           <tr>
-            <th>세션</th><th>생성 시각</th><th>variant</th><th>scenario</th><th>점수</th><th>등급</th><th>상태</th><th>render invalid</th><th>display mean</th><th>render p95</th><th>리포트</th>
+            <th>세션</th><th>생성 시각</th><th>variant</th><th>scenario</th><th>ops 점수</th><th>perf 점수</th><th>상태</th><th>render invalid</th><th>render target</th><th>lead switch</th><th>render p95</th><th>리포트</th>
           </tr>
         </thead>
         <tbody>{table_rows}</tbody>
@@ -2419,6 +3661,7 @@ def _day_metric_context(log_root: Path, day_prefix: str):
         ("render.invalid_rate", "Render Invalid", "lower"),
         ("render.capture_to_render_ms.p95", "Render P95", "lower"),
         ("render.display_track_count.mean", "Display Track Mean", "higher"),
+        ("render.display_held_track_count.mean", "Held Display Mean", "lower"),
         ("render.multi_display_success_rate", "Multi Display Success", "higher"),
     ]
     rows = []
@@ -2545,9 +3788,11 @@ def _build_static_comparison_html(
     metric_map = {item["key"]: item for item in comparison["metrics"]}
 
     overview_specs = [
+        ("performance.scoring.overall_score_100", "Performance Score", "number"),
         ("render.invalid_rate", "Render Invalid", "percent"),
         ("render.capture_to_render_ms.p95", "Render P95", "ms"),
         ("render.display_track_count.mean", "Display Track Mean", "number"),
+        ("render.display_held_track_count.mean", "Held Display Mean", "number"),
         ("render.multi_display_success_rate", "Multi Display Success", "percent"),
     ]
     overview_cards = []
@@ -2815,6 +4060,9 @@ def generate_session_artifacts(session_dir: str | Path):
     _write_text(session_dir / "index.html", _build_session_index_html(session_dir, summary, event_summary))
     _write_text(session_dir / "ops_report.html", _build_ops_html(session_dir, summary, event_summary))
     _write_text(session_dir / "performance_report.html", _build_performance_html(session_dir, summary))
+    _write_text(session_dir / "trajectory_replay.html", _build_trajectory_replay_html(session_dir, render_records, processed_records))
+    if str(summary.get("session_meta", {}).get("input_mode") or "").strip().lower() == "replay":
+        _write_text(session_dir / "replay_report.html", _build_replay_report_html(session_dir, summary, event_summary))
     _write_text(session_dir / "processed_report.html", _build_processed_html(session_dir, summary, processed_records))
     _write_text(session_dir / "render_report.html", _build_render_html(session_dir, summary, render_records))
     _write_text(session_dir / "event_report.html", _build_event_html(session_dir, events, event_summary))
@@ -2824,6 +4072,12 @@ def generate_session_artifacts(session_dir: str | Path):
         "index_path": session_dir / "index.html",
         "ops_report_path": session_dir / "ops_report.html",
         "performance_report_path": session_dir / "performance_report.html",
+        "trajectory_replay_path": session_dir / "trajectory_replay.html",
+        "replay_report_path": (
+            session_dir / "replay_report.html"
+            if str(summary.get("session_meta", {}).get("input_mode") or "").strip().lower() == "replay"
+            else None
+        ),
         "processed_report_path": session_dir / "processed_report.html",
         "render_report_path": session_dir / "render_report.html",
         "event_report_path": session_dir / "event_report.html",

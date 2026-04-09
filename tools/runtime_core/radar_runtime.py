@@ -29,6 +29,7 @@ class RadarRuntimeConfig:
     angle_fft_size: int
     remove_static: bool = True
     doppler_guard_bins: int = 1
+    lateral_axis_sign: float = 1.0
 
     @property
     def virtual_antennas(self):
@@ -58,10 +59,15 @@ class RadarRuntimeConfig:
         centered_bins = np.arange(self.angle_fft_size) - (self.angle_fft_size / 2.0)
         spatial_frequency = (2.0 * centered_bins) / self.angle_fft_size
         spatial_frequency = np.clip(spatial_frequency, -1.0, 1.0)
-        return np.arcsin(spatial_frequency)
+        return self.lateral_axis_sign * np.arcsin(spatial_frequency)
 
 
-def parse_runtime_config(config_path, remove_static=True, doppler_guard_bins=1):
+def parse_runtime_config(
+    config_path,
+    remove_static=True,
+    doppler_guard_bins=1,
+    lateral_axis_sign=1.0,
+):
     config_path = Path(config_path)
     channel_cfg = None
     profile_cfg = None
@@ -124,6 +130,7 @@ def parse_runtime_config(config_path, remove_static=True, doppler_guard_bins=1):
         angle_fft_size=_next_power_of_two(tx_num * rx_num * 2, 32),
         remove_static=remove_static,
         doppler_guard_bins=doppler_guard_bins,
+        lateral_axis_sign=float(-1.0 if float(lateral_axis_sign) < 0.0 else 1.0),
     )
 
 

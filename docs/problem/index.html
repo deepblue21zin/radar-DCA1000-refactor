@@ -500,8 +500,8 @@
         </div>
         <div class="flow-step">
           <span>Step 3</span>
-          <strong>RDI / RAI 계산</strong>
-          <p><code>Range_Doppler()</code>와 <code>Range_Angle()</code>에서 큰 FFT를 별도로 수행한다.</p>
+          <strong>Shared FFT -> RDI / RAI 투영</strong>
+          <p><code>shared_range_doppler_fft()</code>를 한 번 계산하고, 그 결과를 RDI와 RAI로 나눠 쓴다.</p>
         </div>
         <div class="flow-step">
           <span>Step 4</span>
@@ -520,8 +520,20 @@
       <h2>문제 상세</h2>
       <p class="intro">
         아래 문제들은 "느려 보이는 느낌"이 아니라 실제 코드 구조와 최신 세션 로그를 바탕으로 정리한 것이다.
+        다만 <strong>Problem 1~6은 processing 병목을 중심으로 정리한 기존 목록</strong>이고,
+        <strong>2026-04 기준 현재 최우선은 아래 "최근 핵심 문제: 원운동에서 한 사람이 여러 ID로 갈라진다"</strong> 섹션의
+        body-center / continuity 이슈다.
         각 항목마다 문제 정의, 쉬운 설명, 왜 현업에서 문제인지, 해결 명세, 완료 기준을 적었다.
       </p>
+      <div class="note">
+        <h3>읽는 방법</h3>
+        <p>
+          이 페이지는 두 층으로 읽는 것이 맞다. 위쪽 <code>Problem 1~6</code>은 처리 파이프라인 병목 기록이고,
+          아래쪽 continuity 섹션은 최근 실험 기준 실제 우선순위 재정리다.
+          즉 지금은 <strong>pure latency 최적화만이 1순위가 아니라, 한 사람을 body-center에 더 가깝게 측정하고 같은 ID로 유지하는 것</strong>이
+          더 중요한 상태다.
+        </p>
+      </div>
 
       <article class="problem">
         <div class="problem-top">
@@ -529,12 +541,16 @@
             <div class="signal">Problem 1</div>
             <h3>한 프레임의 모든 무거운 작업을 한 스레드에서 순서대로 처리한다</h3>
           </div>
-          <span class="pill danger">우선순위 매우 높음</span>
+          <span class="pill brand">부분 해결 / 현재는 2순위</span>
         </div>
         <p>
           <code>DataProcessor.run()</code>는 <code>raw_frame_queue.get()</code> 이후
           cube 생성, static 제거, RDI, RAI, detection, tracking, logging을 한 번에 끝낸다.
           이 구조는 구현은 단순하지만, 프레임 예산을 넘기기 쉽다.
+        </p>
+        <p>
+          현재는 <code>stage_timings_ms</code>가 이미 들어가 있어서 어느 단계가 느린지는 볼 수 있게 되었지만,
+          처리 루프 자체는 여전히 대부분 직렬이다. 그래서 이 항목은 "관측 불가 문제"에서 "구조 최적화 과제"로 이동한 상태다.
         </p>
         <div class="spec-grid">
           <div class="spec">
@@ -567,38 +583,37 @@
         <div class="problem-top">
           <div>
             <div class="signal">Problem 2</div>
-            <h3>큰 FFT를 사실상 두 번 계산한다</h3>
+            <h3>큰 FFT 중복 계산은 shared FFT로 1차 해소되었다</h3>
           </div>
-          <span class="pill danger">우선순위 매우 높음</span>
+          <span class="pill good">1차 해결 완료</span>
         </div>
         <p>
-          현재 코드는 같은 <code>radar_cube</code>를 기반으로
-          <code>Range_Doppler()</code>와 <code>Range_Angle()</code>를 각각 호출한다.
-          두 함수 모두 range/doppler 쪽 큰 FFT를 다시 계산한다.
-          즉, 이미 비싼 계산을 중복으로 내고 있다.
+          예전에는 같은 <code>radar_cube</code>를 기반으로
+          <code>Range_Doppler()</code>와 <code>Range_Angle()</code>가 range/doppler 쪽 큰 FFT를 각각 다시 계산했다.
+          지금은 <code>shared_range_doppler_fft()</code>로 공통 FFT를 한 번만 만들고, 그 결과를 RDI와 RAI가 나눠 쓰는 구조로 바뀌었다.
         </p>
         <div class="spec-grid">
           <div class="spec">
             <strong>쉬운 설명</strong>
-            <p>같은 원본 사진으로 필터 A를 적용한 뒤, 다시 원본을 처음부터 읽어서 필터 B를 적용하는 구조다. 중간 결과를 재사용하지 않는다.</p>
+            <p>예전에는 같은 원본 사진에 필터 A와 B를 걸 때 원본을 두 번 다시 읽었다. 지금은 중간 결과를 공유해서 한 번만 읽는 구조가 됐다.</p>
           </div>
           <div class="spec">
-            <strong>현업에서 왜 문제인가</strong>
-            <p>FFT는 CPU 시간을 크게 먹는 편이다. 중복 계산은 지연뿐 아니라 전력, 발열, 여유 자원까지 같이 깎아먹는다.</p>
+            <strong>현재 상태</strong>
+            <p>이 항목은 과거 핵심 병목이었지만, 현재 코드 기준으로는 해결된 항목이다. 지금은 detection/body-center와 continuity가 더 앞선 과제다.</p>
           </div>
           <div class="spec">
-            <strong>해결 명세</strong>
+            <strong>적용된 수정</strong>
             <ul>
               <li>range/doppler FFT 공통 결과를 한 번만 만들고 재사용한다.</li>
               <li>RDI는 그 결과를 channel integration 해서 만든다.</li>
-              <li>RAI는 필요한 축만 추가 변환하는 방향으로 재구성한다.</li>
+              <li>RAI는 필요한 축만 추가 변환하는 방향으로 재구성했다.</li>
             </ul>
           </div>
           <div class="spec">
-            <strong>완료 기준</strong>
+            <strong>확인 기준</strong>
             <ul>
               <li>한 프레임 안에서 공통 FFT 계산 함수가 1회만 호출된다.</li>
-              <li><code>processed.capture_to_process_ms.p95</code>가 눈에 띄게 줄어든다.</li>
+              <li>리포트에 <code>shared_fft2_ms</code>와 투영 단계가 분리되어 보인다.</li>
             </ul>
           </div>
         </div>
@@ -610,7 +625,7 @@
             <div class="signal">Problem 3</div>
             <h3><code>complex128 / float64</code>와 복사본이 너무 많다</h3>
           </div>
-          <span class="pill danger">우선순위 매우 높음</span>
+          <span class="pill warn">부분 해결 / 현재는 3순위</span>
         </div>
         <p>
           로컬 확인 결과 <code>frame_to_radar_cube()</code> 출력 dtype은 <code>complex128</code>이다.
@@ -649,34 +664,34 @@
         <div class="problem-top">
           <div>
             <div class="signal">Problem 4</div>
-            <h3>window 생성과 채널 loop가 매 프레임 반복된다</h3>
+            <h3>window 생성과 채널 loop는 캐시와 broadcasting으로 1차 해소되었다</h3>
           </div>
-          <span class="pill warn">우선순위 높음</span>
+          <span class="pill good">1차 해결 완료</span>
         </div>
         <p>
-          <code>DSP.Range_Doppler()</code>와 <code>DSP.Range_Angle()</code>는
+          예전에는 <code>DSP.Range_Doppler()</code>와 <code>DSP.Range_Angle()</code>가
           프레임마다 <code>np.hanning()</code>으로 window를 새로 만들고,
-          channel 수만큼 Python loop를 돌며 곱셈을 수행한다.
-          상수처럼 고정될 수 있는 계산이 hot path 안에 들어와 있다.
+          channel 수만큼 Python loop를 돌며 곱셈을 수행했다.
+          지금은 cached window와 broadcasting으로 1차 해소된 상태다.
         </p>
         <div class="spec-grid">
           <div class="spec">
             <strong>쉬운 설명</strong>
-            <p>매 수업 시간마다 같은 공식이 적힌 종이를 다시 프린트해서 보는 것과 비슷하다. 한 번 만들어 놓으면 계속 재사용해도 된다.</p>
+            <p>예전에는 같은 공식을 매 시간 다시 프린트했다면, 지금은 한 번 만들어 둔 자료를 계속 재사용하는 상태다.</p>
           </div>
           <div class="spec">
-            <strong>현업에서 왜 문제인가</strong>
-            <p>작아 보이는 반복 비용이 프레임마다 쌓이면 p95, p99 지연이 커진다. 특히 Python loop는 벡터화보다 느리다.</p>
+            <strong>현재 상태</strong>
+            <p>이 항목은 현 시점의 핵심 미해결 문제라기보다 이미 적용된 최적화 기록에 가깝다. 현재는 detection과 continuity 개선이 더 우선이다.</p>
           </div>
           <div class="spec">
-            <strong>해결 명세</strong>
+            <strong>적용된 수정</strong>
             <ul>
               <li>runtime config가 정해질 때 window를 미리 계산해 캐시한다.</li>
               <li>채널 loop 대신 broadcasting으로 한 번에 곱한다.</li>
             </ul>
           </div>
           <div class="spec">
-            <strong>완료 기준</strong>
+            <strong>확인 기준</strong>
             <ul>
               <li>프레임 처리 함수 안에서 <code>np.hanning()</code> 호출이 사라진다.</li>
               <li>window 적용 코드가 channel loop 없이 벡터화된다.</li>
@@ -691,7 +706,7 @@
             <div class="signal">Problem 5</div>
             <h3>detection 단계에서 통계 계산과 후보 후처리가 자주 반복된다</h3>
           </div>
-          <span class="pill warn">우선순위 중간 이상</span>
+          <span class="pill warn">현재도 중요한 과제</span>
         </div>
         <p>
           <code>detect_targets()</code>는 median, quantile, CFAR, angle quantile,
@@ -731,7 +746,7 @@
             <div class="signal">Problem 6</div>
             <h3>로그 파일 쓰기가 처리 hot path 안에 있다</h3>
           </div>
-          <span class="pill warn">우선순위 높음</span>
+          <span class="pill warn">부분 해결 / 아직 남음</span>
         </div>
         <p>
           처리 스레드는 프레임을 만들자마자 JSON 로그를 기록한다.
@@ -769,35 +784,36 @@
         <div class="problem-top">
           <div>
             <div class="signal">Problem 7</div>
-            <h3>단계별 타이머가 없어 어느 함수가 진짜 범인인지 즉시 알기 어렵다</h3>
+            <h3>단계별 타이머 부재 문제는 해결되었고, 이제는 그 수치를 해석하는 단계다</h3>
           </div>
-          <span class="pill brand">우선순위 매우 높음, 구현 난도 낮음</span>
+          <span class="pill good">해결 완료</span>
         </div>
         <p>
-          지금은 결과적으로 <code>capture_to_process_ms</code>만 강하게 보인다.
-          하지만 그것만으로는 "FFT가 70ms", "detection이 25ms", "logging이 9ms"처럼
-          구체적 병목을 나눠 말하기 어렵다.
+          예전에는 <code>capture_to_process_ms</code>만 강하게 보여서
+          "FFT가 70ms", "detection이 25ms", "logging이 9ms"처럼 구체적 병목을 나눠 말하기 어려웠다.
+          지금은 <code>stage_timings_ms</code>가 summary와 HTML 리포트에 들어가므로,
+          이 문제는 해결되었고 해석 단계로 넘어갔다.
         </p>
         <div class="spec-grid">
           <div class="spec">
             <strong>쉬운 설명</strong>
-            <p>시험 총점만 있고 과목별 점수가 없는 상태다. 전체 점수가 낮은 건 알지만 어느 과목이 문제인지 확실히 모른다.</p>
+            <p>예전에는 시험 총점만 있었고 과목별 점수가 없었다. 지금은 과목별 점수표까지 나온 상태다.</p>
           </div>
           <div class="spec">
-            <strong>현업에서 왜 문제인가</strong>
-            <p>관측이 없으면 최적화가 감으로 흘러간다. 그러면 시간을 들여도 실제 병목이 아닌 곳을 고칠 위험이 크다.</p>
+            <strong>현재 상태</strong>
+            <p>현 시점에서는 "타이머가 없어서 모른다"보다, 이미 나온 수치에서 detection/continuity와 compute budget 중 무엇이 실제 우선인지 해석하는 쪽이 더 중요하다.</p>
           </div>
           <div class="spec">
-            <strong>해결 명세</strong>
+            <strong>적용된 수정</strong>
             <ul>
               <li>각 stage 시작/끝에 <code>time.perf_counter()</code>를 넣는다.</li>
               <li>요약 로그와 HTML 리포트에 stage별 p50, p95를 표시한다.</li>
             </ul>
           </div>
           <div class="spec">
-            <strong>완료 기준</strong>
+            <strong>확인 기준</strong>
             <ul>
-              <li>세션 리포트에서 가장 느린 함수가 자동으로 보인다.</li>
+              <li>세션 리포트에서 가장 느린 stage가 자동으로 보인다.</li>
               <li>최적화 전후 비교가 숫자로 가능해진다.</li>
             </ul>
           </div>
@@ -849,7 +865,36 @@
         <article class="card">
           <h3>지금 바로 보는 방향</h3>
           <p>single-person 디버그 모드로 <code>max_targets = 1</code>, <code>dbscan min_samples = 2</code>, <code>min_cartesian_separation_m = 0.65</code>를 적용했고, 최근에는 <code>body_center_patch_bands</code>를 추가해 seed 주변 <code>range-angle local patch</code>에서 connected blob centroid를 다시 계산하도록 바꿨다.</p>
-          <p>즉 detection 단계가 이제 strongest angle peak 한 점만 쓰는 것이 아니라, 거리별 adaptive patch 안에서 body-center에 가까운 대표점을 다시 만들기 시작했다. 다음 단계는 이를 기존 track 주변의 <code>track-conditioned local update</code>까지 확장하는 것이다.</p>
+          <p>여기에 더해 <code>candidate_merge_bands</code>를 이용한 coarse pre-merge를 body-center 보정 앞단으로 옮겨, 한 사람 내부에서 너무 가까운 후보는 거리별 adaptive 기준으로 먼저 줄이고 살아남은 후보에만 비싼 patch refinement를 적용하도록 바뀌었다. 이제 다음 단계였던 <code>track-conditioned local remeasurement</code>의 1차 구현도 들어가, 매칭된 track 주변 <code>RAI</code> patch를 다시 읽고 기존 measurement와 완만하게 섞도록 했다.</p>
+          <p>추가로 최근 실험에서 좌우가 반대로 보이는 경우가 확인되어, <code>processing.invert_lateral_axis</code>로 장착 방향 차이를 소프트웨어에서 보정할 수 있게 했다. 즉 report만 뒤집는 것이 아니라 detection, tracking, render가 같은 좌표계를 쓰도록 맞춘 상태다.</p>
+          <p>정적 발자취만으로는 왜 궤적이 끊기고 말리는지 읽기 어려워, 최근에는 세션별 <code>trajectory_replay.html</code>을 추가해 render 기준과 processed 기준 움직임을 프레임 순서대로 재생할 수 있게 했다.</p>
+          <p>여기에 더해 리포트 안에 <code>로그 기반 후처리 trajectory</code>도 같이 넣어, 저장된 로그에서 lead path를 다시 고르고 짧은 gap을 보간하고 EMA smoothing을 적용한 경로를 원본과 나란히 볼 수 있게 했다.</p>
+          <p>최근에는 <code>performance_report.html</code>에 <code>Path Cleanliness</code>, <code>Path Max Gap Frames</code>, <code>Path Local Residual RMS</code>, <code>Path Jump Ratio</code>를 추가해, "점수는 괜찮은데 궤적이 왜 지저분한가"를 경로 기하 품질 관점에서 따로 읽을 수 있게 했다.</p>
+          <p>render 계층에는 <code>display_hysteresis_frames</code>를 추가해 짧은 confidence drop에서 화면 track이 바로 사라지지 않게 했다. 단, 이것은 UI fail-safe이므로 실제 품질 평가는 <code>display_held_track_count</code>와 processed 기준 KPI를 함께 봐야 한다.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="raw-replay" class="section">
+      <h2>Raw Capture / Replay</h2>
+      <p class="intro">
+        이제 live 세션을 돌리면 processed/render/event 로그만 남는 것이 아니라,
+        같은 세션 id 기준으로 <code>logs/raw/&lt;session_id&gt;</code> 아래에 raw frame capture도 함께 저장된다.
+        목적은 "그때그때 느낌상 좋아졌는지"가 아니라, <strong>같은 입력을 다시 돌려 알고리즘 전후를 공정하게 비교</strong>하는 것이다.
+      </p>
+      <div class="grid3">
+        <article class="card">
+          <h3>무엇이 저장되나</h3>
+          <p><code>raw_frames.i16</code>, <code>raw_frames_index.jsonl</code>, <code>capture_manifest.json</code>이 저장된다. 즉 raw IQ와 frame별 offset, capture timing, packet health가 같이 남는다.</p>
+        </article>
+        <article class="card">
+          <h3>어떻게 다시 보나</h3>
+          <p><code>python real-time/live_motion_replay.py --capture logs/raw/&lt;session_id&gt;</code>로 같은 MotionViewer UI에서 replay할 수 있다. replay 창은 heatmap 대신 <code>x/y trajectory preview</code>를 크게 보여 주고, replay가 끝나면 세션 리포트를 inline으로 만들고 <code>trajectory_replay.html</code>을 자동으로 연다. replay 세션에는 source capture와 재생 조건을 한눈에 보는 <code>replay_report.html</code>도 같이 생성된다.</p>
+        </article>
+        <article class="card">
+          <h3>왜 중요한가</h3>
+          <p>지금 핵심 문제는 single-person continuity와 body-center 측정이다. raw replay가 있어야 같은 장면으로 detection / tracking 수정 전후를 비교하고, latency와 품질 trade-off를 분리해 해석할 수 있다.</p>
+          <p>이제는 단순 latency나 switch count뿐 아니라, 경로가 얼마나 끊기고 말렸는지도 같은 raw 기준으로 수치화해 before / after를 비교할 수 있다.</p>
         </article>
       </div>
     </section>
@@ -874,17 +919,17 @@
           <tbody>
             <tr>
               <td>1</td>
-              <td>local patch body-center refinement 검증</td>
-              <td>최근 detection이 strongest peak 한 점 대신 adaptive range-angle patch centroid를 쓰도록 바뀌었기 때문이다.</td>
+              <td>local patch body-center refinement + adaptive pre-merge 검증</td>
+              <td>최근 detection이 strongest peak 한 점 대신 adaptive range-angle patch centroid를 쓰고, 가까운 candidate는 refine 전에 coarse pre-merge 하도록 바뀌었기 때문이다.</td>
               <td>candidate mean과 confirmed track mean이 줄고, one-person multi-ID split이 완화된다.</td>
               <td><code>candidate mean</code>, <code>confirmed track mean</code>, <code>lead confirmed switch</code>가 이전 세션보다 개선된다.</td>
             </tr>
             <tr>
               <td>2</td>
-              <td>track-conditioned local update 추가</td>
-              <td>현재 tracker는 여전히 global detection 후보를 이어 붙이는 구조라, detection이 좋아져도 원운동에서 continuity 한계가 남기 때문이다.</td>
+              <td>track-conditioned local remeasurement 검증</td>
+              <td>1차 구현은 들어갔지만, raw replay 기준으로 실제 원운동/네모 이동에서 경로 품질이 좋아지는지 확인해야 하기 때문이다.</td>
               <td>기존 primary track 근처에서 대표점을 다시 재측정해 ID continuity가 더 좋아진다.</td>
-              <td>원운동에서도 같은 사람이 같은 ID로 대부분 유지된다.</td>
+              <td><code>Path Cleanliness</code>, <code>Local Residual RMS</code>, <code>lead switch</code>, <code>display_held_track_count</code>가 함께 관리된다.</td>
             </tr>
             <tr>
               <td>3</td>
@@ -911,7 +956,7 @@
               <td>6</td>
               <td>남은 processing 최적화</td>
               <td>continuity 개선 이후에는 detect loop, logging write, CFAR 비용이 다시 주요 병목으로 올라올 수 있다.</td>
-              <td>품질을 유지한 채 p95 latency를 더 줄일 수 있다.</td>
+              <td>품질을 유지한 채 p95 latency를 더 줄일 수 있다. 특히 survivor만 refine 하도록 유지해야 한다.</td>
               <td><code>detect_ms</code>, <code>compute_total_ms</code>가 quality regression 없이 더 내려간다.</td>
             </tr>
           </tbody>

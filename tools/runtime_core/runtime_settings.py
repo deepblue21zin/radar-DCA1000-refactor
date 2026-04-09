@@ -38,6 +38,8 @@ DEFAULT_RUNTIME_SETTINGS = {
         "input_mode": "live",
         "source_capture": "",
         "notes": "",
+        "write_raw_capture": True,
+        "raw_capture_root": "logs/raw",
         "write_processed_frames": True,
         "write_render_frames": True,
         "write_status_log": True,
@@ -53,6 +55,7 @@ DEFAULT_TUNING_SETTINGS = {
     "processing": {
         "remove_static": True,
         "doppler_guard_bins": 2,
+        "invert_lateral_axis": False,
     },
     "roi": {
         "lateral_m": 1.5,
@@ -101,6 +104,29 @@ DEFAULT_TUNING_SETTINGS = {
                     "relative_floor": 0.50,
                 },
             ],
+            "candidate_merge_bands": [
+                {
+                    "r_min": 0.0,
+                    "r_max": 1.5,
+                    "merge_radius_m": 0.32,
+                    "range_bin_radius": 1,
+                    "doppler_bin_radius": 2,
+                },
+                {
+                    "r_min": 1.5,
+                    "r_max": 3.0,
+                    "merge_radius_m": 0.48,
+                    "range_bin_radius": 2,
+                    "doppler_bin_radius": 3,
+                },
+                {
+                    "r_min": 3.0,
+                    "r_max": None,
+                    "merge_radius_m": 0.62,
+                    "range_bin_radius": 3,
+                    "doppler_bin_radius": 4,
+                },
+            ],
         },
         "dbscan_adaptive_eps_bands": [
             {"r_min": 0.25, "r_max": 1.0, "eps": 0.34, "min_samples": 2},
@@ -130,6 +156,33 @@ DEFAULT_TUNING_SETTINGS = {
         "lateral_deadband_range_scale": 0.03,
         "lateral_smoothing_alpha": 0.45,
         "lateral_velocity_damping": 0.55,
+        "local_remeasurement_enabled": True,
+        "local_remeasurement_blend": 0.35,
+        "local_remeasurement_max_shift_m": 0.28,
+        "local_remeasurement_track_bias": 0.15,
+        "local_remeasurement_patch_bands": [
+            {
+                "r_min": 0.0,
+                "r_max": 1.5,
+                "range_radius_bins": 1,
+                "angle_radius_bins": 2,
+                "relative_floor": 0.55,
+            },
+            {
+                "r_min": 1.5,
+                "r_max": 3.0,
+                "range_radius_bins": 2,
+                "angle_radius_bins": 3,
+                "relative_floor": 0.50,
+            },
+            {
+                "r_min": 3.0,
+                "r_max": None,
+                "range_radius_bins": 3,
+                "angle_radius_bins": 4,
+                "relative_floor": 0.48,
+            },
+        ],
     },
     "pipeline": {
         "queue_size": 4,
@@ -147,6 +200,9 @@ DEFAULT_TUNING_SETTINGS = {
         "show_tentative_tracks": True,
         "tentative_min_confidence": 0.30,
         "tentative_min_hits": 2,
+        "display_hysteresis_frames": 5,
+        "display_hysteresis_confidence_floor": 0.12,
+        "display_primary_bonus_frames": 3,
     },
 }
 
