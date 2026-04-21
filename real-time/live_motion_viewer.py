@@ -88,6 +88,12 @@ TRACK_LOCAL_REMEASUREMENT_BLEND = float(TUNING['tracking'].get('local_remeasurem
 TRACK_LOCAL_REMEASUREMENT_MAX_SHIFT_M = float(TUNING['tracking'].get('local_remeasurement_max_shift_m', 0.0))
 TRACK_LOCAL_REMEASUREMENT_TRACK_BIAS = float(TUNING['tracking'].get('local_remeasurement_track_bias', 0.0))
 TRACK_LOCAL_REMEASUREMENT_PATCH_BANDS = list(TUNING['tracking'].get('local_remeasurement_patch_bands', []))
+TRACK_MEASUREMENT_SOFT_GATE_ENABLED = bool(TUNING['tracking'].get('measurement_soft_gate_enabled', True))
+TRACK_MEASUREMENT_SOFT_GATE_FLOOR = float(TUNING['tracking'].get('measurement_soft_gate_floor', 0.35))
+TRACK_MEASUREMENT_SOFT_GATE_START_M = float(TUNING['tracking'].get('measurement_soft_gate_start_m', 0.16))
+TRACK_MEASUREMENT_SOFT_GATE_FULL_M = float(TUNING['tracking'].get('measurement_soft_gate_full_m', 0.52))
+TRACK_MEASUREMENT_SOFT_GATE_RANGE_SCALE = float(TUNING['tracking'].get('measurement_soft_gate_range_scale', 0.05))
+TRACK_MEASUREMENT_SOFT_GATE_SPEED_SCALE = float(TUNING['tracking'].get('measurement_soft_gate_speed_scale', 0.06))
 DISPLAY_MIN_CONFIDENCE = float(TUNING['detection']['display_min_confidence'])
 PIPELINE_QUEUE_SIZE = int(TUNING['pipeline']['queue_size'])
 BLOCK_TRACK_BIRTH_ON_INVALID = bool(TUNING['pipeline']['block_track_birth_on_invalid'])
@@ -303,6 +309,12 @@ class MotionViewer:
             'track_local_remeasurement_max_shift_m': TRACK_LOCAL_REMEASUREMENT_MAX_SHIFT_M,
             'track_local_remeasurement_track_bias': TRACK_LOCAL_REMEASUREMENT_TRACK_BIAS,
             'track_local_remeasurement_patch_bands': TRACK_LOCAL_REMEASUREMENT_PATCH_BANDS,
+            'track_measurement_soft_gate_enabled': TRACK_MEASUREMENT_SOFT_GATE_ENABLED,
+            'track_measurement_soft_gate_floor': TRACK_MEASUREMENT_SOFT_GATE_FLOOR,
+            'track_measurement_soft_gate_start_m': TRACK_MEASUREMENT_SOFT_GATE_START_M,
+            'track_measurement_soft_gate_full_m': TRACK_MEASUREMENT_SOFT_GATE_FULL_M,
+            'track_measurement_soft_gate_range_scale': TRACK_MEASUREMENT_SOFT_GATE_RANGE_SCALE,
+            'track_measurement_soft_gate_speed_scale': TRACK_MEASUREMENT_SOFT_GATE_SPEED_SCALE,
             'pipeline_queue_size': PIPELINE_QUEUE_SIZE,
             'block_track_birth_on_invalid': BLOCK_TRACK_BIRTH_ON_INVALID,
             'invalid_policy': dict(INVALID_POLICY),
@@ -377,6 +389,12 @@ class MotionViewer:
             local_remeasurement_max_shift_m=TRACK_LOCAL_REMEASUREMENT_MAX_SHIFT_M,
             local_remeasurement_track_bias=TRACK_LOCAL_REMEASUREMENT_TRACK_BIAS,
             local_remeasurement_patch_bands=TRACK_LOCAL_REMEASUREMENT_PATCH_BANDS,
+            measurement_soft_gate_enabled=TRACK_MEASUREMENT_SOFT_GATE_ENABLED,
+            measurement_soft_gate_floor=TRACK_MEASUREMENT_SOFT_GATE_FLOOR,
+            measurement_soft_gate_start_m=TRACK_MEASUREMENT_SOFT_GATE_START_M,
+            measurement_soft_gate_full_m=TRACK_MEASUREMENT_SOFT_GATE_FULL_M,
+            measurement_soft_gate_range_scale=TRACK_MEASUREMENT_SOFT_GATE_RANGE_SCALE,
+            measurement_soft_gate_speed_scale=TRACK_MEASUREMENT_SOFT_GATE_SPEED_SCALE,
         )
 
     def resolve_source_capture_path(self):
@@ -424,6 +442,8 @@ class MotionViewer:
             'age': int(track.age),
             'hits': int(track.hits),
             'misses': int(track.misses),
+            'measurement_quality': round(float(track.measurement_quality), 4),
+            'measurement_residual_m': round(float(track.measurement_residual_m), 4),
         }
 
     def log_render_snapshot(

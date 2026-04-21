@@ -18,7 +18,7 @@ CURRENT_STATE = {
     "score_overall": "75/100",
     "score_structure": "83/100",
     "score_logging": "94/100",
-    "code_files": 19,
+    "code_files": 22,
     "log_artifacts": 13,
 }
 
@@ -183,7 +183,7 @@ FILES = [
         "inputs": "RDI magnitude, RAI magnitude, ROI 설정, clustering 결과",
         "outputs": "DetectionCandidate 리스트",
         "debug": "CFAR threshold, angle ROI, cluster 기준, adaptive band의 min_samples override가 과도하지 않은지 함께 본다.",
-        "ops": "최근에는 coarse pre-merge를 body-center refinement 앞단으로 옮겨 survivor에만 비싼 계산을 하도록 바뀌었고, 이어서 tracking.py에서 기존 track 예측 위치와 연결된 track-conditioned local measurement의 1차 구현도 들어갔다.",
+        "ops": "최근에는 coarse pre-merge를 body-center refinement 앞단으로 옮겨 survivor에만 비싼 계산을 하도록 바뀌었고, 이어서 tracking.py에서 기존 track 예측 위치와 연결된 track-conditioned local measurement와 suspicious measurement soft-gating의 1차 구현도 들어갔다.",
         "read_order": [
             "DetectionRegion과 DetectionCandidate를 먼저 본다.",
             "cfar_threshold_2d로 픽셀 수준 gating을 이해한다.",
@@ -241,31 +241,32 @@ FILES = [
         "title": "tracking.py",
         "category": "Tracking",
         "stages": ["Tracking"],
-        "summary": "프레임 간 detection을 이어 붙여 일관된 track ID를 유지하는 다중 타깃 tracker다. 최근에는 대표 track 유지, 근접 birth 억제, lateral smoothing에 더해 track-conditioned local RAI remeasurement까지 들어가 궤적 안정화 역할이 더 커졌다.",
+        "summary": "프레임 간 detection을 이어 붙여 일관된 track ID를 유지하는 다중 타깃 tracker다. 최근에는 대표 track 유지, 근접 birth 억제, lateral smoothing에 더해 track-conditioned local RAI remeasurement와 suspicious measurement soft-gating까지 들어가 궤적 안정화 역할이 더 커졌다.",
         "why": "사용자 입장에서 중요한 것은 같은 사람이 같은 ID로 유지되는가, 그리고 좌우로 덜 튀는가이다. 현재 현업형 핵심 문제도 바로 이 continuity다.",
-        "mentor": "이 파일은 단순히 점을 따라가는 것이 아니라, 어떤 가설을 유지하고 버리고 확정할지 결정하는 정책 묶음이다. 최근에는 대표 track을 더 오래 유지하고 근처 새 ID 생성을 억제하는 안정화 계층으로도 작동하며, 매칭된 track 주변 RAI patch를 다시 읽어 measurement를 완만하게 보정하는 1차 local remeasurement도 맡는다.",
+        "mentor": "이 파일은 단순히 점을 따라가는 것이 아니라, 어떤 가설을 유지하고 버리고 확정할지 결정하는 정책 묶음이다. 최근에는 대표 track을 더 오래 유지하고 근처 새 ID 생성을 억제하는 안정화 계층으로도 작동하며, 매칭된 track 주변 RAI patch를 다시 읽어 measurement를 완만하게 보정하는 1차 local remeasurement와 suspicious measurement를 덜 믿게 만드는 soft-gating도 맡는다.",
         "before": "detection.py",
         "after": "live_motion_viewer.py, session_report.py",
         "inputs": "DetectionCandidate 리스트, gating과 aging 파라미터",
         "outputs": "confirmed track, tentative track, lifecycle 상태",
         "debug": "track birth가 늦지 않은지, ID switch가 잦지 않은지, association이 깨지지 않는지, primary track이 과도하게 바뀌지 않는지, non-primary가 너무 오래 살아남지 않는지 본다.",
-        "ops": "로그가 좋아진 지금은 이 파일의 파라미터 변화 영향을 수치로 보기 쉬워졌다. 이제 track-conditioned local measurement의 1차 구현이 들어갔으므로 raw replay 기준으로 Path Cleanliness, Local Residual RMS, lead switch를 함께 검증해야 한다.",
+        "ops": "로그가 좋아진 지금은 이 파일의 파라미터 변화 영향을 수치로 보기 쉬워졌다. 이제 track-conditioned local measurement와 measurement soft-gating의 1차 구현이 들어갔으므로 raw replay 기준으로 Path Cleanliness, Local Residual RMS, lead switch, measurement quality를 함께 검증해야 한다.",
         "read_order": [
             "TrackState와 TrackEstimate로 상태 구조를 본다.",
             "MultiTargetTracker가 내부 리스트를 어떻게 유지하는지 확인한다.",
-            "_measurement_covariance, _stabilize_lateral_state, _refine_measurement_near_track를 읽어 왜 x 축과 representative point를 보정하는지 이해한다.",
+            "_measurement_covariance, _measurement_update_quality, _stabilize_lateral_state, _refine_measurement_near_track를 읽어 왜 x 축과 representative point를 보정하는지 이해한다.",
             "_associate와 update를 읽어 실제 추적 정책과 birth suppression 흐름을 이해한다.",
         ],
         "roles": [
             ("상태 유지", "각 detection이 시간축에서 어떤 사람인지 연결한다."),
             ("확정 정책", "tentative를 confirmed로 올릴지, 오래된 track을 지울지 결정한다."),
             ("다중 타깃 정합", "가까운 후보가 여러 개일 때 어떤 detection을 어떤 track에 잇는지 계산한다."),
-            ("궤적 안정화", "대표 track 유지, 근접 birth 억제, lateral smoothing, local remeasurement로 지그재그를 줄인다."),
+            ("궤적 안정화", "대표 track 유지, 근접 birth 억제, lateral smoothing, local remeasurement, soft-gating으로 지그재그를 줄인다."),
         ],
         "landmarks": [
             ("TrackState", r"^class TrackState", "트랙 상태 열거형이다."),
             ("TrackEstimate", r"^class TrackEstimate", "개별 track 추정치 구조다."),
             ("MultiTargetTracker", r"^class MultiTargetTracker", "tracker 메인 클래스다."),
+            ("_measurement_update_quality", r"^\s*def _measurement_update_quality", "튀는 measurement를 버리지 않고 덜 믿게 만드는 soft-gating 함수다."),
             ("_refine_measurement_near_track", r"^\s*def _refine_measurement_near_track", "매칭된 track 주변 RAI patch로 measurement를 한 번 더 보정한다."),
             ("_associate", r"^\s*def _associate", "detection과 track 매칭 단계다."),
             ("update", r"^\s*def update", "프레임 단위 tracker 갱신 함수다."),
@@ -443,9 +444,9 @@ FILES = [
         "title": "session_report.py",
         "category": "Reporting",
         "stages": ["Logging", "Reports"],
-        "summary": "한 세션 폴더를 읽어 summary.json을 생성하는 리포트 빌더다. processed/render 집계뿐 아니라 system snapshot, stage timing, operational assessment, performance KPI까지 묶는다.",
-        "why": "로그가 남는 것만으로 끝나지 않고, 사람이 바로 비교 가능한 숫자와 운영 점수와 성능 지표로 정리해야 하기 때문이다.",
-        "mentor": "processed 로그와 render 로그를 왜 나눴는지 가장 잘 보여 주는 파일이다. 이제는 알고리즘 성능과 UI 체감 성능뿐 아니라 환경 상태와 stage별 병목, compute budget, continuity까지 같은 세션 안에서 묶어 본다.",
+        "summary": "한 세션 폴더를 읽어 summary.json을 생성하는 리포트 빌더다. processed/render 집계뿐 아니라 system snapshot, stage timing, transport quality, operational assessment, performance KPI까지 묶는다.",
+        "why": "로그가 남는 것만으로 끝나지 않고, 사람이 바로 비교 가능한 숫자와 운영 점수와 성능 지표, 그리고 이번 raw가 baseline tuning용으로 적절한지까지 정리해야 하기 때문이다.",
+        "mentor": "processed 로그와 render 로그를 왜 나눴는지 가장 잘 보여 주는 파일이다. 이제는 알고리즘 성능과 UI 체감 성능뿐 아니라 환경 상태와 stage별 병목, compute budget, continuity, 그리고 raw transport suitability까지 같은 세션 안에서 묶어 본다.",
         "before": "session_meta.json, processed_frames.jsonl, render_frames.jsonl, system_snapshot.json",
         "after": "summary.json, session_compare.py",
         "inputs": "세션 디렉터리의 JSON과 JSONL 로그",
@@ -462,7 +463,7 @@ FILES = [
             ("세션 요약", "프레임 로그를 사람이 읽기 쉬운 summary.json으로 압축한다."),
             ("지표 표준화", "invalid rate, latency, track count 같은 지표를 일관된 구조로 만든다."),
             ("성능 KPI 요약", "frame budget, throughput, compute utilization, jitter, continuity를 같은 schema로 정리한다."),
-            ("운영 진단", "system snapshot과 stage timing을 요약해 현업형 판단 재료를 만든다."),
+            ("운영 진단", "system snapshot과 stage timing과 transport quality를 요약해 현업형 판단 재료를 만든다."),
         ],
         "landmarks": [
             ("_load_jsonl", r"^def _load_jsonl", "JSONL 로더다."),
@@ -612,9 +613,9 @@ FILES = [
         "title": "log_html_reports.py",
         "category": "Reporting",
         "stages": ["Reports"],
-        "summary": "summary.json과 comparison 결과를 읽어 세션 index, ops_report, performance_report, trajectory_replay, 루트 대시보드까지 HTML로 생성하는 리포트 렌더러다. 최근에는 대표 lead track 기준 궤적뿐 아니라 프레임 순서대로 움직임을 재생하는 디버그용 trajectory replay와, 로그를 다시 읽어 보간·smoothing한 postprocessed trajectory도 포함한다.",
-        "why": "JSON만 있으면 숫자는 남지만, 회의나 현장 설명에서는 한눈에 보이는 HTML 리포트가 훨씬 빠르다. 특히 궤적과 KPI는 같은 데이터를 어떻게 보여 주느냐에 따라 해석이 크게 달라지고, 발자취만으로 안 보이는 끊김은 시간축 재생이나 로그 기반 후처리 경로가 있어야 구분하기 쉽다.",
-        "mentor": "이 파일은 숫자를 전달 가능한 화면으로 바꾸는 마지막 계층이다. stage timing, system snapshot, operational score뿐 아니라 성능 KPI와 대표 track을 어떻게 보여 줄지, 그리고 시간축 재생이나 로그 기반 후처리로 어떤 프레임에서 끊겼는지를 어떻게 드러낼지도 이 레이어에서 결정한다.",
+        "summary": "summary.json과 comparison 결과를 읽어 세션 index, ops_report, performance_report, trajectory_replay, 루트 대시보드까지 HTML로 생성하는 리포트 렌더러다. 최근에는 대표 lead track 기준 궤적뿐 아니라 프레임 순서대로 움직임을 재생하는 디버그용 trajectory replay와, 로그를 다시 읽어 보간·smoothing한 postprocessed trajectory, 그리고 clean/noisy/unusable transport 배지도 포함한다.",
+        "why": "JSON만 있으면 숫자는 남지만, 회의나 현장 설명에서는 한눈에 보이는 HTML 리포트가 훨씬 빠르다. 특히 궤적과 KPI는 같은 데이터를 어떻게 보여 주느냐에 따라 해석이 크게 달라지고, 발자취만으로 안 보이는 끊김은 시간축 재생이나 로그 기반 후처리 경로가 있어야 구분하기 쉽다. transport suitability가 같이 보여야 알고리즘 문제와 입력 무결성 문제를 분리하기도 쉽다.",
+        "mentor": "이 파일은 숫자를 전달 가능한 화면으로 바꾸는 마지막 계층이다. stage timing, system snapshot, operational score뿐 아니라 성능 KPI와 대표 track을 어떻게 보여 줄지, 그리고 시간축 재생이나 로그 기반 후처리로 어떤 프레임에서 끊겼는지를 어떻게 드러낼지도 이 레이어에서 결정한다. 최근에는 transport suitability도 바로 읽게 만들어 baseline tuning 세션과 robustness 세션을 구분하기 쉬워졌다.",
         "before": "session_report.py, session_compare.py, operational_assessment.py",
         "after": "index.html, ops_report.html, performance_report.html, trajectory_replay.html, 비교용 루트 dashboard",
         "inputs": "summary.json, comparison json, event summary",
@@ -676,6 +677,109 @@ FILES = [
             ("read_bin_file", r"^def read_bin_file", "bin 파일을 complex cube로 변환한다."),
         ],
         "related": ["DSP", "session_report", "session_compare"],
+    },
+    {
+        "slug": "lab_registry",
+        "source": "tools/lab/registry.py",
+        "title": "registry.py",
+        "category": "Experiment Ops",
+        "stages": ["Registry", "Replay", "Analysis"],
+        "summary": "logs/raw와 logs/live_motion_viewer를 읽어 로컬 SQLite 레지스트리로 정리하는 실험 관리 인덱서다.",
+        "why": "raw capture와 run이 쌓일수록 폴더 이름만으로는 baseline 세션과 버릴 세션을 구분하기 어렵다. 지금은 실험 관리 자체가 알고리즘 다음 병목이므로, 메타데이터 인덱싱 계층이 필요해졌다.",
+        "mentor": "원본 raw를 바꾸지 않으면서 capture와 run을 느슨하게 연결하는 도서관 목록표 같은 파일이다. clean/noisy/unusable transport 판단, KPI 추출, 태깅 저장이 모두 여기서 시작된다.",
+        "before": "logs/raw/<session_id>, logs/live_motion_viewer/<session_id>",
+        "after": "SQLite registry, Streamlit 실험 관리 앱",
+        "inputs": "raw frame index, summary.json, runtime/session metadata, annotations",
+        "outputs": "radar_lab.sqlite3, capture/run 목록, compare용 메타데이터",
+        "debug": "raw index가 비어 있으면 insufficient가 뜰 수 있고, source_capture 경로에서 capture_id 추론이 제대로 되는지, annotation이 테이블과 맞게 join되는지 먼저 본다.",
+        "ops": "현업에서는 데이터셋이 쌓이면 실험 관리 계층이 꼭 필요하다. 이 파일은 별도 서버 없이 SQLite 하나로 baseline dataset, notes, session triage를 가능하게 만드는 최소 운영 레이어다.",
+        "read_order": [
+            "_scan_raw_index와 _quality_from_stats로 transport 판정부터 본다.",
+            "_build_capture_record와 _build_run_record가 어떤 KPI를 끌어오는지 확인한다.",
+            "refresh_registry, fetch_runs, save_annotation 순으로 읽으면 앱의 전체 흐름이 잡힌다.",
+        ],
+        "roles": [
+            ("세션 인덱싱", "raw capture와 run 메타데이터를 한 DB에 정리한다."),
+            ("품질 분류", "transport 품질과 주요 KPI를 기준으로 세션 triage를 돕는다."),
+            ("태그 저장", "baseline, good, discard 같은 메모와 필터 기준을 저장한다."),
+        ],
+        "landmarks": [
+            ("database_path", r"^def database_path", "SQLite 파일 위치를 정한다."),
+            ("_quality_from_stats", r"^def _quality_from_stats", "transport 품질 판정 규칙을 담는다."),
+            ("_scan_raw_index", r"^def _scan_raw_index", "raw_frames_index.jsonl에서 frame 통계를 읽는다."),
+            ("refresh_registry", r"^def refresh_registry", "captures/runs를 스캔해 DB를 갱신한다."),
+            ("fetch_runs", r"^def fetch_runs", "run 라이브러리용 목록을 가져온다."),
+            ("save_annotation", r"^def save_annotation", "수동 태그와 메모를 저장한다."),
+        ],
+        "related": ["lab_stage_cache", "lab_app", "session_report", "log_html_reports"],
+    },
+    {
+        "slug": "lab_stage_cache",
+        "source": "tools/lab/stage_cache.py",
+        "title": "stage_cache.py",
+        "category": "Experiment Ops",
+        "stages": ["Replay", "Stage Cache", "Analysis"],
+        "summary": "선택한 raw capture를 같은 처리 경로로 다시 태워 frame별 stage artifact를 저장하는 오프라인 cache 빌더다.",
+        "why": "눈으로 보기에 궤적이 이상할 때 detection 문제인지 tracking 문제인지 보려면, 같은 raw를 고정한 채 frame별 intermediate artifact를 다시 열어볼 수 있어야 한다.",
+        "mentor": "이 파일은 새 알고리즘을 또 만드는 것이 아니라, live에서 쓰는 처리 경로를 그대로 오프라인에 재사용해 재현성 있는 stage-wise debug artifact를 만드는 엔진이다.",
+        "before": "lab registry, logs/raw/<session_id>, runtime_config.json",
+        "after": "lab_data/stage_cache/<session_id>, Streamlit Stage Debug",
+        "inputs": "raw capture, run runtime config, DetectionRegion, tracker tuning",
+        "outputs": "manifest.json, frames.jsonl, frame_*.npz",
+        "debug": "capture_dir가 제대로 연결되는지, cfg path가 살아 있는지, cache가 오래되었을 때 force rebuild가 필요한지 먼저 본다.",
+        "ops": "현업에서는 raw를 지우지 않고 intermediate artifact만 따로 cache하는 방식이 디버깅과 저장 공간의 균형이 좋다. 이 파일은 그 첫 단계다.",
+        "read_order": [
+            "_resolve_capture_dir로 raw 연결을 먼저 본다.",
+            "_build_runtime_components에서 live와 같은 runtime/detection/tracker가 어떻게 복원되는지 확인한다.",
+            "build_stage_cache에서 frame별 NPZ/JSONL 저장 흐름을 본다.",
+        ],
+        "roles": [
+            ("raw 재처리", "같은 raw를 현재 알고리즘으로 다시 처리한다."),
+            ("artifact cache", "frame별 preview heatmap과 detection/track payload를 저장한다."),
+            ("Stage Debug 공급", "UI가 빠르게 열 수 있는 디버그용 cache를 만든다."),
+        ],
+        "landmarks": [
+            ("_resolve_capture_dir", r"^def _resolve_capture_dir", "run과 raw capture를 다시 연결한다."),
+            ("_build_runtime_components", r"^def _build_runtime_components", "runtime_config, DetectionRegion, tracker를 복원한다."),
+            ("build_stage_cache", r"^def build_stage_cache", "stage cache를 생성한다."),
+            ("load_stage_cache_frame", r"^def load_stage_cache_frame", "선택 프레임 artifact를 읽는다."),
+        ],
+        "related": ["lab_registry", "lab_app", "real_time_process"],
+    },
+    {
+        "slug": "lab_app",
+        "source": "tools/lab/app.py",
+        "title": "app.py",
+        "category": "Experiment Ops",
+        "stages": ["Registry", "Compare", "Analysis", "Stage Debug"],
+        "summary": "localhost에서만 열리는 Streamlit 기반 실험 관리 앱이다. run/capture 라이브러리, 태깅, before/after 비교, stage debug를 한 자리에서 제공한다.",
+        "why": "실험이 쌓이면 HTML 리포트만으로는 좋은 세션, 같은 raw 비교 대상, 버릴 데이터를 빠르게 찾기 어렵다. 이제는 운영 UI가 있어야 알고리즘 반복 속도가 유지된다.",
+        "mentor": "프론트엔드와 백엔드를 따로 만들지 않고, 기존 Python 로그 구조와 SQLite 인덱서를 바로 재사용해 개인용 운영 화면을 얹은 파일이다. 비용도 없고 외부 공개도 없다.",
+        "before": "lab registry, existing logs/raw + live session reports",
+        "after": "로컬 세션 라이브러리, compare 화면, stage debug 화면",
+        "inputs": "registry overview, run/capture detail rows, annotations, local report paths",
+        "outputs": "localhost UI, filterable library, compare table, artifact links",
+        "debug": "streamlit 미설치 여부, registry refresh 동작, file:// 링크가 실제 존재하는지, compare가 같은 raw capture인지 경고를 제대로 주는지 본다.",
+        "ops": "현업에서 꼭 거대한 데이터 플랫폼이 필요한 것은 아니다. 개인용 실험 관리 단계에서는 localhost 전용 Streamlit + SQLite 조합이 가장 싸고 안전하며, raw 원본을 그대로 둔 채 실험 반복 효율을 크게 올려 준다.",
+        "read_order": [
+            "main에서 전체 페이지 구조와 registry refresh 흐름을 본다.",
+            "_runs_page와 _captures_page를 읽어 라이브러리 설계를 본다.",
+            "_compare_page와 _stage_page로 회귀 비교와 단계별 디버그 UI를 본다.",
+        ],
+        "roles": [
+            ("라이브러리 UI", "run과 raw capture를 필터링하고 열람한다."),
+            ("회귀 비교", "같은 raw 기준 before/after KPI 비교를 빠르게 보여 준다."),
+            ("디버그 허브", "HTML 리포트와 stage timing artifact로 바로 이동하게 한다."),
+        ],
+        "landmarks": [
+            ("_overview_page", r"^def _overview_page", "대시보드 요약을 그린다."),
+            ("_runs_page", r"^def _runs_page", "run 라이브러리를 그린다."),
+            ("_captures_page", r"^def _captures_page", "raw capture 라이브러리를 그린다."),
+            ("_compare_page", r"^def _compare_page", "before/after run 비교 테이블을 만든다."),
+            ("_stage_page", r"^def _stage_page", "stage timing과 artifact 링크를 모아 보여 준다."),
+            ("main", r"^def main", "앱 진입점이다."),
+        ],
+        "related": ["lab_registry", "session_report", "log_html_reports"],
     },
 ]
 
@@ -753,6 +857,26 @@ FLOW_DETAILS = {
         ("_load_summary", "before와 after summary.json을 로드한다.", "두 세션의 summary dict", "build_comparison"),
         ("build_comparison", "핵심 지표와 operational score delta, improved/regressed 판단을 계산한다.", "comparison dict", "main"),
         ("main", "비교 결과를 comparison_vs_*.json으로 저장하고 콘솔에 요약 출력한다.", "comparison json", "실험 회귀 판단"),
+    ],
+    "lab_registry": [
+        ("_scan_raw_index", "raw frame index에서 frame count와 invalid/gap 통계를 읽는다.", "transport 통계", "_quality_from_stats"),
+        ("_build_capture_record", "raw capture 한 세션을 capture record dict로 만든다.", "capture row", "refresh_registry"),
+        ("_build_run_record", "live/replay 세션 summary에서 KPI와 연결 raw 정보를 뽑는다.", "run row", "refresh_registry"),
+        ("refresh_registry", "raw와 live 세션을 스캔해 SQLite 레지스트리를 갱신한다.", "captures/runs 테이블", "tools/lab/app.py"),
+        ("save_annotation", "baseline/good/discard 태그와 메모를 저장한다.", "annotations row", "tools/lab/app.py"),
+    ],
+    "lab_stage_cache": [
+        ("_resolve_capture_dir", "선택한 run과 연결된 raw capture 디렉터리를 찾는다.", "capture_dir", "_build_runtime_components"),
+        ("_build_runtime_components", "runtime_config, detection_region, tracker를 live와 비슷하게 복원한다.", "offline processing context", "build_stage_cache"),
+        ("build_stage_cache", "raw를 frame별로 다시 처리해 manifest/jsonl/npz cache를 만든다.", "stage cache files", "tools/lab/app.py"),
+        ("load_stage_cache_frame", "선택 프레임 metadata와 heatmap artifact를 읽는다.", "selected frame payload", "Stage Debug"),
+    ],
+    "lab_app": [
+        ("_overview_page", "전체 run/capture 현황과 품질 분포를 대시보드로 보여 준다.", "overview metrics", "사용자 확인"),
+        ("_runs_page", "run 라이브러리와 세부 KPI, 로컬 리포트 링크를 제공한다.", "run detail view", "비교/태깅"),
+        ("_captures_page", "raw capture 라이브러리와 연결된 run 목록을 보여 준다.", "capture detail view", "replay planning"),
+        ("_compare_page", "before/after run KPI delta를 계산해 회귀 비교를 돕는다.", "compare table", "알고리즘 판단"),
+        ("_stage_page", "stage cache를 생성하고 프레임별 heatmap과 detection/track payload를 보여 준다.", "stage debug view", "다음 분석 단계"),
     ],
     "session_logging": [
         ("SessionLogger.build_session_metadata", "git 정보와 logging 토글을 세션 메타데이터로 묶는다.", "session metadata", "prepare"),
@@ -854,6 +978,19 @@ DATA_CONTRACTS = [
             "multi_target success metrics",
         ],
     },
+    {
+        "name": "Radar Lab Registry",
+        "kind": "Experiment Catalog",
+        "produced_by": "tools/lab/registry.py",
+        "consumed_by": "tools/lab/app.py",
+        "why": "capture와 run을 연결하고 태그를 저장해야 좋은 세션과 버릴 세션을 운영 차원에서 빠르게 구분할 수 있다.",
+        "fields": [
+            "captures: capture_id, invalid_rate, transport_category, linked_run_count",
+            "runs: session_id, capture_id, operational/performance/path KPI",
+            "annotations: label, keep_flag, people_count, motion_pattern, notes",
+            "registry_meta: last_refresh_at",
+        ],
+    },
 ]
 
 PIPELINE_GRAPH = [
@@ -912,6 +1049,13 @@ PIPELINE_GRAPH = [
         "function": "build_comparison",
         "input": "before / after summary.json",
         "output": "comparison_vs_*.json",
+    },
+    {
+        "stage": "Experiment Ops",
+        "file": "tools/lab/registry.py + tools/lab/app.py",
+        "function": "refresh_registry / Streamlit pages",
+        "input": "logs/raw + live session reports + annotations",
+        "output": "local session library + compare UI + stage debug hub",
     },
 ]
 
@@ -1602,7 +1746,7 @@ def render_project_index() -> str:
 
       <section class="section" id="goal">
         <h2>프로젝트 목표 정리</h2>
-        <p class="intro">한 문장으로 줄이면, 이 프로젝트는 실시간 객체 추적 레이더 데모를 만들고 그것을 환경 스냅샷과 운영 점수까지 포함해 재현 가능하게 측정하는 시스템으로 진화했다. 최근에는 detection의 local patch body-center refinement와 adaptive candidate pre-merge에 이어 tracking의 track-conditioned local remeasurement, render의 display hysteresis까지 들어갔고, 최신 핵심 리스크는 이 보정들이 실제 raw replay에서 single-person continuity를 얼마나 개선하는지 검증하는 것이다.</p>
+        <p class="intro">한 문장으로 줄이면, 이 프로젝트는 실시간 객체 추적 레이더 데모를 만들고 그것을 환경 스냅샷과 운영 점수까지 포함해 재현 가능하게 측정하는 시스템으로 진화했다. 최근에는 detection의 local patch body-center refinement와 adaptive candidate pre-merge에 이어 tracking의 track-conditioned local remeasurement, render의 display hysteresis, 그리고 raw/run을 관리하는 로컬 전용 Radar Lab까지 들어갔고, 최신 핵심 리스크는 이 보정들이 실제 raw replay에서 single-person continuity를 얼마나 개선하는지 검증하는 것이다.</p>
         <div class="grid3">
           <article class="card"><h3>실시간 검출</h3><p>UDP로 들어오는 raw frame에서 움직이는 후보를 안정적으로 찾아야 한다.</p></article>
           <article class="card"><h3>실시간 추적</h3><p>같은 사람을 여러 프레임에서 같은 ID로 유지해야 한다.</p></article>
@@ -1685,7 +1829,7 @@ def render_project_index() -> str:
         <div class="grid3">
           <article class="card"><h3>좋아진 점</h3><p>processed, render, event, system snapshot, summary, ops report, performance report 구조가 생기면서 개선 판단 근거가 훨씬 강해졌고, 대표 track 유지, trajectory replay, track-conditioned remeasurement까지 들어가 끊김과 방향 전환을 시간축으로 해석하고 수정하기 쉬워졌다.</p></article>
           <article class="card"><h3>여전히 아쉬운 점</h3><p>한 사람 원운동에서도 detection representative가 완전한 몸 중심으로 고정되지는 않을 수 있다. display hysteresis는 화면 fail-safe라서 실제 tracking 개선과 구분해 봐야 하고, MotionViewer 책임 집중과 processing hot path 직렬 계산도 여전히 남아 있다.</p></article>
-          <article class="card"><h3>다음 우선순위</h3><p>최근 local patch body-center refinement와 adaptive candidate pre-merge, raw capture/replay, track-conditioned local remeasurement가 들어갔으므로, 다음 단계는 raw replay 기반 회귀 검증, two-person 분리 회귀 실험, CFAR/후보 루프 벡터화, regression threshold 추가다.</p></article>
+          <article class="card"><h3>다음 우선순위</h3><p>최근 local patch body-center refinement와 adaptive candidate pre-merge, raw capture/replay, track-conditioned local remeasurement, Radar Lab 운영 레이어가 들어갔으므로, 다음 단계는 raw replay 기반 회귀 검증, two-person 분리 회귀 실험, stage-wise replay cache, CFAR/후보 루프 벡터화, regression threshold 추가다.</p></article>
         </div>
       </section>
     </div>
@@ -1711,7 +1855,7 @@ def render_req_index() -> str:
           <div>
             <span class="eyebrow">REQ / Improvement Spec</span>
             <h1>실무형 리팩터링 요구사항</h1>
-            <p>이 문서는 지금 구조에서 무엇이 부족하고 무엇을 어떤 순서로 고쳐야 하는지 구현 관점에서 정리한 명세서다. 최근에는 로그 분리, system snapshot, stage timing, operational report, shared FFT 최적화, primary track 안정화, detection local patch body-center refinement, adaptive candidate pre-merge, track-conditioned local remeasurement, display hysteresis가 반영되었고, 지금은 raw replay 기준으로 single-person continuity 개선을 검증하는 단계다.</p>
+            <p>이 문서는 지금 구조에서 무엇이 부족하고 무엇을 어떤 순서로 고쳐야 하는지 구현 관점에서 정리한 명세서다. 최근에는 로그 분리, system snapshot, stage timing, operational report, shared FFT 최적화, primary track 안정화, detection local patch body-center refinement, adaptive candidate pre-merge, track-conditioned local remeasurement, display hysteresis, 그리고 로컬 실험 관리용 Radar Lab이 반영되었고, 지금은 raw replay 기준으로 single-person continuity 개선을 검증하는 단계다.</p>
           </div>
           <div class="hero-meta">
             <div class="meta"><span>Overall</span><strong>{CURRENT_STATE['score_overall']}</strong></div>
@@ -1757,7 +1901,7 @@ def render_req_index() -> str:
         <p class="intro">현업 기준으로는 아래 순서가 가장 안전하다. 지금은 다중 인원 완성도보다 one-person continuity를 먼저 안정화하는 것이 우선이다.</p>
         <div class="grid2">
           <article class="card"><h3>1. continuity 안정화</h3><p>한 사람 원운동에서 detection이 여러 점으로 갈라지는 것을 먼저 막아야 한다. local patch body-center refinement와 adaptive candidate pre-merge, track-conditioned local remeasurement가 들어갔으므로 이제 raw replay 기준 품질 검증이 우선이다.</p></article>
-          <article class="card"><h3>2. 재현 실험 가능화</h3><p>실제 전후 비교는 동일 입력이 있어야 의미가 있다. 이제 logs/raw 세션 캡처와 live_motion_replay.py가 있으므로, 다음 단계는 source_capture와 scenario_id 기준 자동 비교를 더 강하게 묶는 것이다.</p></article>
+          <article class="card"><h3>2. 재현 실험 가능화</h3><p>실제 전후 비교는 동일 입력이 있어야 의미가 있다. 이제 logs/raw 세션 캡처와 live_motion_replay.py, 그리고 Radar Lab이 있으므로, 다음 단계는 source_capture와 scenario_id 기준 자동 비교를 더 강하게 묶고 benchmark dataset 운영을 일상화하는 것이다.</p></article>
           <article class="card"><h3>3. processing 병목 제거</h3><p>shared FFT는 들어갔지만 detect_targets, CFAR, logging write 비용은 아직 크다. continuity 문제를 가리지 않게 여기서도 추가 벡터화와 비동기화를 진행한다.</p></article>
           <article class="card"><h3>4. startup / 비교 자동화 강화</h3><p>DCA bind preflight, regression threshold, failure banner를 추가해 실험 실패와 회귀를 더 빨리 구분한다.</p></article>
         </div>

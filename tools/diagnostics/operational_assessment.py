@@ -162,6 +162,7 @@ def _assessment_mode(summary: dict):
 def build_operational_assessment(summary: dict, event_summary: dict):
     processed = summary.get("processed", {})
     render = summary.get("render", {})
+    transport_quality = summary.get("transport_quality", {}) or {}
     performance = summary.get("performance", {})
     continuity = performance.get("continuity", {}) or {}
     lead_confirmed = continuity.get("lead_confirmed") or {}
@@ -342,6 +343,41 @@ def build_operational_assessment(summary: dict, event_summary: dict):
             "NIC 고정 IP, 방화벽, 케이블 상태, DCA1000 링크 품질, SO_RCVBUF 동작을 점검하세요."
         )
 
+    if transport_quality.get("category") == "noisy":
+        invalid_pct = transport_quality.get("measured_invalid_rate")
+        issues.append(
+            {
+                "severity": "medium",
+                "title": "이번 세션은 transport 잡음이 섞인 noisy capture입니다.",
+                "detail": (
+                    f"{transport_quality.get('detail')} "
+                    f"(invalid={round_or_none((invalid_pct or 0) * 100, 2) if invalid_pct is not None else 'n/a'}%, "
+                    f"max gap={transport_quality.get('max_udp_gap_count', 'n/a')})"
+                ),
+            }
+        )
+        recommendations.append(
+            "이 세션은 robustness 확인에는 쓰되, 알고리즘 before/after baseline 평가는 clean capture로 다시 검증하세요."
+        )
+    elif transport_quality.get("category") == "unusable":
+        invalid_pct = transport_quality.get("measured_invalid_rate")
+        issues.append(
+            {
+                "severity": "high",
+                "title": "이번 세션은 baseline 튜닝용 raw로 쓰기 어렵습니다.",
+                "detail": (
+                    f"{transport_quality.get('detail')} "
+                    f"(invalid={round_or_none((invalid_pct or 0) * 100, 2) if invalid_pct is not None else 'n/a'}%, "
+                    f"max gap={transport_quality.get('max_udp_gap_count', 'n/a')}, "
+                    f"ooo={transport_quality.get('max_out_of_sequence_count', 'n/a')}, "
+                    f"byte mismatch={transport_quality.get('max_byte_mismatch_count', 'n/a')})"
+                ),
+            }
+        )
+        recommendations.append(
+            "동일 시나리오를 다시 측정해 clean transport 세션을 확보한 뒤, 그 raw를 기준으로 replay A/B를 돌리세요."
+        )
+
     if (
         evaluation_mode["key"] == "multi_target"
         and processed_multi_success is not None
@@ -445,5 +481,7 @@ def build_operational_assessment(summary: dict, event_summary: dict):
             "lead_confirmed_switch_rate": round_or_none(lead_confirmed_switch_rate, digits=3),
             "processed_top_invalid_reason": processed_top_reason,
             "render_top_invalid_reason": render_top_reason,
+            "transport_quality_category": transport_quality.get("category"),
+            "transport_quality_suitability": transport_quality.get("suitability"),
         },
     }

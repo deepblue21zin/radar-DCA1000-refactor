@@ -79,6 +79,121 @@ def _safe_rate(numerator, denominator):
     return numerator_value / denominator_value
 
 
+def _max_available(*values):
+    numeric = [float(value) for value in values if value is not None]
+    if not numeric:
+        return None
+    return max(numeric)
+
+
+def _build_transport_quality(processed_summary: dict, render_summary: dict):
+    invalid_rate = _max_available(
+        processed_summary.get("invalid_rate"),
+        render_summary.get("invalid_rate"),
+    )
+    max_gap = max(
+        int(processed_summary.get("max_udp_gap_count") or 0),
+        int(render_summary.get("max_udp_gap_count") or 0),
+    )
+    max_out_of_sequence = max(
+        int(processed_summary.get("max_out_of_sequence_count") or 0),
+        int(render_summary.get("max_out_of_sequence_count") or 0),
+    )
+    max_byte_mismatch = max(
+        int(processed_summary.get("max_byte_mismatch_count") or 0),
+        int(render_summary.get("max_byte_mismatch_count") or 0),
+    )
+
+    thresholds = {
+        "clean": {
+            "max_invalid_rate": 0.01,
+            "max_udp_gap_count": 8,
+            "max_out_of_sequence_count": 1,
+            "max_byte_mismatch_count": 1,
+        },
+        "noisy": {
+            "max_invalid_rate": 0.05,
+            "max_udp_gap_count": 64,
+            "max_out_of_sequence_count": 2,
+            "max_byte_mismatch_count": 2,
+        },
+    }
+
+    if invalid_rate is None:
+        return {
+            "category": "insufficient",
+            "label": "data 부족",
+            "tone": "warn",
+            "suitability": "판정 불가",
+            "detail": "processed/render 로그가 부족해 transport 품질을 판정할 수 없습니다.",
+            "measured_invalid_rate": None,
+            "max_udp_gap_count": max_gap,
+            "max_out_of_sequence_count": max_out_of_sequence,
+            "max_byte_mismatch_count": max_byte_mismatch,
+            "thresholds": thresholds,
+        }
+
+    if (
+        invalid_rate <= thresholds["clean"]["max_invalid_rate"]
+        and max_gap <= thresholds["clean"]["max_udp_gap_count"]
+        and max_out_of_sequence <= thresholds["clean"]["max_out_of_sequence_count"]
+        and max_byte_mismatch <= thresholds["clean"]["max_byte_mismatch_count"]
+    ):
+        return {
+            "category": "clean",
+            "label": "clean",
+            "tone": "good",
+            "suitability": "baseline 튜닝용 적합",
+            "detail": (
+                "transport 영향이 작아 detection/tracking before-after를 보는 기준 세션으로 쓰기 좋습니다. "
+                "invalid 1% 이하, gap 8 이하를 만족합니다."
+            ),
+            "measured_invalid_rate": _round_or_none(invalid_rate),
+            "max_udp_gap_count": max_gap,
+            "max_out_of_sequence_count": max_out_of_sequence,
+            "max_byte_mismatch_count": max_byte_mismatch,
+            "thresholds": thresholds,
+        }
+
+    if (
+        invalid_rate <= thresholds["noisy"]["max_invalid_rate"]
+        and max_gap <= thresholds["noisy"]["max_udp_gap_count"]
+        and max_out_of_sequence <= thresholds["noisy"]["max_out_of_sequence_count"]
+        and max_byte_mismatch <= thresholds["noisy"]["max_byte_mismatch_count"]
+    ):
+        return {
+            "category": "noisy",
+            "label": "noisy",
+            "tone": "warn",
+            "suitability": "제한적 튜닝 / robustness 확인",
+            "detail": (
+                "transport 잡음이 조금 섞여 있어 robustness 확인에는 쓸 수 있지만, "
+                "알고리즘 baseline 세션으로 해석할 때는 주의가 필요합니다."
+            ),
+            "measured_invalid_rate": _round_or_none(invalid_rate),
+            "max_udp_gap_count": max_gap,
+            "max_out_of_sequence_count": max_out_of_sequence,
+            "max_byte_mismatch_count": max_byte_mismatch,
+            "thresholds": thresholds,
+        }
+
+    return {
+        "category": "unusable",
+        "label": "unusable",
+        "tone": "danger",
+        "suitability": "baseline 튜닝 부적합",
+        "detail": (
+            "transport 영향이 커서 이 세션만 보고 detection/tracking 회귀를 판단하면 해석이 왜곡될 수 있습니다. "
+            "같은 시나리오를 clean capture로 다시 확보하는 편이 좋습니다."
+        ),
+        "measured_invalid_rate": _round_or_none(invalid_rate),
+        "max_udp_gap_count": max_gap,
+        "max_out_of_sequence_count": max_out_of_sequence,
+        "max_byte_mismatch_count": max_byte_mismatch,
+        "thresholds": thresholds,
+    }
+
+
 def _summarize_numeric(values, digits=4):
     numeric = [float(value) for value in values if value is not None]
     if not numeric:
@@ -1400,6 +1515,10 @@ def build_summary(session_dir: Path):
             "preferred_stage_timings_ms": preferred_stage_timings,
         },
     }
+    summary["transport_quality"] = _build_transport_quality(
+        summary["processed"],
+        summary["render"],
+    )
     summary["event"] = build_event_summary(events)
     summary["performance"] = _build_performance_summary(
         session_dir,

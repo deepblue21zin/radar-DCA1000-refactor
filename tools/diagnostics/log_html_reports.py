@@ -832,6 +832,19 @@ def _session_health(summary: dict):
     return {"label": "양호", "tone": "good", "detail": "현 시점 로그 기준으로는 비교적 안정적인 편입니다."}
 
 
+def _transport_quality(summary: dict):
+    quality = summary.get("transport_quality")
+    if isinstance(quality, dict) and quality.get("label"):
+        return quality
+    return {
+        "category": "insufficient",
+        "label": "data 부족",
+        "tone": "warn",
+        "suitability": "판정 불가",
+        "detail": "transport quality 정보가 아직 생성되지 않았습니다.",
+    }
+
+
 def _load_render_records_with_fallback(session_dir: Path):
     records = _load_jsonl(session_dir / "render_frames.jsonl")
     if not records:
@@ -1513,6 +1526,7 @@ def _simplify_render_records(records: list[dict]):
 
 def _overview_cards(summary: dict):
     health = _session_health(summary)
+    transport = _transport_quality(summary)
     render = summary.get("render", {})
     processed = summary.get("processed", {})
     assessment = summary.get("assessment", {})
@@ -1537,6 +1551,12 @@ def _overview_cards(summary: dict):
             overall.get("tone", "brand"),
         ),
         ("세션 상태", health["label"], health["detail"], health["tone"]),
+        (
+            "Transport Quality",
+            transport.get("label", "n/a"),
+            transport.get("suitability", "n/a"),
+            transport.get("tone", "brand"),
+        ),
         ("Processed Invalid", _fmt_pct(processed.get("invalid_rate")), "처리 입력 무결성 관점", "danger" if (processed.get("invalid_rate") or 0) >= 0.5 else "brand"),
         ("Render Invalid", _fmt_pct(render.get("invalid_rate")), "사용자 체감 품질 관점", "danger" if (render.get("invalid_rate") or 0) >= 0.5 else "brand"),
         ("Display Track Mean", _fmt(render.get("display_track_count", {}).get("mean")), "화면에 실제로 보인 트랙 수", "warn"),
@@ -2064,6 +2084,7 @@ def _build_performance_html(session_dir: Path, summary: dict):
     continuity = performance.get("continuity", {})
     geometry = performance.get("geometry", {})
     geometry_reference = geometry.get("reference", {})
+    transport = _transport_quality(summary)
     render_geometry = geometry.get("render_lead", {})
     processed_geometry = geometry.get("processed_lead", {})
     overview_cards = "".join(
@@ -2381,10 +2402,16 @@ def _build_performance_html(session_dir: Path, summary: dict):
           <div class="value">{_fmt(((scoring.get('categories') or {}).get('geometry') or {}).get('score_10'))}/10</div>
           <div class="hint">끊김, 지그재그, 좌표 점프를 얼마나 줄였는지</div>
         </div>
+        <div class="metric">
+          <div class="label">Transport Quality</div>
+          <div class="value">{transport.get('label', 'n/a')}</div>
+          <div class="hint">{transport.get('suitability', 'n/a')}</div>
+        </div>
       </div>
       <p class="subtle" style="margin-top:16px;">
         이 점수는 내부 실험용 루브릭입니다. 절대적인 인증 점수는 아니지만, 세션 간 추세 비교와 병목 우선순위 판단에 쓰기 좋도록 설계했습니다.
       </p>
+      <p class="note" style="margin-top:16px;"><strong>해석 주의:</strong> transport quality가 <code>noisy</code> 또는 <code>unusable</code>면 performance score가 높아도 raw 입력 자체의 불연속이 섞였을 수 있으므로, 알고리즘 before/after baseline 판정은 clean capture로 다시 확인하는 편이 안전합니다.</p>
     </section>
 
     <section class="card">
@@ -2499,6 +2526,7 @@ def _build_session_index_html(session_dir: Path, summary: dict, event_summary: d
         for label, value, hint, _tone in _performance_overview_cards(summary)
     )
     health = _session_health(summary)
+    transport = _transport_quality(summary)
     assessment = summary.get("assessment", {})
     overall = assessment.get("overall", {})
     system = summary.get("system", {})
@@ -2568,6 +2596,7 @@ def _build_session_index_html(session_dir: Path, summary: dict, event_summary: d
         Variant: <code>{summary.get("session_meta", {}).get("variant") or "n/a"}</code> |
         Input: <code>{summary.get("session_meta", {}).get("input_mode") or "n/a"}</code> |
         상태: {_pill(health["label"], health["tone"])} |
+        Transport: {_pill(transport.get("label", "n/a"), transport.get("tone", "brand"))} |
         현업 점수: <strong>{overall.get("score", "n/a")}/100</strong> {_pill(overall.get("grade", "n/a"), overall.get("tone", "brand"))}
       </p>
       <div class="grid">{cards_html}</div>
@@ -2583,6 +2612,9 @@ def _build_session_index_html(session_dir: Path, summary: dict, event_summary: d
       <h2>빠른 해석</h2>
       <div class="note">
         <strong>이 세션의 핵심 상태:</strong> {health["detail"]}<br />
+        <strong>Transport 등급:</strong> {_pill(transport.get("label", "n/a"), transport.get("tone", "brand"))}
+        | {transport.get("suitability", "n/a")}<br />
+        <strong>Transport 해석:</strong> {transport.get("detail", "n/a")}<br />
         <strong>현업 판정:</strong> {overall.get("summary", "평가 데이터가 없습니다.")}<br />
         <strong>Event 로그 관점:</strong> {event_note}<br />
         <strong>First render 지연:</strong> {_fmt(event_summary.get("first_render_elapsed_s"), digits=3, suffix=" s")} |
@@ -2657,6 +2689,7 @@ def _build_replay_report_html(session_dir: Path, summary: dict, event_summary: d
     processed = summary.get("processed") or {}
     render = summary.get("render") or {}
     event = summary.get("event") or event_summary or {}
+    transport = _transport_quality(summary)
     source_capture_path = str(source_capture)
 
     return f"""<!DOCTYPE html>
@@ -2687,6 +2720,7 @@ def _build_replay_report_html(session_dir: Path, summary: dict, event_summary: d
       <div class="grid">
         <div class="metric"><div class="label">input mode</div><div class="value">{session_meta.get("input_mode") or "n/a"}</div><div class="hint">live가 아니라 저장된 raw capture를 다시 태운 세션입니다.</div></div>
         <div class="metric"><div class="label">source capture</div><div class="value"><code>{source_capture_path}</code></div><div class="hint">이번 replay가 읽은 raw capture 경로입니다.</div></div>
+        <div class="metric"><div class="label">transport quality</div><div class="value">{transport.get("label", "n/a")}</div><div class="hint">{transport.get("suitability", "n/a")}</div></div>
         <div class="metric"><div class="label">replay speed</div><div class="value">{_fmt(replay_speed, digits=2, suffix='x') if replay_speed is not None else "n/a"}</div><div class="hint">1.0x는 녹화 타이밍 그대로, 2.0x는 두 배 빠른 재생입니다.</div></div>
         <div class="metric"><div class="label">loop</div><div class="value">{_yes_no_unknown(replay_loop, yes_text="on", no_text="off")}</div><div class="hint">loop가 on이면 raw capture를 반복 재생합니다.</div></div>
       </div>
@@ -2721,6 +2755,7 @@ def _build_ops_html(session_dir: Path, summary: dict, event_summary: dict):
     overall = assessment.get("overall", {})
     category_scores = assessment.get("category_scores", {})
     evaluation_mode = assessment.get("evaluation_mode", {})
+    transport = _transport_quality(summary)
     system = summary.get("system", {})
     preferred_stage_timings = summary.get("diagnostics", {}).get("preferred_stage_timings_ms") or {}
     preferred_slowest_stage = preferred_stage_timings.get("slowest_stage") or {}
@@ -2798,6 +2833,11 @@ def _build_ops_html(session_dir: Path, summary: dict, event_summary: dict):
           <div class="label">평가 모드</div>
           <div class="value">{evaluation_mode.get('label', 'n/a')}</div>
           <div class="hint">{evaluation_mode.get('description', 'n/a')}</div>
+        </div>
+        <div class="metric">
+          <div class="label">Transport Quality</div>
+          <div class="value">{transport.get('label', 'n/a')}</div>
+          <div class="hint">{transport.get('suitability', 'n/a')}</div>
         </div>
         <div class="metric">
           <div class="label">Grade</div>
@@ -2931,6 +2971,7 @@ def _build_processed_html(session_dir: Path, summary: dict, processed_records: l
 
     processed = summary.get("processed", {})
     health = _session_health(summary)
+    transport = _transport_quality(summary)
     script = f"""
     <script>
       {COMMON_SCRIPT}
@@ -3004,7 +3045,7 @@ def _build_processed_html(session_dir: Path, summary: dict, processed_records: l
 
     <section class="card">
       <h2>핵심 지표</h2>
-      <p class="subtle">세션 상태: {_pill(health["label"], health["tone"])}</p>
+      <p class="subtle">세션 상태: {_pill(health["label"], health["tone"])} | transport: {_pill(transport.get("label", "n/a"), transport.get("tone", "brand"))} | {transport.get("suitability", "n/a")}</p>
       <div class="grid">
         <div class="metric"><div class="label">Processed Frame Count</div><div class="value">{processed.get("frame_count", 0)}</div></div>
         <div class="metric"><div class="label">Invalid Rate</div><div class="value">{_fmt_pct(processed.get("invalid_rate"))}</div></div>
@@ -3103,6 +3144,7 @@ def _build_render_html(session_dir: Path, summary: dict, render_records: list[di
 
     render = summary.get("render", {})
     health = _session_health(summary)
+    transport = _transport_quality(summary)
     script = f"""
     <script>
       {COMMON_SCRIPT}
@@ -3170,7 +3212,7 @@ def _build_render_html(session_dir: Path, summary: dict, render_records: list[di
 
     <section class="card">
       <h2>핵심 지표</h2>
-      <p class="subtle">세션 상태: {_pill(health["label"], health["tone"])}</p>
+      <p class="subtle">세션 상태: {_pill(health["label"], health["tone"])} | transport: {_pill(transport.get("label", "n/a"), transport.get("tone", "brand"))} | {transport.get("suitability", "n/a")}</p>
       <div class="grid">
         <div class="metric"><div class="label">Render Frame Count</div><div class="value">{render.get("frame_count", 0)}</div></div>
         <div class="metric"><div class="label">Invalid Rate</div><div class="value">{_fmt_pct(render.get("invalid_rate"))}</div></div>
@@ -3355,6 +3397,7 @@ def _collect_session_rows(log_root: Path):
                 "summary": summary,
                 "event_summary": event_summary,
                 "trajectory": _load_session_trajectory_bundle(session_dir),
+                "transport_quality": _transport_quality(summary),
                 "links": {
                     "index": f"./{session_dir.name}/index.html",
                     "ops": f"./{session_dir.name}/ops_report.html",
@@ -3380,6 +3423,7 @@ def _build_root_dashboard_html(session_rows: list[dict]):
           <td><strong>{row['summary'].get('assessment', {}).get('overall', {}).get('score', 'n/a')}</strong><br />{_pill(row['summary'].get('assessment', {}).get('overall', {}).get('grade', 'n/a'), row['summary'].get('assessment', {}).get('overall', {}).get('tone', 'brand'))}</td>
           <td><strong>{_fmt(row['summary'].get('performance', {}).get('scoring', {}).get('overall_score_100'))}</strong><br /><span class="subtle">{_fmt(row['summary'].get('performance', {}).get('scoring', {}).get('overall_score_10'))}/10</span></td>
           <td>{_pill(row['health']['label'], row['health']['tone'])}</td>
+          <td>{_pill(row['transport_quality'].get('label', 'n/a'), row['transport_quality'].get('tone', 'brand'))}<br /><span class="subtle">{row['transport_quality'].get('suitability', 'n/a')}</span></td>
           <td>{_fmt_pct(row['summary']['render']['invalid_rate'])}</td>
           <td>{_fmt_pct(row['summary'].get('performance', {}).get('throughput', {}).get('render_vs_expected_ratio'))}</td>
           <td>{_fmt((row['summary'].get('performance', {}).get('continuity', {}).get('lead_confirmed') or {}).get('switch_count'), digits=0)}</td>
@@ -3396,7 +3440,7 @@ def _build_root_dashboard_html(session_rows: list[dict]):
         </tr>
         """
         for row in session_rows
-    ) or '<tr><td colspan="12">표시할 세션이 없습니다.</td></tr>'
+    ) or '<tr><td colspan="13">표시할 세션이 없습니다.</td></tr>'
 
     payload = {
         "sessions": session_rows,
@@ -3554,14 +3598,15 @@ def _build_root_dashboard_html(session_rows: list[dict]):
         DASHBOARD.sessions.forEach((session) => {{
           const score = nestedGet(session.summary, 'assessment.overall.score');
           const perfScore = nestedGet(session.summary, 'performance.scoring.overall_score_100');
+          const transportLabel = ((session.transport_quality || {{}}).label) || 'n/a';
           const beforeOption = document.createElement('option');
           beforeOption.value = session.session_id;
-          beforeOption.textContent = `${{session.session_id}} | ops=${{score ?? 'n/a'}} | perf=${{perfScore ?? 'n/a'}} | ${{session.variant || 'n/a'}}`;
+          beforeOption.textContent = `${{session.session_id}} | ops=${{score ?? 'n/a'}} | perf=${{perfScore ?? 'n/a'}} | transport=${{transportLabel}} | ${{session.variant || 'n/a'}}`;
           beforeSelect.appendChild(beforeOption);
 
           const afterOption = document.createElement('option');
           afterOption.value = session.session_id;
-          afterOption.textContent = `${{session.session_id}} | ops=${{score ?? 'n/a'}} | perf=${{perfScore ?? 'n/a'}} | ${{session.variant || 'n/a'}}`;
+          afterOption.textContent = `${{session.session_id}} | ops=${{score ?? 'n/a'}} | perf=${{perfScore ?? 'n/a'}} | transport=${{transportLabel}} | ${{session.variant || 'n/a'}}`;
           afterSelect.appendChild(afterOption);
         }});
         if (DASHBOARD.sessions.length >= 2) {{
@@ -3644,7 +3689,7 @@ def _build_root_dashboard_html(session_rows: list[dict]):
       <table>
         <thead>
           <tr>
-            <th>세션</th><th>생성 시각</th><th>variant</th><th>scenario</th><th>ops 점수</th><th>perf 점수</th><th>상태</th><th>render invalid</th><th>render target</th><th>lead switch</th><th>render p95</th><th>리포트</th>
+            <th>세션</th><th>생성 시각</th><th>variant</th><th>scenario</th><th>ops 점수</th><th>perf 점수</th><th>상태</th><th>transport</th><th>render invalid</th><th>render target</th><th>lead switch</th><th>render p95</th><th>리포트</th>
           </tr>
         </thead>
         <tbody>{table_rows}</tbody>

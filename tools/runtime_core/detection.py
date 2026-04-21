@@ -32,6 +32,29 @@ class DetectionCandidate:
     score: float
 
 
+def _trace_candidate(candidate, digits=4):
+    return {
+        "range_bin": int(candidate.range_bin),
+        "doppler_bin": int(candidate.doppler_bin),
+        "angle_bin": int(candidate.angle_bin),
+        "range_m": round(float(candidate.range_m), digits),
+        "angle_deg": round(float(candidate.angle_deg), 3),
+        "x_m": round(float(candidate.x_m), digits),
+        "y_m": round(float(candidate.y_m), digits),
+        "rdi_peak": round(float(candidate.rdi_peak), digits),
+        "rai_peak": round(float(candidate.rai_peak), digits),
+        "score": round(float(candidate.score), digits),
+    }
+
+
+def _trace_candidates(candidates, limit=12):
+    return [_trace_candidate(candidate) for candidate in list(candidates or [])[: int(limit)]]
+
+
+def _trace_reject(reject_reasons, reason):
+    reject_reasons[reason] = int(reject_reasons.get(reason, 0)) + 1
+
+
 def _local_maxima_mask(power_map):
     rows, cols = power_map.shape
     padded = np.pad(power_map, 1, mode='constant', constant_values=-np.inf)
@@ -634,9 +657,29 @@ def detect_targets(
     angle_centroid_radius_bands=None,
     body_center_patch_bands=None,
     candidate_merge_bands=None,
+    trace=None,
 ):
+    trace_enabled = trace is not None
+    if trace_enabled:
+        trace.clear()
+        trace.update(
+            {
+                "trace_version": 1,
+                "roi": {
+                    "min_range_bin": int(min_range_bin),
+                    "max_range_bin": int(max_range_bin),
+                    "max_targets": int(detection_region.max_targets),
+                    "lateral_limit_m": float(detection_region.lateral_limit_m),
+                    "forward_limit_m": float(detection_region.forward_limit_m),
+                    "min_forward_m": float(detection_region.min_forward_m),
+                },
+                "reject_reasons": {},
+            }
+        )
     rdi_roi = np.asarray(rdi_map[min_range_bin:max_range_bin], dtype=np.float64)
     if rdi_roi.size == 0:
+        if trace_enabled:
+            trace["early_exit"] = "empty_rdi_roi"
         return []
 
     rdi_work = np.array(rdi_roi, copy=True)
@@ -653,6 +696,8 @@ def detect_targets(
     )
     power_map = np.square(rdi_work)
     if np.max(power_map) <= 0:
+        if trace_enabled:
+            trace["early_exit"] = "zero_power_map"
         return []
 
     cfar_noise = cfar_threshold_2d(
@@ -670,12 +715,40 @@ def detect_targets(
         candidate_indices = np.array([strongest_index])
 
     if candidate_indices.size == 0:
+        if trace_enabled:
+            trace["cfar"] = {
+                "candidate_count": 0,
+                "threshold_floor": round(float(threshold_floor), 4),
+                "power_max": round(float(np.max(power_map)), 4),
+                "fallback_used": False,
+                "top_candidates": [],
+            }
+            trace["early_exit"] = "no_cfar_candidates"
         return []
 
     candidate_scores = power_map[candidate_indices[:, 0], candidate_indices[:, 1]]
     ordered_indices = candidate_indices[np.argsort(candidate_scores)[::-1]]
+    if trace_enabled:
+        top_cfar = []
+        for range_bin_rel, doppler_bin in ordered_indices[:24]:
+            top_cfar.append(
+                {
+                    "range_bin": int(range_bin_rel + min_range_bin),
+                    "doppler_bin": int(doppler_bin),
+                    "range_m": round(float(runtime_config.range_axis_m[int(range_bin_rel + min_range_bin)]), 4),
+                    "power": round(float(power_map[int(range_bin_rel), int(doppler_bin)]), 4),
+                }
+            )
+        trace["cfar"] = {
+            "candidate_count": int(candidate_indices.shape[0]),
+            "threshold_floor": round(float(threshold_floor), 4),
+            "power_max": round(float(np.max(power_map)), 4),
+            "fallback_used": bool(candidate_indices.shape[0] == 1 and not bool(np.any(peak_mask))),
+            "top_candidates": top_cfar,
+        }
     coarse_candidate_pool = []
     rdi_peak_ceiling = float(np.max(power_map))
+    reject_reasons = trace["reject_reasons"] if trace_enabled else {}
 
     for range_bin_rel, doppler_bin in ordered_indices:
         range_bin = int(range_bin_rel + min_range_bin)
@@ -686,6 +759,8 @@ def detect_targets(
             detection_region,
         )
         if not np.any(angle_mask):
+            if trace_enabled:
+                _trace_reject(reject_reasons, "angle_roi_empty")
             continue
 
         angle_profile = np.asarray(rai_map[range_bin], dtype=np.float64)
@@ -693,18 +768,26 @@ def detect_targets(
         peak_angle_bin = int(np.argmax(masked_angle_profile))
         rai_peak = float(masked_angle_profile[peak_angle_bin])
         if rai_peak <= 0:
+            if trace_enabled:
+                _trace_reject(reject_reasons, "rai_peak_non_positive")
             continue
 
         roi_angle_values = masked_angle_profile[angle_mask]
         if roi_angle_values.size == 0:
+            if trace_enabled:
+                _trace_reject(reject_reasons, "roi_angle_values_empty")
             continue
 
         angle_floor = float(np.quantile(roi_angle_values, angle_quantile))
         angle_contrast = rai_peak / max(angle_floor, 1e-6)
         if angle_contrast < angle_contrast_scale:
+            if trace_enabled:
+                _trace_reject(reject_reasons, "angle_contrast_low")
             continue
 
         if not _angle_is_local_peak(masked_angle_profile, peak_angle_bin):
+            if trace_enabled:
+                _trace_reject(reject_reasons, "angle_not_local_peak")
             continue
 
         centroid_radius = _angle_centroid_radius_for_range(
@@ -745,6 +828,15 @@ def detect_targets(
         key=lambda candidate: (candidate.score, candidate.rdi_peak, candidate.rai_peak),
         reverse=True,
     )
+    if trace_enabled:
+        trace["angle_validation"] = {
+            "input_count": int(candidate_indices.shape[0]),
+            "passed_count": int(len(coarse_candidate_pool)),
+            "rejected_count": int(candidate_indices.shape[0] - len(coarse_candidate_pool)),
+            "reject_reasons": dict(reject_reasons),
+            "top_candidates": _trace_candidates(coarse_candidate_pool),
+        }
+        pre_merge_coarse = list(coarse_candidate_pool)
     coarse_candidate_pool = _merge_candidate_pool(
         coarse_candidate_pool,
         runtime_config,
@@ -753,10 +845,20 @@ def detect_targets(
         default_range_bin_radius=1,
         default_doppler_bin_radius=max(2, int(runtime_config.doppler_guard_bins)),
     )
+    if trace_enabled:
+        trace["candidate_merge_coarse"] = {
+            "before_count": int(len(pre_merge_coarse)),
+            "after_count": int(len(coarse_candidate_pool)),
+            "before_top": _trace_candidates(pre_merge_coarse),
+            "after_top": _trace_candidates(coarse_candidate_pool),
+        }
     if not coarse_candidate_pool:
+        if trace_enabled:
+            trace["early_exit"] = "coarse_merge_empty"
         return []
 
     refined_candidate_pool = []
+    body_center_pairs = []
     for coarse_candidate in coarse_candidate_pool:
         range_bin = int(np.clip(coarse_candidate.range_bin, 0, rai_map.shape[0] - 1))
         range_m = float(runtime_config.range_axis_m[range_bin])
@@ -766,12 +868,16 @@ def detect_targets(
             detection_region,
         )
         if not np.any(angle_mask):
+            if trace_enabled:
+                _trace_reject(reject_reasons, "refine_angle_roi_empty")
             continue
 
         angle_profile = np.asarray(rai_map[range_bin], dtype=np.float64)
         masked_angle_profile = np.where(angle_mask, angle_profile, 0.0)
         roi_angle_values = masked_angle_profile[angle_mask]
         if roi_angle_values.size == 0:
+            if trace_enabled:
+                _trace_reject(reject_reasons, "refine_roi_angle_values_empty")
             continue
 
         peak_angle_bin = int(np.clip(coarse_candidate.angle_bin, 0, masked_angle_profile.shape[0] - 1))
@@ -779,6 +885,8 @@ def detect_targets(
             peak_angle_bin = int(np.argmax(masked_angle_profile))
         rai_peak = float(masked_angle_profile[peak_angle_bin])
         if rai_peak <= 0.0:
+            if trace_enabled:
+                _trace_reject(reject_reasons, "refine_rai_peak_non_positive")
             continue
 
         angle_floor = float(np.quantile(roi_angle_values, angle_quantile))
@@ -820,22 +928,37 @@ def detect_targets(
             angle_radius_bins=patch_angle_radius,
             relative_floor=patch_relative_floor,
         )
-        refined_candidate_pool.append(
-            DetectionCandidate(
-                range_bin=refined_range_bin,
-                doppler_bin=int(coarse_candidate.doppler_bin),
-                angle_bin=refined_angle_bin,
-                range_m=refined_range_m,
-                angle_deg=float(np.degrees(refined_angle_rad)),
-                x_m=refined_x_m,
-                y_m=refined_y_m,
-                rdi_peak=float(coarse_candidate.rdi_peak),
-                rai_peak=max(float(coarse_candidate.rai_peak), rai_peak),
-                score=float(coarse_candidate.score),
-            )
+        refined_candidate = DetectionCandidate(
+            range_bin=refined_range_bin,
+            doppler_bin=int(coarse_candidate.doppler_bin),
+            angle_bin=refined_angle_bin,
+            range_m=refined_range_m,
+            angle_deg=float(np.degrees(refined_angle_rad)),
+            x_m=refined_x_m,
+            y_m=refined_y_m,
+            rdi_peak=float(coarse_candidate.rdi_peak),
+            rai_peak=max(float(coarse_candidate.rai_peak), rai_peak),
+            score=float(coarse_candidate.score),
         )
+        refined_candidate_pool.append(refined_candidate)
+        if trace_enabled and len(body_center_pairs) < 12:
+            body_center_pairs.append(
+                {
+                    "before": _trace_candidate(coarse_candidate),
+                    "after": _trace_candidate(refined_candidate),
+                    "shift_m": round(float(hypot(coarse_candidate.x_m - refined_candidate.x_m, coarse_candidate.y_m - refined_candidate.y_m)), 4),
+                }
+            )
 
     candidate_pool = refined_candidate_pool or coarse_candidate_pool
+    if trace_enabled:
+        trace["body_center_refinement"] = {
+            "input_count": int(len(coarse_candidate_pool)),
+            "refined_count": int(len(refined_candidate_pool)),
+            "fallback_to_coarse": bool(not refined_candidate_pool),
+            "pairs": body_center_pairs,
+        }
+        pre_merge_final = list(candidate_pool)
     candidate_pool = _merge_candidate_pool(
         candidate_pool,
         runtime_config,
@@ -844,6 +967,21 @@ def detect_targets(
         default_range_bin_radius=1,
         default_doppler_bin_radius=max(2, int(runtime_config.doppler_guard_bins)),
     )
+    if trace_enabled:
+        trace["candidate_merge_final"] = {
+            "before_count": int(len(pre_merge_final)),
+            "after_count": int(len(candidate_pool)),
+            "before_top": _trace_candidates(pre_merge_final),
+            "after_top": _trace_candidates(candidate_pool),
+        }
+        trace["dbscan"] = {
+            "input_count": int(len(candidate_pool)),
+            "eps_base": float(min_cartesian_separation_m),
+            "cluster_min_samples": int(detection_region.cluster_min_samples),
+            "velocity_weight": float(detection_region.cluster_velocity_weight),
+            "adaptive_eps_bands": detection_region.adaptive_eps_bands,
+            "input_top": _trace_candidates(candidate_pool),
+        }
     clustered_detections = _cluster_detection_candidates(
         candidate_pool,
         runtime_config,
@@ -851,5 +989,18 @@ def detect_targets(
         min_cartesian_separation_m,
     )
     if not clustered_detections:
+        if trace_enabled:
+            trace["dbscan"]["output_count"] = 0
+            trace["dbscan"]["output_top"] = []
+            trace["early_exit"] = "dbscan_empty"
         return []
-    return clustered_detections[:detection_region.max_targets]
+    output = clustered_detections[:detection_region.max_targets]
+    if trace_enabled:
+        trace["dbscan"]["output_count"] = int(len(clustered_detections))
+        trace["dbscan"]["output_top"] = _trace_candidates(clustered_detections)
+        trace["final_output"] = {
+            "output_count": int(len(output)),
+            "truncated_from": int(len(clustered_detections)),
+            "top_detections": _trace_candidates(output),
+        }
+    return output

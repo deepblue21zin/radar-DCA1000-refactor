@@ -11,7 +11,7 @@
   },
   "detection": {
     "allow_strongest_fallback": false,
-    "max_targets": 2,
+    "max_targets": 1,
     "display_min_confidence": 0.26,
     "cluster_min_samples": 2,
     "cluster_velocity_weight": 0.0,
@@ -134,6 +134,12 @@
     "local_remeasurement_blend": 0.35,
     "local_remeasurement_max_shift_m": 0.28,
     "local_remeasurement_track_bias": 0.15,
+    "measurement_soft_gate_enabled": true,
+    "measurement_soft_gate_floor": 0.35,
+    "measurement_soft_gate_start_m": 0.16,
+    "measurement_soft_gate_full_m": 0.52,
+    "measurement_soft_gate_range_scale": 0.05,
+    "measurement_soft_gate_speed_scale": 0.06,
     "local_remeasurement_patch_bands": [
       {
         "r_min": 0.0,

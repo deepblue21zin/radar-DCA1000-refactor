@@ -201,6 +201,8 @@ class TrackEstimate:
     age: int
     hits: int
     misses: int
+    measurement_quality: float = 1.0
+    measurement_residual_m: float = 0.0
     is_primary: bool = False
 
 
@@ -219,6 +221,8 @@ class _Track:
     doppler_bin: int
     rdi_peak: float
     rai_peak: float
+    last_measurement_quality: float = 1.0
+    last_measurement_residual_m: float = 0.0
 
 
 class MultiTargetTracker:
@@ -254,6 +258,12 @@ class MultiTargetTracker:
         local_remeasurement_max_shift_m=0.0,
         local_remeasurement_track_bias=0.0,
         local_remeasurement_patch_bands=None,
+        measurement_soft_gate_enabled=True,
+        measurement_soft_gate_floor=0.35,
+        measurement_soft_gate_start_m=0.16,
+        measurement_soft_gate_full_m=0.52,
+        measurement_soft_gate_range_scale=0.05,
+        measurement_soft_gate_speed_scale=0.06,
     ):
         if process_var <= 0:
             raise ValueError("process_var must be positive.")
@@ -305,6 +315,14 @@ class MultiTargetTracker:
             raise ValueError("local_remeasurement_max_shift_m must be non-negative.")
         if not (0.0 <= local_remeasurement_track_bias <= 1.0):
             raise ValueError("local_remeasurement_track_bias must be in [0, 1].")
+        if not (0.0 < measurement_soft_gate_floor <= 1.0):
+            raise ValueError("measurement_soft_gate_floor must be in (0, 1].")
+        if measurement_soft_gate_start_m < 0 or measurement_soft_gate_full_m < 0:
+            raise ValueError("measurement soft gate distances must be non-negative.")
+        if measurement_soft_gate_full_m < measurement_soft_gate_start_m:
+            raise ValueError("measurement_soft_gate_full_m must be >= measurement_soft_gate_start_m.")
+        if measurement_soft_gate_range_scale < 0 or measurement_soft_gate_speed_scale < 0:
+            raise ValueError("measurement soft gate scales must be non-negative.")
 
         kalman_filter, q_discrete_white_noise = _load_filterpy()
         self._KalmanFilter = kalman_filter
@@ -340,20 +358,33 @@ class MultiTargetTracker:
         self.local_remeasurement_max_shift_m = float(local_remeasurement_max_shift_m)
         self.local_remeasurement_track_bias = float(local_remeasurement_track_bias)
         self.local_remeasurement_patch_bands = tuple(local_remeasurement_patch_bands or ())
+        self.measurement_soft_gate_enabled = bool(measurement_soft_gate_enabled)
+        self.measurement_soft_gate_floor = float(measurement_soft_gate_floor)
+        self.measurement_soft_gate_start_m = float(measurement_soft_gate_start_m)
+        self.measurement_soft_gate_full_m = float(measurement_soft_gate_full_m)
+        self.measurement_soft_gate_range_scale = float(measurement_soft_gate_range_scale)
+        self.measurement_soft_gate_speed_scale = float(measurement_soft_gate_speed_scale)
 
         self._tracks: List[_Track] = []
         self._next_track_id = 1
         self._last_frame_ts: Optional[float] = None
         self._primary_track_id: Optional[int] = None
 
-    def _measurement_covariance(self, range_m: float, confidence: float) -> np.ndarray:
+    def _measurement_covariance(
+        self,
+        range_m: float,
+        confidence: float,
+        measurement_quality: float = 1.0,
+    ) -> np.ndarray:
         extra_scale = 1.0 + (self.range_measurement_scale * max(float(range_m) - 0.5, 0.0))
         confidence = float(np.clip(confidence, 0.0, 1.0))
         confidence_scale = max(
             0.45,
             1.0 - (self.confidence_measurement_scale * confidence),
         )
-        variance = self.measurement_var * min(extra_scale, 4.0) * confidence_scale
+        measurement_quality = float(np.clip(measurement_quality, 0.05, 1.0))
+        quality_scale = 1.0 / measurement_quality
+        variance = self.measurement_var * min(extra_scale, 4.0) * confidence_scale * quality_scale
         lateral_variance = float(variance)
         if self.angle_resolution_rad > 0.0:
             lateral_step_m = max(float(range_m), 0.5) * self.angle_resolution_rad
@@ -649,6 +680,56 @@ class MultiTargetTracker:
             "confidence": confidence,
         }
 
+    def _measurement_soft_gate_thresholds(
+        self,
+        track: _Track,
+        measurement: dict,
+    ) -> tuple[float, float]:
+        range_extra = self.measurement_soft_gate_range_scale * max(
+            float(measurement["range_m"]) - 0.5,
+            0.0,
+        )
+        speed_m_s = float(hypot(track.kf.x[2][0], track.kf.x[3][0]))
+        speed_extra = min(speed_m_s * self.measurement_soft_gate_speed_scale, 0.18)
+
+        start_m = self.measurement_soft_gate_start_m + range_extra + speed_extra
+        full_m = self.measurement_soft_gate_full_m + (range_extra * 1.8) + (speed_extra * 1.6)
+
+        if track.state == TrackState.LOST:
+            start_m *= 1.15
+            full_m *= 1.25
+        elif track.state == TrackState.TENTATIVE:
+            start_m *= 0.9
+            full_m *= 0.9
+
+        return float(start_m), float(max(full_m, start_m + 0.05))
+
+    def _measurement_update_quality(
+        self,
+        track: _Track,
+        measurement: dict,
+        predicted_x: float,
+        predicted_y: float,
+    ) -> tuple[float, float]:
+        residual_m = float(
+            hypot(
+                float(measurement["x_m"]) - float(predicted_x),
+                float(measurement["y_m"]) - float(predicted_y),
+            )
+        )
+        if not self.measurement_soft_gate_enabled:
+            return 1.0, residual_m
+
+        start_m, full_m = self._measurement_soft_gate_thresholds(track, measurement)
+        if residual_m <= start_m:
+            return 1.0, residual_m
+        if residual_m >= full_m:
+            return self.measurement_soft_gate_floor, residual_m
+
+        progress = (residual_m - start_m) / max(full_m - start_m, 1e-6)
+        quality = 1.0 - ((1.0 - self.measurement_soft_gate_floor) * progress)
+        return float(np.clip(quality, self.measurement_soft_gate_floor, 1.0)), residual_m
+
     def _signed_doppler_bin(self, doppler_bin: int) -> float:
         if self.doppler_center_bin is None:
             return float(doppler_bin)
@@ -858,8 +939,44 @@ class MultiTargetTracker:
             age=track.age,
             hits=track.hits,
             misses=track.misses,
+            measurement_quality=float(track.last_measurement_quality),
+            measurement_residual_m=float(track.last_measurement_residual_m),
             is_primary=bool(track.track_id == self._primary_track_id),
         )
+
+    @staticmethod
+    def _trace_measurement(measurement: dict) -> dict:
+        x_m = float(measurement["x_m"])
+        y_m = float(measurement["y_m"])
+        angle_deg = float(degrees(atan2(x_m, max(y_m, 1e-6))))
+        return {
+            "x_m": round(x_m, 4),
+            "y_m": round(y_m, 4),
+            "range_m": round(float(measurement["range_m"]), 4),
+            "angle_deg": round(angle_deg, 3),
+            "doppler_bin": int(measurement["doppler_bin"]),
+            "score": round(float(measurement["score"]), 4),
+            "confidence": round(float(measurement["confidence"]), 4),
+            "rdi_peak": round(float(measurement["rdi_peak"]), 4),
+            "rai_peak": round(float(measurement["rai_peak"]), 4),
+        }
+
+    @staticmethod
+    def _trace_track(track: _Track) -> dict:
+        return {
+            "track_id": int(track.track_id),
+            "state": track.state.name.lower(),
+            "x_m": round(float(track.kf.x[0][0]), 4),
+            "y_m": round(float(track.kf.x[1][0]), 4),
+            "vx_m_s": round(float(track.kf.x[2][0]), 4),
+            "vy_m_s": round(float(track.kf.x[3][0]), 4),
+            "confidence": round(float(track.confidence), 4),
+            "score": round(float(track.score), 4),
+            "age": int(track.age),
+            "hits": int(track.hits),
+            "misses": int(track.misses),
+            "consecutive_hits": int(track.consecutive_hits),
+        }
 
     def update(
         self,
@@ -868,34 +985,81 @@ class MultiTargetTracker:
         allow_track_birth: bool = True,
         rai_map=None,
         runtime_config=None,
+        trace=None,
     ):
         measurements = [
             self._measurement_from_detection(detection)
             for detection in detections
         ]
         dt = self._compute_dt(frame_ts)
+        if trace is not None:
+            trace.clear()
+            trace.update(
+                {
+                    "trace_version": 1,
+                    "dt_s": round(float(dt), 4),
+                    "input_detection_count": len(detections),
+                    "measurement_count": len(measurements),
+                    "allow_track_birth": bool(allow_track_birth),
+                    "measurements": [self._trace_measurement(item) for item in measurements[:12]],
+                    "tracks_before_predict": [self._trace_track(track) for track in self._tracks[:12]],
+                }
+            )
         self._predict(dt)
+        if trace is not None:
+            trace["kalman_prediction"] = {
+                "track_count": len(self._tracks),
+                "tracks": [self._trace_track(track) for track in self._tracks[:12]],
+            }
         if frame_ts is not None:
             self._last_frame_ts = frame_ts
 
         matched_pairs, unmatched_tracks, unmatched_measurements = self._associate(measurements)
+        if trace is not None:
+            trace["association"] = {
+                "matched_count": len(matched_pairs),
+                "unmatched_track_count": len(unmatched_tracks),
+                "unmatched_measurement_count": len(unmatched_measurements),
+                "pairs": [
+                    {
+                        "track_id": int(self._tracks[track_index].track_id),
+                        "measurement_index": int(measurement_index),
+                        "measurement": self._trace_measurement(measurements[measurement_index]),
+                    }
+                    for track_index, measurement_index in matched_pairs[:12]
+                ],
+                "unmatched_track_ids": [
+                    int(self._tracks[index].track_id)
+                    for index in unmatched_tracks[:12]
+                ],
+                "unmatched_measurement_indices": [int(index) for index in unmatched_measurements[:12]],
+            }
 
+        update_events = []
         for track_index, measurement_index in matched_pairs:
             track = self._tracks[track_index]
             measurement = measurements[measurement_index]
 
             previous_state = track.state
             predicted_x = float(track.kf.x[0][0])
+            predicted_y = float(track.kf.x[1][0])
             measurement = self._refine_measurement_near_track(
                 track,
                 measurement,
                 rai_map=rai_map,
                 runtime_config=runtime_config,
             )
+            measurement_quality, measurement_residual_m = self._measurement_update_quality(
+                track,
+                measurement,
+                predicted_x=predicted_x,
+                predicted_y=predicted_y,
+            )
             z = np.array([[measurement["x_m"]], [measurement["y_m"]]], dtype=float)
             track.kf.R = self._measurement_covariance(
                 measurement["range_m"],
                 measurement["confidence"],
+                measurement_quality=measurement_quality,
             )
             track.kf.update(z)
             stabilized_x, stabilized_vx = self._stabilize_lateral_state(
@@ -911,55 +1075,107 @@ class MultiTargetTracker:
             track.misses = 0
             if frame_ts is not None:
                 track.last_update_ts = frame_ts
-            track.confidence = (0.7 * track.confidence) + (0.3 * measurement["confidence"])
-            track.score = (0.65 * track.score) + (0.35 * measurement["score"])
+            quality_weight = 0.55 + (0.45 * measurement_quality)
+            track.confidence = (
+                (0.7 * track.confidence)
+                + (0.3 * measurement["confidence"] * quality_weight)
+            )
+            track.score = (
+                (0.65 * track.score)
+                + (0.35 * measurement["score"] * quality_weight)
+            )
             track.doppler_bin = int(measurement["doppler_bin"])
             track.rdi_peak = float(measurement["rdi_peak"])
             track.rai_peak = float(measurement["rai_peak"])
+            track.last_measurement_quality = float(measurement_quality)
+            track.last_measurement_residual_m = float(measurement_residual_m)
+            if trace is not None and len(update_events) < 12:
+                update_events.append(
+                    {
+                        "track_id": int(track.track_id),
+                        "measurement_index": int(measurement_index),
+                        "previous_state": previous_state.name.lower(),
+                        "measurement_quality": round(float(measurement_quality), 4),
+                        "measurement_residual_m": round(float(measurement_residual_m), 4),
+                        "updated_track": self._trace_track(track),
+                    }
+                )
 
             if previous_state == TrackState.LOST or track.consecutive_hits >= self.min_confirmed_hits:
                 track.state = TrackState.CONFIRMED
             else:
                 track.state = TrackState.TENTATIVE
+        if trace is not None:
+            trace["kalman_update"] = {
+                "updated_count": len(update_events),
+                "events": update_events,
+            }
 
+        missed_events = []
         for track_index in unmatched_tracks:
             track = self._tracks[track_index]
             track.consecutive_hits = 0
             if track.state == TrackState.CONFIRMED:
                 track.state = TrackState.LOST
+            if trace is not None and len(missed_events) < 12:
+                missed_events.append(self._trace_track(track))
 
         self._update_primary_track_id()
 
+        birth_events = []
+        suppressed_births = []
         if allow_track_birth:
             for measurement_index in unmatched_measurements:
                 measurement = measurements[measurement_index]
                 if self._should_suppress_birth(measurement):
+                    if trace is not None and len(suppressed_births) < 12:
+                        suppressed_births.append(
+                            {
+                                "measurement_index": int(measurement_index),
+                                "measurement": self._trace_measurement(measurement),
+                            }
+                        )
                     continue
                 kf = self._build_kf(measurement)
-                self._tracks.append(
-                    _Track(
-                        track_id=self._next_track_id,
-                        kf=kf,
-                        age=1,
-                        hits=1,
-                        misses=0,
-                        last_update_ts=frame_ts if frame_ts is not None else 0.0,
-                        confidence=float(measurement["confidence"]),
-                        score=float(measurement["score"]),
-                        state=TrackState.CONFIRMED if self.min_confirmed_hits <= 1 else TrackState.TENTATIVE,
-                        consecutive_hits=1,
-                        doppler_bin=int(measurement["doppler_bin"]),
-                        rdi_peak=float(measurement["rdi_peak"]),
-                        rai_peak=float(measurement["rai_peak"]),
-                    )
+                new_track = _Track(
+                    track_id=self._next_track_id,
+                    kf=kf,
+                    age=1,
+                    hits=1,
+                    misses=0,
+                    last_update_ts=frame_ts if frame_ts is not None else 0.0,
+                    confidence=float(measurement["confidence"]),
+                    score=float(measurement["score"]),
+                    state=TrackState.CONFIRMED if self.min_confirmed_hits <= 1 else TrackState.TENTATIVE,
+                    consecutive_hits=1,
+                    doppler_bin=int(measurement["doppler_bin"]),
+                    rdi_peak=float(measurement["rdi_peak"]),
+                    rai_peak=float(measurement["rai_peak"]),
+                    last_measurement_quality=1.0,
+                    last_measurement_residual_m=0.0,
                 )
+                self._tracks.append(new_track)
+                if trace is not None and len(birth_events) < 12:
+                    birth_events.append(self._trace_track(new_track))
                 self._next_track_id += 1
+        elif trace is not None:
+            suppressed_births.extend(
+                {
+                    "measurement_index": int(index),
+                    "reason": "birth_not_allowed",
+                    "measurement": self._trace_measurement(measurements[index]),
+                }
+                for index in unmatched_measurements[:12]
+            )
 
+        before_prune_ids = {int(track.track_id) for track in self._tracks}
         self._tracks = [
             track for track in self._tracks
             if not (track.state == TrackState.TENTATIVE and track.misses > 1)
             and track.misses <= self.max_missed_frames
         ]
+        after_prune_ids = {int(track.track_id) for track in self._tracks}
+        deleted_ids = sorted(before_prune_ids - after_prune_ids)
 
         self._update_primary_track_id()
 
@@ -973,5 +1189,21 @@ class MultiTargetTracker:
             if track.misses > self.report_miss_tolerance:
                 continue
             confirmed_tracks.append(estimate)
+
+        if trace is not None:
+            trace["track_lifecycle"] = {
+                "missed_tracks": missed_events,
+                "births": birth_events,
+                "suppressed_births": suppressed_births[:12],
+                "deleted_track_ids": deleted_ids,
+                "primary_track_id": self._primary_track_id,
+                "tracks_after_prune": [self._trace_track(track) for track in self._tracks[:12]],
+            }
+            trace["display_output"] = {
+                "confirmed_count": len(confirmed_tracks),
+                "tentative_count": len(tentative_tracks),
+                "confirmed_track_ids": [int(track.track_id) for track in confirmed_tracks],
+                "tentative_track_ids": [int(track.track_id) for track in tentative_tracks],
+            }
 
         return confirmed_tracks, tentative_tracks

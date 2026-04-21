@@ -183,6 +183,12 @@ DEFAULT_TUNING_SETTINGS = {
                 "relative_floor": 0.48,
             },
         ],
+        "measurement_soft_gate_enabled": True,
+        "measurement_soft_gate_floor": 0.35,
+        "measurement_soft_gate_start_m": 0.16,
+        "measurement_soft_gate_full_m": 0.52,
+        "measurement_soft_gate_range_scale": 0.05,
+        "measurement_soft_gate_speed_scale": 0.06,
     },
     "pipeline": {
         "queue_size": 4,

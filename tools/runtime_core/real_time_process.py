@@ -84,6 +84,8 @@ def _serialize_track(track):
         "age": int(track.age),
         "hits": int(track.hits),
         "misses": int(track.misses),
+        "measurement_quality": round(float(track.measurement_quality), 4),
+        "measurement_residual_m": round(float(track.measurement_residual_m), 4),
     }
 
 
@@ -115,6 +117,264 @@ def _round_stage_timings(stage_timings_ms):
         for key, value in (stage_timings_ms or {}).items()
         if value is not None
     }
+
+
+def select_tracker_input_for_frame(
+    frame_packet,
+    detections,
+    *,
+    block_track_birth_on_invalid=True,
+    invalid_policy=None,
+):
+    policy_name = "full"
+    allow_track_birth = True
+    tracker_detections = list(detections)
+    if not frame_packet.invalid:
+        return tracker_detections, allow_track_birth, policy_name
+
+    invalid_policy = invalid_policy or {}
+    drop_gap_threshold = int(invalid_policy.get("drop_gap_threshold", 0))
+    drop_seq_threshold = int(invalid_policy.get("drop_out_of_sequence_threshold", 0))
+    drop_byte_threshold = int(invalid_policy.get("drop_byte_mismatch_threshold", 0))
+    birth_block_gap_threshold = int(invalid_policy.get("birth_block_gap_threshold", 0))
+    birth_block_seq_threshold = int(invalid_policy.get("birth_block_out_of_sequence_threshold", 0))
+    birth_block_byte_threshold = int(invalid_policy.get("birth_block_byte_mismatch_threshold", 0))
+
+    severe_invalid = (
+        frame_packet.udp_gap_count >= drop_gap_threshold > 0
+        or frame_packet.out_of_sequence_count >= drop_seq_threshold > 0
+        or frame_packet.byte_mismatch_count >= drop_byte_threshold > 0
+    )
+    moderate_invalid = (
+        frame_packet.udp_gap_count >= birth_block_gap_threshold > 0
+        or frame_packet.out_of_sequence_count >= birth_block_seq_threshold > 0
+        or frame_packet.byte_mismatch_count >= birth_block_byte_threshold > 0
+    )
+
+    if severe_invalid:
+        tracker_detections = []
+        allow_track_birth = False
+        policy_name = "drop"
+    elif moderate_invalid and block_track_birth_on_invalid:
+        allow_track_birth = False
+        policy_name = "no_birth"
+
+    return tracker_detections, allow_track_birth, policy_name
+
+
+def process_frame_packet(
+    raw_frame,
+    *,
+    runtime_config,
+    detection_region,
+    min_range_bin,
+    max_range_bin,
+    tracker: MultiTargetTracker,
+    block_track_birth_on_invalid=True,
+    invalid_policy=None,
+    detection_params=None,
+    capture_stage_timing=True,
+    return_artifacts=False,
+    capture_trace=False,
+):
+    loop_started = time.perf_counter()
+    stage_timings_ms = {}
+    frame_trace = None
+    if capture_trace:
+        frame_trace = {
+            "trace_version": 1,
+            "frame_id": int(raw_frame.frame_id),
+            "raw_udp_packets": {
+                "packets_in_frame": int(raw_frame.packets_in_frame),
+                "sequence_start": raw_frame.sequence_start,
+                "sequence_end": raw_frame.sequence_end,
+                "byte_count_start": raw_frame.byte_count_start,
+                "byte_count_end": raw_frame.byte_count_end,
+            },
+            "frame_parsing": {
+                "invalid": bool(raw_frame.invalid),
+                "invalid_reason": raw_frame.invalid_reason,
+                "udp_gap_count": int(raw_frame.udp_gap_count),
+                "byte_mismatch_count": int(raw_frame.byte_mismatch_count),
+                "out_of_sequence_count": int(raw_frame.out_of_sequence_count),
+                "iq_sample_count": int(np.asarray(raw_frame.iq).size),
+            },
+        }
+
+    stage_started = time.perf_counter()
+    radar_cube = frame_to_radar_cube(raw_frame.iq, runtime_config)
+    stage_timings_ms["cube_ms"] = (time.perf_counter() - stage_started) * 1000.0
+    if frame_trace is not None:
+        frame_trace["radar_cube"] = {
+            "shape": [int(dim) for dim in np.asarray(radar_cube).shape],
+            "mean_abs": round(float(np.mean(np.abs(radar_cube))), 4),
+            "max_abs": round(float(np.max(np.abs(radar_cube))), 4),
+        }
+    if runtime_config.remove_static:
+        stage_started = time.perf_counter()
+        radar_cube = remove_static_clutter(radar_cube)
+        stage_timings_ms["static_ms"] = (time.perf_counter() - stage_started) * 1000.0
+        if frame_trace is not None:
+            frame_trace["static_removal"] = {
+                "enabled": True,
+                "output_mean_abs": round(float(np.mean(np.abs(radar_cube))), 4),
+                "output_max_abs": round(float(np.max(np.abs(radar_cube))), 4),
+            }
+    else:
+        stage_timings_ms["static_ms"] = 0.0
+        if frame_trace is not None:
+            frame_trace["static_removal"] = {"enabled": False}
+
+    stage_started = time.perf_counter()
+    shared_range_doppler_fft = DSP.shared_range_doppler_fft(
+        radar_cube,
+        padding_size=[
+            runtime_config.doppler_fft_size,
+            runtime_config.range_fft_size,
+        ],
+    )
+    stage_timings_ms["shared_fft2_ms"] = (time.perf_counter() - stage_started) * 1000.0
+    if frame_trace is not None:
+        frame_trace["shared_fft"] = {
+            "shape": [int(dim) for dim in np.asarray(shared_range_doppler_fft).shape],
+            "mean_abs": round(float(np.mean(np.abs(shared_range_doppler_fft))), 4),
+            "max_abs": round(float(np.max(np.abs(shared_range_doppler_fft))), 4),
+        }
+
+    stage_started = time.perf_counter()
+    rdi_cube = DSP.range_doppler_from_fft(
+        shared_range_doppler_fft,
+        mode=1,
+    )
+    stage_timings_ms["range_doppler_project_ms"] = (time.perf_counter() - stage_started) * 1000.0
+    if frame_trace is not None:
+        frame_trace["rdi_cube"] = {
+            "shape": [int(dim) for dim in np.asarray(rdi_cube).shape],
+        }
+
+    stage_started = time.perf_counter()
+    rai_cube = DSP.range_angle_from_fft(
+        shared_range_doppler_fft,
+        mode=1,
+        angle_fft_size=runtime_config.angle_fft_size,
+    )
+    stage_timings_ms["range_angle_project_ms"] = (time.perf_counter() - stage_started) * 1000.0
+    if frame_trace is not None:
+        frame_trace["rai_cube"] = {
+            "shape": [int(dim) for dim in np.asarray(rai_cube).shape],
+        }
+
+    stage_started = time.perf_counter()
+    rdi = integrate_rdi_channels(rdi_cube)
+    stage_timings_ms["integrate_rdi_ms"] = (time.perf_counter() - stage_started) * 1000.0
+    if frame_trace is not None:
+        frame_trace["rdi"] = {
+            "shape": [int(dim) for dim in np.asarray(rdi).shape],
+            "max": round(float(np.max(rdi)), 4),
+            "mean": round(float(np.mean(rdi)), 4),
+        }
+
+    stage_started = time.perf_counter()
+    rai = collapse_motion_rai(
+        rai_cube,
+        guard_bins=runtime_config.doppler_guard_bins,
+    )
+    stage_timings_ms["collapse_rai_ms"] = (time.perf_counter() - stage_started) * 1000.0
+    if frame_trace is not None:
+        frame_trace["rai"] = {
+            "shape": [int(dim) for dim in np.asarray(rai).shape],
+            "max": round(float(np.max(rai)), 4),
+            "mean": round(float(np.mean(rai)), 4),
+        }
+
+    stage_started = time.perf_counter()
+    detection_trace = {} if frame_trace is not None else None
+    detections = detect_targets(
+        rdi,
+        rai,
+        runtime_config,
+        min_range_bin,
+        max_range_bin,
+        detection_region,
+        trace=detection_trace,
+        **dict(detection_params or {}),
+    )
+    stage_timings_ms["detect_ms"] = (time.perf_counter() - stage_started) * 1000.0
+    if frame_trace is not None:
+        frame_trace["detection"] = detection_trace or {}
+
+    stage_started = time.perf_counter()
+    tracker_detections, allow_track_birth, tracker_policy = select_tracker_input_for_frame(
+        raw_frame,
+        detections,
+        block_track_birth_on_invalid=block_track_birth_on_invalid,
+        invalid_policy=invalid_policy,
+    )
+    stage_timings_ms["tracker_gate_ms"] = (time.perf_counter() - stage_started) * 1000.0
+    if frame_trace is not None:
+        frame_trace["tracker_input_filter"] = {
+            "policy": tracker_policy,
+            "input_detection_count": len(detections),
+            "tracker_input_count": len(tracker_detections),
+            "allow_track_birth": bool(allow_track_birth),
+            "track_birth_blocked": bool(not allow_track_birth),
+        }
+
+    stage_started = time.perf_counter()
+    tracker_trace = {} if frame_trace is not None else None
+    confirmed_tracks, tentative_tracks = tracker.update(
+        tracker_detections,
+        frame_ts=raw_frame.capture_ts,
+        allow_track_birth=allow_track_birth,
+        rai_map=rai,
+        runtime_config=runtime_config,
+        trace=tracker_trace,
+    )
+    stage_timings_ms["track_ms"] = (time.perf_counter() - stage_started) * 1000.0
+    if frame_trace is not None:
+        frame_trace["tracker"] = tracker_trace or {}
+    processed_ts = time.perf_counter()
+    stage_timings_ms["compute_total_ms"] = (processed_ts - loop_started) * 1000.0
+    if frame_trace is not None:
+        frame_trace["display_output"] = {
+            "confirmed_count": len(confirmed_tracks),
+            "tentative_count": len(tentative_tracks),
+            "confirmed_track_ids": [int(track.track_id) for track in confirmed_tracks],
+            "tentative_track_ids": [int(track.track_id) for track in tentative_tracks],
+            "confirmed_tracks": [_serialize_track(track) for track in confirmed_tracks[:12]],
+            "tentative_tracks": [_serialize_track(track) for track in tentative_tracks[:12]],
+        }
+        frame_trace["stage_timings_ms"] = _round_stage_timings(stage_timings_ms)
+
+    processed_frame = replace(
+        raw_frame,
+        processed_ts=processed_ts,
+        rdi=rdi,
+        rai=rai,
+        detections=tuple(detections),
+        tracker_input_count=len(tracker_detections),
+        track_birth_blocked=not allow_track_birth,
+        tracker_policy=tracker_policy,
+        confirmed_tracks=tuple(confirmed_tracks),
+        tentative_tracks=tuple(tentative_tracks),
+        stage_timings_ms=_round_stage_timings(stage_timings_ms) if capture_stage_timing else {},
+    )
+
+    if not return_artifacts:
+        return processed_frame, None
+
+    artifacts = {
+        "radar_cube_shape": tuple(int(dim) for dim in radar_cube.shape),
+        "shared_fft_shape": tuple(int(dim) for dim in shared_range_doppler_fft.shape),
+        "rdi_cube_shape": tuple(int(dim) for dim in np.asarray(rdi_cube).shape),
+        "rai_cube_shape": tuple(int(dim) for dim in np.asarray(rai_cube).shape),
+        "cube_preview": np.asarray(np.abs(radar_cube).mean(axis=2), dtype=np.float32),
+        "rdi": np.asarray(rdi, dtype=np.float32),
+        "rai": np.asarray(rai, dtype=np.float32),
+        "tracker_input_detections": tuple(tracker_detections),
+        "frame_trace": frame_trace,
+    }
+    return processed_frame, artifacts
 
 
 def _put_latest(queue_object, item):
@@ -189,6 +449,61 @@ class RawFrameCaptureWriter:
             self.raw_index_file = None
 
 
+def load_raw_capture(capture_dir):
+    capture_dir = Path(capture_dir)
+    capture_manifest_path = capture_dir / "capture_manifest.json"
+    raw_index_path = capture_dir / "raw_frames_index.jsonl"
+    raw_data_path = capture_dir / "raw_frames.i16"
+    if not capture_dir.exists():
+        raise FileNotFoundError(f"Replay capture directory not found: {capture_dir}")
+    if not capture_manifest_path.exists():
+        raise FileNotFoundError(f"Replay capture manifest not found: {capture_manifest_path}")
+    if not raw_index_path.exists():
+        raise FileNotFoundError(f"Replay capture index not found: {raw_index_path}")
+    if not raw_data_path.exists():
+        raise FileNotFoundError(f"Replay capture data not found: {raw_data_path}")
+
+    capture_manifest = json.loads(capture_manifest_path.read_text(encoding="utf-8"))
+    index_records = _load_jsonl_records(raw_index_path)
+    if not index_records:
+        raise RuntimeError(f"No replay frames found in {raw_index_path}")
+    return capture_manifest, index_records, raw_data_path
+
+
+def iter_raw_capture_frame_packets(capture_dir):
+    capture_manifest, index_records, raw_data_path = load_raw_capture(capture_dir)
+    frame_length_hint = int((capture_manifest.get("raw_capture") or {}).get("frame_length_samples") or 0)
+    with raw_data_path.open("rb") as raw_data_file:
+        for record in index_records:
+            raw_data_file.seek(int(record["byte_offset"]))
+            payload = raw_data_file.read(int(record["byte_length"]))
+            iq = np.frombuffer(payload, dtype=np.dtype("<i2")).astype(np.int16, copy=True)
+            if frame_length_hint > 0 and iq.size != frame_length_hint:
+                print(
+                    "Warning: replay frame length mismatch "
+                    f"(frame_id={record.get('frame_id')}, expected={frame_length_hint}, actual={iq.size})"
+                )
+
+            capture_ts = float(record.get("capture_ts", 0.0))
+            assembled_ts = float(record.get("assembled_ts", capture_ts))
+            yield FramePacket(
+                frame_id=int(record.get("frame_id", 0)),
+                capture_ts=capture_ts,
+                assembled_ts=assembled_ts,
+                iq=iq,
+                packets_in_frame=int(record.get("packets_in_frame", 1)),
+                sequence_start=record.get("sequence_start"),
+                sequence_end=record.get("sequence_end"),
+                byte_count_start=record.get("byte_count_start"),
+                byte_count_end=record.get("byte_count_end"),
+                udp_gap_count=int(record.get("udp_gap_count", 0)),
+                byte_mismatch_count=int(record.get("byte_mismatch_count", 0)),
+                out_of_sequence_count=int(record.get("out_of_sequence_count", 0)),
+                invalid=bool(record.get("invalid", False)),
+                invalid_reason=str(record.get("invalid_reason", "")),
+            )
+
+
 class RawCaptureReplaySource(th.Thread):
     def __init__(self, name, frame_queue, capture_dir, playback_speed=1.0, loop=False, autostart=False):
         th.Thread.__init__(self, name=name)
@@ -212,19 +527,7 @@ class RawCaptureReplaySource(th.Thread):
         self._start_requested.set()
 
     def _load_capture(self):
-        if not self.capture_dir.exists():
-            raise FileNotFoundError(f"Replay capture directory not found: {self.capture_dir}")
-        if not self.capture_manifest_path.exists():
-            raise FileNotFoundError(f"Replay capture manifest not found: {self.capture_manifest_path}")
-        if not self.raw_index_path.exists():
-            raise FileNotFoundError(f"Replay capture index not found: {self.raw_index_path}")
-        if not self.raw_data_path.exists():
-            raise FileNotFoundError(f"Replay capture data not found: {self.raw_data_path}")
-
-        capture_manifest = json.loads(self.capture_manifest_path.read_text(encoding="utf-8"))
-        index_records = _load_jsonl_records(self.raw_index_path)
-        if not index_records:
-            raise RuntimeError(f"No replay frames found in {self.raw_index_path}")
+        capture_manifest, index_records, _ = load_raw_capture(self.capture_dir)
         return capture_manifest, index_records
 
     def run(self):
@@ -543,39 +846,12 @@ class DataProcessor(th.Thread):
         _put_latest(self.raw_frame_queue, None)
 
     def select_tracker_input(self, frame_packet, detections):
-        policy_name = "full"
-        allow_track_birth = True
-        tracker_detections = list(detections)
-        if not frame_packet.invalid:
-            return tracker_detections, allow_track_birth, policy_name
-
-        drop_gap_threshold = int(self.invalid_policy.get("drop_gap_threshold", 0))
-        drop_seq_threshold = int(self.invalid_policy.get("drop_out_of_sequence_threshold", 0))
-        drop_byte_threshold = int(self.invalid_policy.get("drop_byte_mismatch_threshold", 0))
-        birth_block_gap_threshold = int(self.invalid_policy.get("birth_block_gap_threshold", 0))
-        birth_block_seq_threshold = int(self.invalid_policy.get("birth_block_out_of_sequence_threshold", 0))
-        birth_block_byte_threshold = int(self.invalid_policy.get("birth_block_byte_mismatch_threshold", 0))
-
-        severe_invalid = (
-            frame_packet.udp_gap_count >= drop_gap_threshold > 0
-            or frame_packet.out_of_sequence_count >= drop_seq_threshold > 0
-            or frame_packet.byte_mismatch_count >= drop_byte_threshold > 0
+        return select_tracker_input_for_frame(
+            frame_packet,
+            detections,
+            block_track_birth_on_invalid=self.block_track_birth_on_invalid,
+            invalid_policy=self.invalid_policy,
         )
-        moderate_invalid = (
-            frame_packet.udp_gap_count >= birth_block_gap_threshold > 0
-            or frame_packet.out_of_sequence_count >= birth_block_seq_threshold > 0
-            or frame_packet.byte_mismatch_count >= birth_block_byte_threshold > 0
-        )
-
-        if severe_invalid:
-            tracker_detections = []
-            allow_track_birth = False
-            policy_name = "drop"
-        elif moderate_invalid and self.block_track_birth_on_invalid:
-            allow_track_birth = False
-            policy_name = "no_birth"
-
-        return tracker_detections, allow_track_birth, policy_name
 
     def build_processed_record(self, frame_packet):
         capture_to_process_ms = None
@@ -642,101 +918,25 @@ class DataProcessor(th.Thread):
             raw_frame = self.raw_frame_queue.get()
             if raw_frame is None:
                 break
-            loop_started = time.perf_counter()
-            stage_timings_ms = {}
-
-            stage_started = time.perf_counter()
-            radar_cube = frame_to_radar_cube(raw_frame.iq, self.runtime_config)
-            stage_timings_ms["cube_ms"] = (time.perf_counter() - stage_started) * 1000.0
-            if self.runtime_config.remove_static:
-                stage_started = time.perf_counter()
-                radar_cube = remove_static_clutter(radar_cube)
-                stage_timings_ms["static_ms"] = (time.perf_counter() - stage_started) * 1000.0
-            else:
-                stage_timings_ms["static_ms"] = 0.0
-
             frame_count += 1
-            stage_started = time.perf_counter()
-            shared_range_doppler_fft = DSP.shared_range_doppler_fft(
-                radar_cube,
-                padding_size=[
-                    self.runtime_config.doppler_fft_size,
-                    self.runtime_config.range_fft_size,
-                ],
-            )
-            stage_timings_ms["shared_fft2_ms"] = (time.perf_counter() - stage_started) * 1000.0
-
-            stage_started = time.perf_counter()
-            rdi_cube = DSP.range_doppler_from_fft(
-                shared_range_doppler_fft,
-                mode=1,
-            )
-            stage_timings_ms["range_doppler_project_ms"] = (time.perf_counter() - stage_started) * 1000.0
-
-            stage_started = time.perf_counter()
-            rai_cube = DSP.range_angle_from_fft(
-                shared_range_doppler_fft,
-                mode=1,
-                angle_fft_size=self.runtime_config.angle_fft_size,
-            )
-            stage_timings_ms["range_angle_project_ms"] = (time.perf_counter() - stage_started) * 1000.0
-
-            stage_started = time.perf_counter()
-            rdi = integrate_rdi_channels(rdi_cube)
-            stage_timings_ms["integrate_rdi_ms"] = (time.perf_counter() - stage_started) * 1000.0
-
-            stage_started = time.perf_counter()
-            rai = collapse_motion_rai(
-                rai_cube,
-                guard_bins=self.runtime_config.doppler_guard_bins,
-            )
-            stage_timings_ms["collapse_rai_ms"] = (time.perf_counter() - stage_started) * 1000.0
-
-            stage_started = time.perf_counter()
-            detections = detect_targets(
-                rdi,
-                rai,
-                self.runtime_config,
-                self.min_range_bin,
-                self.max_range_bin,
-                self.detection_region,
-                **self.detection_params,
-            )
-            stage_timings_ms["detect_ms"] = (time.perf_counter() - stage_started) * 1000.0
-
-            stage_started = time.perf_counter()
-            tracker_detections, allow_track_birth, tracker_policy = self.select_tracker_input(raw_frame, detections)
-            stage_timings_ms["tracker_gate_ms"] = (time.perf_counter() - stage_started) * 1000.0
-
-            stage_started = time.perf_counter()
-            confirmed_tracks, tentative_tracks = self.tracker.update(
-                tracker_detections,
-                frame_ts=raw_frame.capture_ts,
-                allow_track_birth=allow_track_birth,
-                rai_map=rai,
-                runtime_config=self.runtime_config,
-            )
-            stage_timings_ms["track_ms"] = (time.perf_counter() - stage_started) * 1000.0
-            processed_ts = time.perf_counter()
-            stage_timings_ms["compute_total_ms"] = (processed_ts - loop_started) * 1000.0
-
-            processed_frame = replace(
+            loop_started = time.perf_counter()
+            processed_frame, _ = process_frame_packet(
                 raw_frame,
-                processed_ts=processed_ts,
-                rdi=rdi,
-                rai=rai,
-                detections=tuple(detections),
-                tracker_input_count=len(tracker_detections),
-                track_birth_blocked=not allow_track_birth,
-                tracker_policy=tracker_policy,
-                confirmed_tracks=tuple(confirmed_tracks),
-                tentative_tracks=tuple(tentative_tracks),
-                stage_timings_ms=_round_stage_timings(stage_timings_ms) if self.capture_stage_timing else {},
+                runtime_config=self.runtime_config,
+                detection_region=self.detection_region,
+                min_range_bin=self.min_range_bin,
+                max_range_bin=self.max_range_bin,
+                tracker=self.tracker,
+                block_track_birth_on_invalid=self.block_track_birth_on_invalid,
+                invalid_policy=self.invalid_policy,
+                detection_params=self.detection_params,
+                capture_stage_timing=self.capture_stage_timing,
+                return_artifacts=False,
             )
 
             if frame_count == 1:
                 print("Generated first processed RDI/RAI frame")
-                print(f"Initial detection candidates: {len(detections)}")
+                print(f"Initial detection candidates: {len(processed_frame.detections)}")
 
             log_write_ms = 0.0
             if self.write_processed_frames:

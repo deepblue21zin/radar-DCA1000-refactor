@@ -23,6 +23,18 @@ Thumbs.db
 
 # Runtime outputs
 /logs/
+/lab_data/
+/lab_state/
+/.radar_lab.sqlite3
+/another1.db
+/another2.sqlite3
+/tmp_mem_journal.db
+/tmp_test_sqlite.db
+/tmp_test_sqlite.db-journal
+
+# Local-only vendor/reference material
+/radar_toolbox_4_00_00_05/
+/.streamlit/
 
 # Keep shared project configuration in version control
 !/config/
