@@ -116,6 +116,208 @@ TARGETS = [
 ]
 
 
+BOTTLENECK_PARAMETER_RECOMMENDATIONS = {
+    "compute_latency": [
+        {
+            "param_group": "detection",
+            "param_key": "detection.max_targets",
+            "intent": "후보 상한을 낮춰 detection/tracking 계산량을 제한",
+            "tuning_hint": "한 사람 baseline이면 4-6 사이에서 재생 비교",
+        },
+        {
+            "param_group": "detection.algorithm",
+            "param_key": "detection.algorithm.cfar_scale",
+            "intent": "CFAR 후보 수를 줄여 downstream stage 부하 완화",
+            "tuning_hint": "후보가 과다하면 소폭 상향, 미검출이면 원복",
+        },
+        {
+            "param_group": "pipeline",
+            "param_key": "pipeline.queue_size",
+            "intent": "프레임 burst를 흡수하되 지연 누적을 관찰",
+            "tuning_hint": "queue 증가 전후 render p95와 dropped frame을 같이 확인",
+        },
+    ],
+    "detection_over_split": [
+        {
+            "param_group": "detection.algorithm",
+            "param_key": "detection.algorithm.min_cartesian_separation_m",
+            "intent": "한 사람의 여러 peak가 별도 후보로 갈라지는 현상 완화",
+            "tuning_hint": "0.05 m 단위로 올리며 candidate/confirmed와 path residual 확인",
+        },
+        {
+            "param_group": "detection",
+            "param_key": "detection.dbscan_adaptive_eps_bands",
+            "intent": "거리별 cluster eps를 조정해 body 후보를 더 안정적으로 병합",
+            "tuning_hint": "가까운 거리 eps부터 작은 폭으로 sweep",
+        },
+        {
+            "param_group": "detection",
+            "param_key": "detection.cluster_min_samples",
+            "intent": "단발성 약한 cluster가 track 후보가 되는 것을 줄임",
+            "tuning_hint": "두 사람/약한 반사 세션에서는 과도한 상향 주의",
+        },
+    ],
+    "tracking_association_failure": [
+        {
+            "param_group": "tracking",
+            "param_key": "tracking.association_gate",
+            "intent": "예측 track과 측정 후보 매칭 허용 범위 조정",
+            "tuning_hint": "ID switch가 많으면 gate와 doppler cost를 함께 비교",
+        },
+        {
+            "param_group": "tracking",
+            "param_key": "tracking.doppler_cost_weight",
+            "intent": "속도 일관성을 association cost에 더 강하게 반영",
+            "tuning_hint": "원/사각형 운동에서는 너무 높이면 코너에서 miss 가능",
+        },
+        {
+            "param_group": "tracking",
+            "param_key": "tracking.max_misses",
+            "intent": "일시적 미검출에도 기존 track을 더 오래 유지",
+            "tuning_hint": "ghost track 지속 시간과 lead switch rate를 같이 확인",
+        },
+    ],
+    "representative_point_jump": [
+        {
+            "param_group": "tracking",
+            "param_key": "tracking.measurement_var",
+            "intent": "측정 위치 흔들림을 Kalman update에서 덜 민감하게 반영",
+            "tuning_hint": "path residual은 낮추되 반응 지연이 생기는지 확인",
+        },
+        {
+            "param_group": "tracking",
+            "param_key": "tracking.range_measurement_scale",
+            "intent": "range 방향 측정 신뢰도를 조정해 앞뒤 튐 완화",
+            "tuning_hint": "직선 왕복 raw에서 before/after 궤적을 비교",
+        },
+        {
+            "param_group": "detection.algorithm",
+            "param_key": "detection.algorithm.min_cartesian_separation_m",
+            "intent": "강한 반사점 중심으로 대표점이 바뀌는 현상 완화",
+            "tuning_hint": "body-center stage output과 tracker input을 같이 확인",
+        },
+    ],
+    "path_jump": [
+        {
+            "param_group": "tracking",
+            "param_key": "tracking.association_gate",
+            "intent": "멀리 떨어진 후보를 같은 track으로 붙이는지 제어",
+            "tuning_hint": "jump ratio가 높으면 gate를 좁히고 miss 증가 여부 확인",
+        },
+        {
+            "param_group": "tracking",
+            "param_key": "tracking.process_var",
+            "intent": "예측 모델이 급격한 이동을 얼마나 허용할지 조정",
+            "tuning_hint": "원운동/사각형 코너 raw에서 과소 추종 여부 확인",
+        },
+        {
+            "param_group": "tracking",
+            "param_key": "tracking.doppler_gate_bins",
+            "intent": "속도 불일치 후보가 association되는 범위 제한",
+            "tuning_hint": "doppler zero 주변 guard와 함께 비교",
+        },
+    ],
+    "render_latency": [
+        {
+            "param_group": "visualization",
+            "param_key": "visualization.show_tentative_tracks",
+            "intent": "화면에 그리는 track 수와 redraw 비용을 줄임",
+            "tuning_hint": "false 설정 후 display/confirmed 비율과 UX를 같이 확인",
+        },
+        {
+            "param_group": "visualization",
+            "param_key": "visualization.tentative_min_confidence",
+            "intent": "낮은 confidence tentative 표시를 줄여 render 부담 완화",
+            "tuning_hint": "0.05 단위로 올리며 놓친 후보가 없는지 확인",
+        },
+        {
+            "param_group": "pipeline",
+            "param_key": "pipeline.queue_size",
+            "intent": "처리 backlog가 화면 지연으로 보이는지 분리",
+            "tuning_hint": "render p95와 compute utilization p95를 함께 비교",
+        },
+    ],
+    "transport_issue": [
+        {
+            "param_group": "pipeline.invalid_policy",
+            "param_key": "pipeline.invalid_policy.drop_gap_threshold",
+            "intent": "UDP gap이 큰 프레임을 처리에서 제외할 기준 조정",
+            "tuning_hint": "알고리즘 KPI 비교보다 capture 품질 분리를 우선",
+        },
+        {
+            "param_group": "pipeline.invalid_policy",
+            "param_key": "pipeline.block_track_birth_on_invalid",
+            "intent": "깨진 프레임에서 새 track이 태어나는 것을 차단",
+            "tuning_hint": "noisy raw robustness 용도로만 비교",
+        },
+    ],
+    "display_or_confirmation_loss": [
+        {
+            "param_group": "tracking",
+            "param_key": "tracking.confirm_hits",
+            "intent": "confirmed 전환까지 필요한 hit 수를 조정",
+            "tuning_hint": "낮추면 빠르게 보이지만 ghost confirmed 가능성 확인",
+        },
+        {
+            "param_group": "visualization",
+            "param_key": "visualization.tentative_min_hits",
+            "intent": "tentative 표시 시작 기준을 조정",
+            "tuning_hint": "display/confirmed와 visual noise를 같이 확인",
+        },
+    ],
+    "path_quality_low": [
+        {
+            "param_group": "tracking",
+            "param_key": "tracking.measurement_var",
+            "intent": "경로 흔들림과 반응 지연의 균형 조정",
+            "tuning_hint": "path cleanliness, residual, jump ratio를 함께 비교",
+        },
+        {
+            "param_group": "detection",
+            "param_key": "detection.dbscan_adaptive_eps_bands",
+            "intent": "경로 품질 저하가 후보 병합 실패에서 오는지 확인",
+            "tuning_hint": "같은 raw capture replay로 eps band sweep",
+        },
+        {
+            "param_group": "tracking",
+            "param_key": "tracking.association_gate",
+            "intent": "경로 끊김과 잘못된 매칭 사이의 균형 조정",
+            "tuning_hint": "lead switch rate와 max gap을 같이 확인",
+        },
+    ],
+    "stage_hotspot": [
+        {
+            "param_group": "detection",
+            "param_key": "detection.max_targets",
+            "intent": "hot stage 뒤로 넘어가는 후보 수 제한",
+            "tuning_hint": "slowest stage p95가 내려가는지 확인",
+        },
+        {
+            "param_group": "processing",
+            "param_key": "processing.doppler_guard_bins",
+            "intent": "static/zero doppler 주변 처리량과 검출 품질 균형 확인",
+            "tuning_hint": "RDI/RAI stage cache와 함께 비교",
+        },
+    ],
+}
+
+
+DEFAULT_PARAMETER_RECOMMENDATIONS = [
+    {
+        "param_group": "detection",
+        "param_key": "detection.max_targets",
+        "intent": "후보 수와 추적 안정성의 기본 균형점 확인",
+        "tuning_hint": "같은 raw replay에서 KPI diff를 먼저 확인",
+    },
+    {
+        "param_group": "tracking",
+        "param_key": "tracking.association_gate",
+        "intent": "track continuity와 잘못된 매칭의 기본 균형점 확인",
+        "tuning_hint": "lead switch rate, jump ratio를 함께 확인",
+    },
+]
+
+
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -160,6 +362,12 @@ def _push_issue(
             "recommended_action": action,
         }
     )
+
+
+def recommended_parameters_for_bottleneck(label: str | None) -> list[dict]:
+    key = str(label or "").strip()
+    recommendations = BOTTLENECK_PARAMETER_RECOMMENDATIONS.get(key, DEFAULT_PARAMETER_RECOMMENDATIONS)
+    return [dict(item) for item in recommendations]
 
 
 def diagnose_run(row: dict) -> dict:
@@ -561,6 +769,119 @@ def bottleneck_counts(rows: list[dict]) -> list[dict]:
     return result
 
 
+def _top_count_label(values: list[str]) -> tuple[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        label = str(value or "unknown")
+        counts[label] = counts.get(label, 0) + 1
+    if not counts:
+        return "unknown", 0
+    label, count = max(counts.items(), key=lambda item: (item[1], item[0]))
+    return label, count
+
+
+def parameter_impact_rows(
+    project_root: Path,
+    runs: list[dict],
+    metric: str = "performance_score",
+    *,
+    varying_only: bool = True,
+    min_runs_per_value: int = 1,
+) -> list[dict]:
+    session_ids = [str(row.get("session_id")) for row in runs if row.get("session_id")]
+    if not session_ids:
+        return []
+
+    run_by_session = {str(row.get("session_id")): row for row in runs if row.get("session_id")}
+    parameter_rows = registry.fetch_parameter_values(project_root, session_ids=session_ids)
+    if not parameter_rows:
+        return []
+
+    values_by_key: dict[str, set[str]] = {}
+    grouped: dict[tuple[str, str], dict] = {}
+    for param in parameter_rows:
+        session_id = str(param.get("session_id") or "")
+        run = run_by_session.get(session_id)
+        if run is None:
+            continue
+        param_key = str(param.get("param_key") or "")
+        param_value = str(param.get("param_value") or "")
+        if not param_key:
+            continue
+        values_by_key.setdefault(param_key, set()).add(param_value)
+        bucket = grouped.setdefault(
+            (param_key, param_value),
+            {
+                "param_group": param.get("param_group") or "",
+                "param_key": param_key,
+                "param_value": param_value,
+                "sessions": [],
+                "metric_values": [],
+                "bottlenecks": [],
+                "severities": [],
+            },
+        )
+        bucket["sessions"].append(session_id)
+        metric_value = _num(run.get(metric))
+        if metric_value is not None:
+            bucket["metric_values"].append(metric_value)
+        bottleneck = run.get("primary_bottleneck")
+        severity = _num(run.get("severity_score_10"))
+        if bottleneck is None or severity is None:
+            diagnosis = diagnose_run(run)
+            bottleneck = diagnosis["primary_bottleneck"]
+            severity = diagnosis["severity_score_10"]
+        bucket["bottlenecks"].append(str(bottleneck or "unknown"))
+        if severity is not None:
+            bucket["severities"].append(severity)
+
+    metric_label = METRIC_DEFINITIONS.get(metric, {}).get("label", metric)
+    result: list[dict] = []
+    for (param_key, _param_value), bucket in grouped.items():
+        distinct_values = len(values_by_key.get(param_key, set()))
+        if varying_only and distinct_values <= 1:
+            continue
+        run_count = len(set(bucket["sessions"]))
+        if run_count < int(min_runs_per_value):
+            continue
+        metric_values = bucket["metric_values"]
+        if metric_values:
+            array = np.asarray(metric_values, dtype=float)
+            metric_mean = _round(float(mean(metric_values)))
+            metric_p50 = _round(float(np.percentile(array, 50)))
+            metric_min = _round(float(np.min(array)))
+            metric_max = _round(float(np.max(array)))
+        else:
+            metric_mean = None
+            metric_p50 = None
+            metric_min = None
+            metric_max = None
+        top_bottleneck, top_bottleneck_count = _top_count_label(bucket["bottlenecks"])
+        severities = bucket["severities"]
+        result.append(
+            {
+                "param_group": bucket["param_group"],
+                "param_key": param_key,
+                "param_value": bucket["param_value"],
+                "run_count": run_count,
+                "distinct_values": distinct_values,
+                "metric": metric_label,
+                "metric_count": len(metric_values),
+                "metric_mean": metric_mean,
+                "metric_p50": metric_p50,
+                "metric_min": metric_min,
+                "metric_max": metric_max,
+                "top_bottleneck": top_bottleneck,
+                "top_bottleneck_count": top_bottleneck_count,
+                "avg_severity_10": _round(float(mean(severities)), 2) if severities else None,
+                "sessions": ", ".join(sorted(set(bucket["sessions"]))[:8]),
+            }
+        )
+
+    result.sort(key=lambda item: (-int(item["distinct_values"]), str(item["param_key"]), -int(item["run_count"]), str(item["param_value"])))
+    return result
+
+
 def build_snapshot(project_root: Path, runs: list[dict] | None = None) -> dict:
     project_root = Path(project_root)
     if runs is None:
@@ -594,6 +915,7 @@ def build_snapshot(project_root: Path, runs: list[dict] | None = None) -> dict:
                 "severity_score_10": row.get("severity_score_10"),
                 "primary_evidence": row.get("primary_evidence"),
                 "recommended_action": row.get("recommended_action"),
+                "recommended_parameters": recommended_parameters_for_bottleneck(row.get("primary_bottleneck")),
                 "stage_feature_summary": feature_summary,
                 "issues": row.get("issues"),
             }
@@ -608,6 +930,7 @@ def build_snapshot(project_root: Path, runs: list[dict] | None = None) -> dict:
         "metric_summary": metric_summary(diagnosed),
         "pmf": pmf_rows(diagnosed),
         "ecdf_targets": ecdf_target_rows(diagnosed),
+        "bottleneck_parameter_recommendations": BOTTLENECK_PARAMETER_RECOMMENDATIONS,
         "runs": run_exports,
     }
 

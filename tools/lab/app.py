@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import html
 import io
+import json
 import sys
 import textwrap
 from pathlib import Path
@@ -20,11 +21,23 @@ except ImportError as error:  # pragma: no cover
         "Streamlit is not installed. Run `pip install -r requirements-lab.txt` first."
     ) from error
 
-from tools.lab import analytics, registry, stage_cache
+from tools.lab import analytics, registry, stage_cache, wandb_sync
 
 
 LABEL_OPTIONS = ["", "baseline", "good", "usable", "interesting", "discard"]
-MOTION_OPTIONS = ["", "straight", "round-trip", "circle", "square", "two-person", "custom"]
+MOTION_OPTIONS = [
+    "",
+    "center",
+    "center-round-trip",
+    "straight",
+    "round-trip",
+    "right-diagonal",
+    "left-diagonal",
+    "circle",
+    "square",
+    "two-person",
+    "custom",
+]
 
 
 def _rerun() -> None:
@@ -51,6 +64,29 @@ def _safe_cell(value) -> str:
     if isinstance(value, float):
         return f"{value:.4f}".rstrip("0").rstrip(".")
     return str(value)
+
+
+def _short_text(value, limit: int = 72) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 1, 1)] + "..."
+
+
+def _option_index(options: list[str], value: str) -> int:
+    return options.index(value) if value in options else 0
+
+
+def _annotation_summary(row: dict, *, include_notes: bool = False) -> str:
+    parts = [
+        row.get("annotation_label") or "",
+        row.get("annotation_motion_pattern") or "",
+        row.get("scenario_id") or "",
+    ]
+    if include_notes:
+        parts.append(_short_text(row.get("annotation_notes"), 48))
+    text = " / ".join(part for part in parts if part)
+    return text or "unlabeled"
 
 
 def _render_html(markup: str) -> None:
@@ -413,7 +449,7 @@ def _render_path_preview_svg_legacy(rows: list[dict]) -> None:
         {''.join(markers)}
         <circle cx="{radar_x:.1f}" cy="{radar_y:.1f}" r="7" fill="#172232" />
         <text x="{radar_x+10:.1f}" y="{radar_y-8:.1f}" fill="#172232" font-size="13">radar</text>
-        <text x="{left}" y="{height-12}" fill="#63788a" font-size="12">x: left / right (m)</text>
+        <text x="{left}" y="{height-12}" fill="#63788a" font-size="12">x: radar-left (-) / radar-right (+) (m)</text>
         <text x="{width-right}" y="{top+14}" fill="#63788a" font-size="12" text-anchor="end">y: forward (m)</text>
       </svg>
     </div>
@@ -648,7 +684,7 @@ def _render_sequence_trajectory_overlay_svg_legacy(trace_rows: list[dict], selec
         {''.join(paths)}
         <circle cx="{radar_x:.1f}" cy="{radar_y:.1f}" r="7" fill="#172232" />
         <text x="{radar_x+10:.1f}" y="{radar_y-8:.1f}" fill="#172232" font-size="13">radar</text>
-        <text x="{left}" y="{height-45}" fill="#63788a" font-size="12">x: left / right (m)</text>
+        <text x="{left}" y="{height-45}" fill="#63788a" font-size="12">x: radar-left (-) / radar-right (+) (m)</text>
         <text x="{width-right}" y="{top+14}" text-anchor="end" fill="#63788a" font-size="12">y: forward (m)</text>
         {''.join(legend)}
       </svg>
@@ -919,7 +955,7 @@ def _render_trace_spatial_view_svg_legacy(trace: dict) -> None:
         <circle cx="{radar_x:.1f}" cy="{radar_y:.1f}" r="7" fill="#172232" />
         <text x="{radar_x + 10:.1f}" y="{radar_y - 8:.1f}" fill="#172232" font-size="12">radar</text>
         <text x="{width-right}" y="{top+14}" text-anchor="end" fill="#63788a" font-size="11">y: forward (m)</text>
-        <text x="{left}" y="{height-18}" fill="#63788a" font-size="11">x: left / right (m)</text>
+        <text x="{left}" y="{height-18}" fill="#63788a" font-size="11">x: radar-left (-) / radar-right (+) (m)</text>
         {''.join(legend)}
       </svg>
     </div>
@@ -1073,7 +1109,7 @@ def _render_path_preview(rows: list[dict]) -> None:
     ax.set_xlim(-x_abs * 1.12, x_abs * 1.12)
     ax.set_ylim(0.0, y_max * 1.08)
     ax.set_title("Lead Path Preview", loc="left", fontsize=12, fontweight="bold", color="#163044")
-    ax.set_xlabel("x: left / right (m)")
+    ax.set_xlabel("x: radar-left (-) / radar-right (+) (m)")
     ax.set_ylabel("y: forward (m)")
     ax.grid(True, color="#e5edf2", linewidth=0.8)
     ax.spines[["top", "right"]].set_visible(False)
@@ -1225,7 +1261,7 @@ def _render_trace_spatial_view(trace: dict) -> None:
     ax.set_xlim(-x_abs * 1.12, x_abs * 1.12)
     ax.set_ylim(0.0, y_max * 1.08)
     ax.set_title("Candidate Spatial Evolution", loc="left", fontsize=12, fontweight="bold", color="#163044")
-    ax.set_xlabel("x: left / right (m)")
+    ax.set_xlabel("x: radar-left (-) / radar-right (+) (m)")
     ax.set_ylabel("y: forward (m)")
     ax.grid(True, color="#e5edf2", linewidth=0.8)
     ax.spines[["top", "right"]].set_visible(False)
@@ -1234,7 +1270,15 @@ def _render_trace_spatial_view(trace: dict) -> None:
     _render_matplotlib_figure(fig, caption="선택 frame에서 stage별 후보가 x/y 평면 어디에 남았는지 보여 줍니다.")
 
 
-def _run_filters(rows: list[dict], *, transport: str, input_mode: str, label: str, benchmark_only: bool) -> list[dict]:
+def _run_filters(
+    rows: list[dict],
+    *,
+    transport: str,
+    input_mode: str,
+    label: str,
+    motion: str,
+    benchmark_only: bool,
+) -> list[dict]:
     filtered = rows
     if transport != "all":
         filtered = [row for row in filtered if (row.get("transport_category") or "unknown") == transport]
@@ -1242,17 +1286,81 @@ def _run_filters(rows: list[dict], *, transport: str, input_mode: str, label: st
         filtered = [row for row in filtered if (row.get("input_mode") or "unknown") == input_mode]
     if label != "all":
         filtered = [row for row in filtered if (row.get("annotation_label") or "") == label]
+    if motion != "all":
+        filtered = [row for row in filtered if (row.get("annotation_motion_pattern") or "") == motion]
     if benchmark_only:
         filtered = [row for row in filtered if bool(row.get("annotation_keep_flag"))]
     return filtered
 
 
-def _capture_filters(rows: list[dict], *, transport: str, label: str, benchmark_only: bool) -> list[dict]:
+def _short_git(value) -> str:
+    text = str(value or "")
+    return text[:10] if len(text) > 10 else text
+
+
+def _run_context_row(role: str, row: dict | None) -> dict:
+    row = row or {}
+    return {
+        "role": role,
+        "session_id": row.get("session_id") or "",
+        "variant": row.get("variant") or "",
+        "scenario_id": row.get("scenario_id") or "",
+        "label": row.get("annotation_label") or "",
+        "motion": row.get("annotation_motion_pattern") or "",
+        "description": _short_text(row.get("annotation_notes"), 56),
+        "git_commit": _short_git(row.get("git_commit")),
+        "git_dirty": "yes" if bool(row.get("git_dirty")) else "no",
+        "capture_id": row.get("capture_id") or "",
+    }
+
+
+def _parameter_diff_rows(role_parameters: dict[str, list[dict]], *, show_unchanged: bool = False) -> list[dict]:
+    by_role = {
+        role: {
+            item["param_key"]: item
+            for item in parameters
+            if item.get("param_key")
+        }
+        for role, parameters in role_parameters.items()
+    }
+    keys = sorted({key for parameters in by_role.values() for key in parameters.keys()})
+    rows = []
+    for param_key in keys:
+        role_values = {
+            role: by_role.get(role, {}).get(param_key, {}).get("param_value")
+            for role in role_parameters.keys()
+        }
+        visible_values = [value for value in role_values.values() if value is not None]
+        missing_in_some_roles = len(visible_values) != len(role_values)
+        changed = len(set(visible_values)) > 1 or (bool(visible_values) and missing_in_some_roles)
+        if not changed and not show_unchanged:
+            continue
+        first_item = next(
+            (
+                by_role.get(role, {}).get(param_key)
+                for role in role_parameters.keys()
+                if by_role.get(role, {}).get(param_key)
+            ),
+            {},
+        )
+        row = {
+            "param_group": first_item.get("param_group") or "",
+            "param_key": param_key,
+        }
+        row.update({role: role_values[role] if role_values[role] is not None else "" for role in role_parameters.keys()})
+        row["changed"] = "yes" if changed else "no"
+        rows.append(row)
+    return rows
+
+
+def _capture_filters(rows: list[dict], *, transport: str, label: str, motion: str, benchmark_only: bool) -> list[dict]:
     filtered = rows
     if transport != "all":
         filtered = [row for row in filtered if (row.get("transport_category") or "unknown") == transport]
     if label != "all":
         filtered = [row for row in filtered if (row.get("annotation_label") or "") == label]
+    if motion != "all":
+        filtered = [row for row in filtered if (row.get("annotation_motion_pattern") or "") == motion]
     if benchmark_only:
         filtered = [row for row in filtered if bool(row.get("annotation_keep_flag"))]
     return filtered
@@ -1271,17 +1379,22 @@ def _annotation_form(target_type: str, target_id: str, row: dict) -> None:
             label = st.selectbox(
                 "Label",
                 LABEL_OPTIONS,
-                index=LABEL_OPTIONS.index(label_default) if label_default in LABEL_OPTIONS else 0,
+                index=_option_index(LABEL_OPTIONS, label_default),
             )
             people_count = st.number_input("People Count", min_value=0, max_value=20, value=people_default, step=1)
         with col2:
             motion_pattern = st.selectbox(
-                "Motion Pattern",
+                "Motion / Scenario",
                 MOTION_OPTIONS,
-                index=MOTION_OPTIONS.index(motion_default) if motion_default in MOTION_OPTIONS else 0,
+                index=_option_index(MOTION_OPTIONS, motion_default),
             )
             keep_flag = st.checkbox("Benchmark Set에 포함", value=keep_default)
-        notes = st.text_area("Notes", value=notes_default, height=120)
+        notes = st.text_area(
+            "Description / Notes",
+            value=notes_default,
+            height=120,
+            placeholder="예: 레이더 기준 오른쪽 대각선 왕복, 중앙 왕복, 축 반전 확인용, Wi-Fi off",
+        )
         if st.form_submit_button("Save Annotation"):
             registry.save_annotation(
                 PROJECT_ROOT,
@@ -1294,6 +1407,146 @@ def _annotation_form(target_type: str, target_id: str, row: dict) -> None:
                 notes=notes,
             )
             st.success("annotation을 저장했습니다.")
+            _rerun()
+
+
+def _wandb_export_section(detail: dict) -> None:
+    session_id = str(detail["session_id"])
+    session_dir = Path(detail["session_dir"])
+    readiness = wandb_sync.sync_readiness(detail)
+    last_sync = wandb_sync.read_sync_result(PROJECT_ROOT, session_id)
+    wandb_installed = wandb_sync.wandb_available()
+
+    st.markdown("#### W&B Export")
+    st.caption(
+        "검토가 끝난 run을 W&B에 누적 기록하는 구간입니다. 기본은 offline 모드로 저장하고, "
+        "원하면 나중에 온라인 sync로 밀어 올릴 수 있게 설계했습니다."
+    )
+
+    if readiness["hard_blockers"]:
+        for message in readiness["hard_blockers"]:
+            st.error(message)
+    if readiness["soft_blockers"]:
+        for message in readiness["soft_blockers"]:
+            st.warning(message)
+    for message in readiness["warnings"]:
+        st.info(message)
+
+    if not wandb_installed:
+        st.warning("현재 Python 환경에는 `wandb`가 설치되어 있지 않습니다. contract 저장은 가능하지만 실제 sync는 아직 막혀 있습니다.")
+        st.code("pip install wandb", language="bash")
+
+    if last_sync:
+        a, b, c = st.columns(3)
+        a.metric("Last Sync Mode", last_sync.get("mode") or "n/a")
+        b.metric("Artifacts", last_sync.get("artifact_count") or 0)
+        c.metric("Frame Metric Steps", last_sync.get("frame_metric_steps_logged") or 0)
+        if last_sync.get("url"):
+            st.markdown(f"[Open W&B Run]({last_sync['url']})")
+        elif (last_sync.get("mode") or "") == "offline":
+            st.caption("offline run으로 저장되어 아직 웹 URL은 없습니다. 나중에 `python -m wandb sync <local_run_dir>`로 밀어 올리면 됩니다.")
+        _render_file_links(
+            {
+                "wandb contract": session_dir / "wandb_run_contract.json",
+                "wandb sync result": session_dir / "wandb_sync_result.json",
+                "local wandb run dir": last_sync.get("local_run_dir"),
+            }
+        )
+
+    mode = st.selectbox(
+        "W&B Mode",
+        ["offline", "online"],
+        index=0,
+        key=f"wandb-mode-{session_id}",
+        help="offline은 login 없이 로컬에 기록만 남깁니다. online은 W&B 계정으로 바로 업로드합니다.",
+    )
+    project_name = st.text_input(
+        "W&B Project",
+        value=wandb_sync.DEFAULT_PROJECT,
+        key=f"wandb-project-{session_id}",
+    )
+    phase_options = ["benchmark", "debug", "paper"]
+    recommended_phase = readiness["recommended_phase"]
+    phase = st.selectbox(
+        "Phase Tag",
+        phase_options,
+        index=phase_options.index(recommended_phase) if recommended_phase in phase_options else 0,
+        key=f"wandb-phase-{session_id}",
+    )
+    col1, col2 = st.columns(2)
+    with col1:
+        include_frame_features = st.checkbox(
+            "Attach frame_features.jsonl if present",
+            value=False,
+            key=f"wandb-frame-features-{session_id}",
+        )
+    with col2:
+        log_frame_metrics = st.checkbox(
+            "Log frame timeline metrics if present",
+            value=False,
+            key=f"wandb-frame-metrics-{session_id}",
+            help="compute_total_ms, detection_count, confirmed_track_count 같은 대표 frame metric만 step chart로 보냅니다.",
+        )
+    force_export = False
+    if readiness["soft_blockers"]:
+        force_export = st.checkbox(
+            "review 경고를 무시하고 이 run도 내보내기",
+            value=False,
+            key=f"wandb-force-{session_id}",
+        )
+
+    contract = wandb_sync.build_run_contract(
+        PROJECT_ROOT,
+        session_id,
+        project=project_name,
+        mode=mode,
+        phase=phase,
+        include_frame_features=include_frame_features or log_frame_metrics,
+    )
+    with st.expander("Preview W&B Payload"):
+        st.code(json.dumps(contract, ensure_ascii=False, indent=2), language="json")
+
+    can_sync = (
+        wandb_installed
+        and not readiness["hard_blockers"]
+        and (not readiness["soft_blockers"] or force_export)
+    )
+    button_a, button_b = st.columns(2)
+    if button_a.button("Save W&B Contract", key=f"wandb-contract-{session_id}", width="stretch"):
+        path = wandb_sync.write_run_contract(
+            PROJECT_ROOT,
+            session_id,
+            project=project_name,
+            mode=mode,
+            phase=phase,
+            include_frame_features=include_frame_features or log_frame_metrics,
+        )
+        st.success(f"contract를 저장했습니다: {path.name}")
+        _rerun()
+    if button_b.button(
+        "Sync Run to W&B",
+        key=f"wandb-sync-{session_id}",
+        width="stretch",
+        disabled=not can_sync,
+    ):
+        try:
+            result = wandb_sync.sync_run(
+                PROJECT_ROOT,
+                session_id,
+                project=project_name,
+                mode=mode,
+                phase=phase,
+                include_frame_features=include_frame_features,
+                log_frame_metrics=log_frame_metrics,
+            )
+        except Exception as error:
+            st.error(f"W&B sync 실패: {error}")
+        else:
+            st.success(
+                "W&B sync를 마쳤습니다. "
+                f"mode={result.get('mode')}, artifacts={result.get('artifact_count')}, "
+                f"frame_steps={result.get('frame_metric_steps_logged')}"
+            )
             _rerun()
 
 
@@ -1330,7 +1583,9 @@ def _overview_page() -> None:
                 "op_score": row.get("operational_score"),
                 "perf_score": _format_float(row.get("performance_score"), 1),
                 "path_clean": _format_float(row.get("path_cleanliness_score_10"), 2),
-                "annotation": row.get("annotation_label") or "",
+                "annotation": _annotation_summary(row),
+                "motion": row.get("annotation_motion_pattern") or "",
+                "notes": _short_text(row.get("annotation_notes"), 56),
                 "capture_id": row.get("capture_id") or "",
             }
             for row in runs[:12]
@@ -1347,7 +1602,9 @@ def _overview_page() -> None:
                 "frames": row.get("frame_count"),
                 "invalid_rate": _format_percent(row.get("invalid_rate")),
                 "linked_runs": row.get("linked_run_count"),
-                "annotation": row.get("annotation_label") or "",
+                "annotation": _annotation_summary(row),
+                "motion": row.get("annotation_motion_pattern") or "",
+                "notes": _short_text(row.get("annotation_notes"), 56),
             }
             for row in captures[:12]
         ],
@@ -1360,11 +1617,22 @@ def _runs_page() -> None:
     transport = st.sidebar.selectbox("Run Transport Filter", ["all", "clean", "noisy", "unusable", "insufficient"])
     input_mode = st.sidebar.selectbox("Run Input Mode", ["all", "live", "replay"])
     label = st.sidebar.selectbox("Run Label Filter", ["all", *LABEL_OPTIONS[1:]])
+    motion = st.sidebar.selectbox("Run Motion Filter", ["all", *MOTION_OPTIONS[1:]])
     benchmark_only = st.sidebar.checkbox("Benchmark-tagged only", value=False)
-    runs = _run_filters(all_runs, transport=transport, input_mode=input_mode, label=label, benchmark_only=benchmark_only)
+    runs = _run_filters(
+        all_runs,
+        transport=transport,
+        input_mode=input_mode,
+        label=label,
+        motion=motion,
+        benchmark_only=benchmark_only,
+    )
 
     st.subheader("Run Library")
-    st.caption(f"{len(runs)} runs matched the current filter.")
+    st.caption(
+        f"{len(runs)} runs matched the current filter. "
+        "Detail Session을 고른 뒤 Annotation에서 motion/description을 저장하면 표에 바로 보입니다."
+    )
     _render_table(
         [
             {
@@ -1374,7 +1642,11 @@ def _runs_page() -> None:
                 "op_score": row.get("operational_score"),
                 "perf_score": _format_float(row.get("performance_score"), 1),
                 "path_clean": _format_float(row.get("path_cleanliness_score_10"), 2),
-                "annotation": row.get("annotation_label") or "",
+                "label": row.get("annotation_label") or "",
+                "motion": row.get("annotation_motion_pattern") or "",
+                "description": _short_text(row.get("annotation_notes"), 72),
+                "benchmark": "yes" if bool(row.get("annotation_keep_flag")) else "",
+                "scenario_id": row.get("scenario_id") or "",
                 "capture_id": row.get("capture_id") or "",
             }
             for row in runs
@@ -1384,7 +1656,13 @@ def _runs_page() -> None:
     if not runs:
         return
 
-    selected_session = st.selectbox("Detail Session", [row["session_id"] for row in runs], index=0)
+    runs_by_session = {row["session_id"]: row for row in runs}
+    selected_session = st.selectbox(
+        "Detail Session",
+        [row["session_id"] for row in runs],
+        index=0,
+        format_func=lambda session_id: f"{session_id} | {_annotation_summary(runs_by_session.get(session_id, {}), include_notes=True)}",
+    )
     detail = registry.fetch_run_detail(PROJECT_ROOT, selected_session)
     if detail is None:
         return
@@ -1435,14 +1713,16 @@ def _runs_page() -> None:
 
     st.markdown("#### Annotation")
     _annotation_form("run", detail["session_id"], detail)
+    _wandb_export_section(detail)
 
 
 def _captures_page() -> None:
     all_captures = registry.fetch_captures(PROJECT_ROOT)
     transport = st.sidebar.selectbox("Capture Transport Filter", ["all", "clean", "noisy", "unusable", "insufficient"], key="capture-transport")
     label = st.sidebar.selectbox("Capture Label Filter", ["all", *LABEL_OPTIONS[1:]], key="capture-label")
+    motion = st.sidebar.selectbox("Capture Motion Filter", ["all", *MOTION_OPTIONS[1:]], key="capture-motion")
     benchmark_only = st.sidebar.checkbox("Benchmark-tagged captures only", value=False, key="capture-benchmark")
-    captures = _capture_filters(all_captures, transport=transport, label=label, benchmark_only=benchmark_only)
+    captures = _capture_filters(all_captures, transport=transport, label=label, motion=motion, benchmark_only=benchmark_only)
 
     st.subheader("Raw Capture Library")
     st.caption(f"{len(captures)} raw captures matched the current filter.")
@@ -1454,7 +1734,11 @@ def _captures_page() -> None:
                 "frames": row.get("frame_count"),
                 "invalid_rate": _format_percent(row.get("invalid_rate")),
                 "linked_runs": row.get("linked_run_count"),
-                "annotation": row.get("annotation_label") or "",
+                "label": row.get("annotation_label") or "",
+                "motion": row.get("annotation_motion_pattern") or "",
+                "description": _short_text(row.get("annotation_notes"), 72),
+                "benchmark": "yes" if bool(row.get("annotation_keep_flag")) else "",
+                "scenario_id": row.get("scenario_id") or "",
             }
             for row in captures
         ],
@@ -1495,7 +1779,9 @@ def _captures_page() -> None:
                     "input_mode": row.get("input_mode"),
                     "transport": row.get("transport_category"),
                     "perf_score": _format_float(row.get("performance_score"), 1),
-                    "annotation": row.get("annotation_label") or "",
+                    "label": row.get("annotation_label") or "",
+                    "motion": row.get("annotation_motion_pattern") or "",
+                    "description": _short_text(row.get("annotation_notes"), 56),
                 }
                 for row in linked_runs
             ],
@@ -1514,17 +1800,79 @@ def _compare_page() -> None:
         st.info("비교할 run이 2개 이상 필요합니다.")
         return
     st.subheader("Compare Runs")
-    options = [row["session_id"] for row in runs]
-    before_id = st.selectbox("Before", options, index=1 if len(options) > 1 else 0)
-    after_id = st.selectbox("After", options, index=0)
-    if before_id == after_id:
-        st.warning("서로 다른 두 run을 선택해 주세요.")
-        return
+    runs_by_id = {row["session_id"]: row for row in runs}
+    capture_counts: dict[str, int] = {}
+    for row in runs:
+        capture_id = row.get("capture_id")
+        if capture_id:
+            capture_counts[capture_id] = capture_counts.get(capture_id, 0) + 1
+    same_capture_default = any(count >= 2 for count in capture_counts.values())
+    same_capture_only = st.checkbox(
+        "Compare only runs from the same raw capture",
+        value=same_capture_default,
+        help="같은 raw capture replay끼리 비교하면 튜닝 변경 효과를 더 공정하게 볼 수 있습니다.",
+    )
 
+    before_candidates = (
+        [
+            row
+            for row in runs
+            if row.get("capture_id") and capture_counts.get(row.get("capture_id"), 0) >= 2
+        ]
+        if same_capture_only
+        else list(runs)
+    )
+    if not before_candidates:
+        st.warning("same raw capture 비교에 쓸 수 있는 raw-linked run이 없습니다.")
+        return
+    before_options = [row["session_id"] for row in before_candidates]
+    before_id = st.selectbox("Before", before_options, index=1 if len(before_options) > 1 else 0)
+    before_seed = runs_by_id.get(before_id, {})
+    before_capture = before_seed.get("capture_id")
+
+    after_candidates = [
+        row
+        for row in runs
+        if row["session_id"] != before_id
+        and (not same_capture_only or (before_capture and row.get("capture_id") == before_capture))
+    ]
+    if not after_candidates:
+        st.warning("선택한 Before와 같은 raw capture를 쓰는 다른 run이 없습니다. 필터를 끄거나 다른 Before를 골라 주세요.")
+        return
+    after_options = [row["session_id"] for row in after_candidates]
+    after_id = st.selectbox("After", after_options, index=0)
+
+    baseline_candidates = [
+        row
+        for row in runs
+        if not same_capture_only or (before_capture and row.get("capture_id") == before_capture)
+    ] or list(runs)
+    baseline_options = [row["session_id"] for row in baseline_candidates]
+    baseline_default = next(
+        (
+            index
+            for index, row in enumerate(baseline_candidates)
+            if (row.get("variant") or "").lower() == "baseline"
+        ),
+        baseline_options.index(before_id) if before_id in baseline_options else 0,
+    )
+    baseline_id = st.selectbox("Baseline", baseline_options, index=baseline_default)
+
+    baseline = registry.fetch_run_detail(PROJECT_ROOT, baseline_id)
     before = registry.fetch_run_detail(PROJECT_ROOT, before_id)
     after = registry.fetch_run_detail(PROJECT_ROOT, after_id)
-    if before is None or after is None:
+    if baseline is None or before is None or after is None:
         return
+
+    st.markdown("### Run Context")
+    _render_table(
+        [
+            _run_context_row("baseline", baseline),
+            _run_context_row("before", before),
+            _run_context_row("after", after),
+        ],
+        key="compare-run-context",
+    )
 
     metrics = [
         ("Operational Score", "operational_score", "higher"),
@@ -1551,7 +1899,22 @@ def _compare_page() -> None:
             verdict = "improved" if delta > 0 else "regressed" if delta < 0 else "same"
         rows.append({"metric": label, "before": before_value, "after": after_value, "delta": delta, "verdict": verdict})
 
+    st.markdown("### KPI Diff")
     _render_table(rows, key="compare-metrics")
+
+    st.markdown("### Parameter Diff")
+    show_unchanged_params = st.checkbox("Show unchanged parameters", value=False, key="compare-show-unchanged-params")
+    role_parameters = {
+        "baseline": registry.fetch_run_parameters(PROJECT_ROOT, baseline_id),
+        "before": registry.fetch_run_parameters(PROJECT_ROOT, before_id),
+        "after": registry.fetch_run_parameters(PROJECT_ROOT, after_id),
+    }
+    parameter_diff = _parameter_diff_rows(role_parameters, show_unchanged=show_unchanged_params)
+    if not any(role_parameters.values()):
+        st.info("아직 run_parameters 인덱스가 비어 있습니다. 왼쪽 Refresh Registry를 눌러 다시 인덱싱해 주세요.")
+    else:
+        _render_table(parameter_diff, key="compare-parameter-diff", height=360)
+
     left, right = st.columns(2)
     with left:
         st.markdown(f"#### Before `{before_id}`")
@@ -1593,6 +1956,11 @@ def _analytics_page() -> None:
         ["all", *LABEL_OPTIONS[1:]],
         key="analytics-label",
     )
+    motion = st.sidebar.selectbox(
+        "Analytics Motion Filter",
+        ["all", *MOTION_OPTIONS[1:]],
+        key="analytics-motion",
+    )
     benchmark_only = st.sidebar.checkbox(
         "Benchmark-tagged analytics only",
         value=False,
@@ -1603,6 +1971,7 @@ def _analytics_page() -> None:
         transport=transport,
         input_mode=input_mode,
         label=label,
+        motion=motion,
         benchmark_only=benchmark_only,
     )
     diagnosed = analytics.build_diagnosed_run_rows(runs)
@@ -1667,7 +2036,32 @@ def _analytics_page() -> None:
     st.caption("candidate 비율, path cleanliness, lead switch rate를 구간화해서 분포를 봅니다.")
     _render_table(analytics.pmf_rows(diagnosed), key="analytics-pmf")
 
-    st.markdown("### 5. Triage Board")
+    st.markdown("### 5. Parameter Impact")
+    st.caption("현재 필터에 남은 run들을 `run_parameters` 값별로 묶어 KPI 평균과 주요 병목 label을 같이 봅니다.")
+    impact_metric = st.selectbox(
+        "Impact Metric",
+        list(analytics.METRIC_DEFINITIONS.keys()),
+        format_func=lambda key: analytics.METRIC_DEFINITIONS.get(key, {}).get("label", key),
+        index=0,
+        key="analytics-impact-metric",
+    )
+    show_constant_params = st.checkbox(
+        "Include parameters with a single value",
+        value=False,
+        key="analytics-impact-constant",
+    )
+    impact_rows = analytics.parameter_impact_rows(
+        PROJECT_ROOT,
+        diagnosed,
+        metric=impact_metric,
+        varying_only=not show_constant_params,
+    )
+    if not impact_rows:
+        st.info("표시할 파라미터 impact가 없습니다. registry refresh 후 다시 보거나, single-value 파라미터 포함 옵션을 켜 보세요.")
+    else:
+        _render_table(impact_rows[:120], key="analytics-parameter-impact", height=360)
+
+    st.markdown("### 6. Triage Board")
     st.caption("severity가 높은 세션부터 보면서 `raw 문제인지, detection 문제인지, tracking 문제인지`를 빠르게 분리합니다.")
     _render_table(
         [
@@ -1708,6 +2102,13 @@ def _analytics_page() -> None:
     d3.metric("Transport", selected.get("transport_category") or "n/a")
     d4.metric("Capture", selected.get("capture_id") or "none")
 
+    st.markdown("#### Recommended Tuning Parameters")
+    _render_table(
+        analytics.recommended_parameters_for_bottleneck(selected.get("primary_bottleneck")),
+        key=f"analytics-recommended-params-{selected_session}",
+    )
+
+    st.markdown("#### Issues")
     _render_table(
         selected.get("issues") or [],
         key=f"analytics-issues-{selected_session}",

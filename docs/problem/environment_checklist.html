@@ -275,7 +275,7 @@
       <div class="grid3">
         <article class="card">
           <strong>입력 불안정 단계</strong>
-          <p><code>render invalid_rate</code>와 <code>processed invalid_rate</code>가 높으면 먼저 NIC, IP, packet delay, buffer size를 본다.</p>
+          <p><code>render invalid_rate</code>와 <code>processed invalid_rate</code>가 높으면 먼저 NIC, IP, packet delay, buffer size를 본다. 최근 리포트에는 이 값을 묶은 <code>Transport Quality</code> 배지가 같이 붙으므로 <code>clean / noisy / unusable</code> 해석을 먼저 확인하는 것도 좋다.</p>
         </article>
         <article class="card">
           <strong>입력 안정 단계</strong>
@@ -283,7 +283,11 @@
         </article>
         <article class="card">
           <strong>현재 프로젝트 기준</strong>
-          <p>최근 detection은 <code>body_center_patch_bands</code>로 local patch centroid를 쓰기 시작했고, <code>candidate_merge_bands</code>로 가까운 후보 pre-merge도 들어갔다. 여기에 tracker의 <code>local_remeasurement_*</code>와 render의 <code>display_hysteresis_*</code>도 추가됐으므로, 환경 체크 후에는 같은 raw replay로 실제 continuity가 좋아졌는지 검증하는 것이 맞다.</p>
+          <p>최근 detection은 <code>body_center_patch_bands</code>로 local patch centroid를 쓰기 시작했고, <code>candidate_merge_bands</code>로 가까운 후보 pre-merge도 들어갔다. 여기에 tracker의 <code>local_remeasurement_*</code>, <code>measurement_soft_gate_*</code>, render의 <code>display_hysteresis_*</code>도 추가됐으므로, 환경 체크 후에는 같은 raw replay로 실제 continuity가 좋아졌는지 검증하는 것이 맞다.</p>
+        </article>
+        <article class="card">
+          <strong>운영 체크 기준</strong>
+          <p>최근에는 로컬 전용 <code>Radar Lab</code>이 추가되어 세션에 <code>baseline / good / discard</code> 태그를 붙이고 raw 품질을 함께 관리할 수 있다. Stage Debug에서 raw 기반 stage cache를 생성해 프레임별 artifact를 다시 볼 수 있으므로, 환경이 안정된 뒤에는 좋은 raw를 benchmark 세트로 고정해 두는 편이 실험 반복에 더 유리하다.</p>
         </article>
       </div>
     </section>

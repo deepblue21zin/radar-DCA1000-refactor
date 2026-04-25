@@ -4,6 +4,11 @@
 대상: `XWR1843 + DCA1000 + Python` 기반 radar tracking 프로젝트  
 목표: 알고리즘을 바로 더 복잡하게 만들기 전에, raw 데이터와 처리 단계별 결과를 정량화하고 AI/통계 기반으로 병목 원인을 찾는 분석 체계를 만든다.
 
+관련 운영 문서:
+
+- `docs/lab/AI/streamlit_wandb_operating_model.md`
+- `docs/lab/AI/wandb_run_contract.example.json`
+
 ## 1. 결론
 
 지금은 `성능을 직접 높이는 알고리즘`보다 `병목을 찾는 분석 도구`가 먼저다.

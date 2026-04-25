@@ -400,7 +400,7 @@ function renderTrajectoryChart(targetId, seriesList, options = {}) {
 
   svg += `<circle cx="${xFor(0)}" cy="${yFor(0)}" r="6" fill="#0f172a"></circle>`;
   svg += `<text x="${xFor(0) + 10}" y="${yFor(0) - 8}" fill="#142033" font-size="12">radar</text>`;
-  svg += `<text x="${padding.left}" y="${height - 4}" fill="#5f6f86" font-size="12">x: left / right (m)</text>`;
+  svg += `<text x="${padding.left}" y="${height - 4}" fill="#5f6f86" font-size="12">x: radar-left (-) / radar-right (+) (m)</text>`;
   svg += `<text x="${width - padding.right}" y="${padding.top + 12}" text-anchor="end" fill="#5f6f86" font-size="12">y: forward (m)</text>`;
   svg += `</svg>`;
 
@@ -592,7 +592,7 @@ function renderTrajectoryReplay(targetId, playback, options = {}) {
 
     svg += `<circle cx="${xFor(0)}" cy="${yFor(0)}" r="6" fill="#0f172a"></circle>`;
     svg += `<text x="${xFor(0) + 10}" y="${yFor(0) - 8}" fill="#142033" font-size="12">radar</text>`;
-    svg += `<text x="${padding.left}" y="${height - 4}" fill="#5f6f86" font-size="12">x: left / right (m)</text>`;
+    svg += `<text x="${padding.left}" y="${height - 4}" fill="#5f6f86" font-size="12">x: radar-left (-) / radar-right (+) (m)</text>`;
     svg += `<text x="${width - padding.right}" y="${padding.top + 12}" text-anchor="end" fill="#5f6f86" font-size="12">y: forward (m)</text>`;
     svg += `</svg>`;
 

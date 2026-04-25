@@ -11,6 +11,35 @@ from typing import Any
 CLEAN = {"invalid": 0.01, "gap": 8, "ooo": 1, "mismatch": 1}
 NOISY = {"invalid": 0.05, "gap": 64, "ooo": 2, "mismatch": 2}
 
+PARAMETER_ALIASES = {
+    "remove_static": "processing.remove_static",
+    "doppler_guard_bins": "processing.doppler_guard_bins",
+    "roi_lateral_m": "roi.lateral_m",
+    "roi_forward_m": "roi.forward_m",
+    "roi_min_forward_m": "roi.min_forward_m",
+    "allow_strongest_fallback": "detection.allow_strongest_fallback",
+    "dbscan_adaptive_eps_bands": "detection.dbscan_adaptive_eps_bands",
+    "detection_algorithm": "detection.algorithm",
+    "track_confirm_hits": "tracking.confirm_hits",
+    "track_max_misses": "tracking.max_misses",
+    "track_process_var": "tracking.process_var",
+    "track_measurement_var": "tracking.measurement_var",
+    "track_range_measurement_scale": "tracking.range_measurement_scale",
+    "track_confidence_measurement_scale": "tracking.confidence_measurement_scale",
+    "track_association_gate": "tracking.association_gate",
+    "track_doppler_zero_guard_bins": "tracking.doppler_zero_guard_bins",
+    "track_doppler_gate_bins": "tracking.doppler_gate_bins",
+    "track_doppler_cost_weight": "tracking.doppler_cost_weight",
+    "pipeline_queue_size": "pipeline.queue_size",
+    "block_track_birth_on_invalid": "pipeline.block_track_birth_on_invalid",
+    "invalid_policy": "pipeline.invalid_policy",
+    "show_tentative_tracks": "visualization.show_tentative_tracks",
+    "tentative_min_confidence": "visualization.tentative_min_confidence",
+    "tentative_min_hits": "visualization.tentative_min_hits",
+    "dca_packet_size_bytes": "dca.packet_size_bytes",
+    "dca_packet_delay_us": "dca.packet_delay_us",
+}
+
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -42,6 +71,79 @@ def _nested_get(data: dict, dotted_key: str, default: Any = None) -> Any:
 
 def _as_int(value: Any) -> int:
     return 1 if bool(value) else 0
+
+
+def _parameter_group(param_key: str) -> str:
+    parts = param_key.split(".")
+    if not parts:
+        return "runtime"
+    if len(parts) >= 2 and parts[0] in {"detection", "pipeline"} and parts[1] in {"algorithm", "invalid_policy"}:
+        return ".".join(parts[:2])
+    return parts[0]
+
+
+def _parameter_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return str(value)
+
+
+def _flatten_parameter_values(payload: Any, prefix: str = "") -> dict[str, str]:
+    if isinstance(payload, dict):
+        flattened: dict[str, str] = {}
+        for key, value in sorted(payload.items()):
+            path = f"{prefix}.{key}" if prefix else str(key)
+            flattened.update(_flatten_parameter_values(value, path))
+        return flattened
+    if not prefix:
+        return {}
+    return {prefix: _parameter_value(payload)}
+
+
+def _collect_parameter_values(runtime_config: dict, summary_runtime_config: dict) -> dict[str, str]:
+    parameters: dict[str, str] = {}
+
+    for payload in (runtime_config, summary_runtime_config):
+        if not isinstance(payload, dict):
+            continue
+        tuning_snapshot = payload.get("tuning_snapshot")
+        if isinstance(tuning_snapshot, dict):
+            parameters.update(_flatten_parameter_values(tuning_snapshot))
+
+    for payload in (runtime_config, summary_runtime_config):
+        if not isinstance(payload, dict):
+            continue
+        for source_key, param_key in PARAMETER_ALIASES.items():
+            if source_key in payload:
+                value = payload[source_key]
+                if isinstance(value, dict):
+                    parameters.update(_flatten_parameter_values(value, param_key))
+                else:
+                    parameters[param_key] = _parameter_value(value)
+
+    return parameters
+
+
+def _build_run_parameter_records(session_id: str, session_dir: Path) -> list[dict]:
+    runtime_config = _load_json(session_dir / "runtime_config.json")
+    summary = _load_json(session_dir / "summary.json")
+    summary_runtime_config = summary.get("runtime_config") if isinstance(summary.get("runtime_config"), dict) else {}
+    parameters = _collect_parameter_values(runtime_config, summary_runtime_config)
+    updated_at = _now()
+    return [
+        {
+            "session_id": session_id,
+            "param_key": param_key,
+            "param_value": param_value,
+            "param_group": _parameter_group(param_key),
+            "updated_at": updated_at,
+        }
+        for param_key, param_value in sorted(parameters.items())
+    ]
 
 
 def _quality_from_stats(frame_count: int | None, invalid_rate: float | None, gap: int | None, ooo: int | None, mismatch: int | None) -> dict:
@@ -183,6 +285,16 @@ def _connect(project_root: Path) -> sqlite3.Connection:
             summary_path TEXT,
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS run_parameters (
+            session_id TEXT NOT NULL,
+            param_key TEXT NOT NULL,
+            param_value TEXT,
+            param_group TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (session_id, param_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_run_parameters_key_value
+            ON run_parameters(param_key, param_value);
         CREATE TABLE IF NOT EXISTS annotations (
             target_type TEXT NOT NULL,
             target_id TEXT NOT NULL,
@@ -319,6 +431,23 @@ def _upsert(connection: sqlite3.Connection, table: str, record: dict, keys: list
     )
 
 
+def _upsert_run_parameter(connection: sqlite3.Connection, record: dict) -> None:
+    connection.execute(
+        """
+        INSERT INTO run_parameters (
+            session_id, param_key, param_value, param_group, updated_at
+        ) VALUES (
+            :session_id, :param_key, :param_value, :param_group, :updated_at
+        )
+        ON CONFLICT(session_id, param_key) DO UPDATE SET
+            param_value=excluded.param_value,
+            param_group=excluded.param_group,
+            updated_at=excluded.updated_at
+        """,
+        record,
+    )
+
+
 def _iter_run_session_dirs(live_root: Path):
     if not live_root.exists():
         return
@@ -342,9 +471,11 @@ def refresh_registry(project_root: Path) -> dict:
     live_root = project_root / "logs" / "live_motion_viewer"
     capture_count = 0
     run_count = 0
+    parameter_count = 0
     with _connect(project_root) as connection:
         connection.execute("DELETE FROM captures")
         connection.execute("DELETE FROM runs")
+        connection.execute("DELETE FROM run_parameters")
         if raw_root.exists():
             for capture_dir in sorted(raw_root.iterdir()):
                 if not capture_dir.is_dir():
@@ -358,6 +489,9 @@ def refresh_registry(project_root: Path) -> dict:
                 if record is None:
                     continue
                 _upsert(connection, "runs", record, list(record.keys()))
+                for parameter_record in _build_run_parameter_records(record["session_id"], session_dir):
+                    _upsert_run_parameter(connection, parameter_record)
+                    parameter_count += 1
                 run_count += 1
         connection.execute("UPDATE captures SET linked_run_count = 0")
         connection.execute(
@@ -382,6 +516,7 @@ def refresh_registry(project_root: Path) -> dict:
     return {
         "captures_indexed": capture_count,
         "runs_indexed": run_count,
+        "run_parameters_indexed": parameter_count,
         "db_path": str(database_path(project_root)),
     }
 
@@ -436,6 +571,48 @@ def fetch_runs(project_root: Path) -> list[dict]:
              AND annotations.target_id=runs.session_id
             ORDER BY COALESCE(runs.created_at, runs.session_id) DESC
             """
+        ).fetchall()
+        return _rows_to_dicts(rows)
+
+
+def fetch_run_parameters(project_root: Path, session_id: str) -> list[dict]:
+    with _connect(project_root) as connection:
+        rows = connection.execute(
+            """
+            SELECT session_id, param_key, param_value, param_group, updated_at
+            FROM run_parameters
+            WHERE session_id=?
+            ORDER BY param_group, param_key
+            """,
+            (session_id,),
+        ).fetchall()
+        return _rows_to_dicts(rows)
+
+
+def fetch_parameter_values(project_root: Path, session_ids: list[str] | tuple[str, ...] | set[str] | None = None) -> list[dict]:
+    with _connect(project_root) as connection:
+        if session_ids is None:
+            rows = connection.execute(
+                """
+                SELECT session_id, param_key, param_value, param_group, updated_at
+                FROM run_parameters
+                ORDER BY param_key, param_value, session_id
+                """
+            ).fetchall()
+            return _rows_to_dicts(rows)
+
+        session_id_list = [str(session_id) for session_id in session_ids if session_id]
+        if not session_id_list:
+            return []
+        placeholders = ", ".join("?" for _ in session_id_list)
+        rows = connection.execute(
+            f"""
+            SELECT session_id, param_key, param_value, param_group, updated_at
+            FROM run_parameters
+            WHERE session_id IN ({placeholders})
+            ORDER BY param_key, param_value, session_id
+            """,
+            session_id_list,
         ).fetchall()
         return _rows_to_dicts(rows)
 
@@ -540,6 +717,7 @@ def main() -> None:
                 "db_path": refresh["db_path"],
                 "captures_indexed": refresh["captures_indexed"],
                 "runs_indexed": refresh["runs_indexed"],
+                "run_parameters_indexed": refresh["run_parameters_indexed"],
                 "capture_total": overview["capture_total"],
                 "run_total": overview["run_total"],
                 "last_refresh_at": overview["last_refresh_at"],

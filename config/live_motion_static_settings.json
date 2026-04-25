@@ -6,12 +6,12 @@
     "config_port": 4096,
     "fpga_ip": "192.168.33.180",
     "fpga_port": 4096,
-    "buffer_size": 4194304
+    "buffer_size": 8388608
   },
   "dca": {
     "config_timeout_s": 2.0,
     "packet_size_bytes": 1472,
-    "packet_delay_us": 125,
+    "packet_delay_us": 250,
     "packet_delay_ticks_per_us": 125
   },
   "spatial_view": {

@@ -2,7 +2,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 import json
 from pathlib import Path
-from queue import Empty, Full
+from queue import Empty, Full, Queue
 import socket
 import threading as th
 import time
@@ -399,7 +399,7 @@ def _parse_dca1000_packet(packet_bytes):
 
 
 class RawFrameCaptureWriter:
-    def __init__(self, raw_data_path, raw_index_path):
+    def __init__(self, raw_data_path, raw_index_path, *, max_queue_frames=256):
         self.raw_data_path = Path(raw_data_path)
         self.raw_index_path = Path(raw_index_path)
         self.raw_data_path.parent.mkdir(parents=True, exist_ok=True)
@@ -408,8 +408,41 @@ class RawFrameCaptureWriter:
         self.raw_index_file = self.raw_index_path.open("a", encoding="utf-8", buffering=1)
         self.first_capture_ts = None
         self.bytes_written = int(self.raw_data_path.stat().st_size if self.raw_data_path.exists() else 0)
+        self._queue = Queue(maxsize=max(int(max_queue_frames), 1))
+        self._closed = False
+        self._backpressure_logged = False
+        self._worker = th.Thread(
+            target=self._writer_loop,
+            name="RawCaptureWriter",
+            daemon=True,
+        )
+        self._worker.start()
 
     def write_frame(self, frame_packet: FramePacket):
+        if self._closed:
+            return
+        try:
+            self._queue.put_nowait(frame_packet)
+        except Full:
+            if not self._backpressure_logged:
+                print(
+                    "Warning: raw capture writer queue is full; "
+                    "blocking UDP listener until disk catches up."
+                )
+                self._backpressure_logged = True
+            self._queue.put(frame_packet)
+
+    def _writer_loop(self):
+        while True:
+            frame_packet = self._queue.get()
+            try:
+                if frame_packet is None:
+                    return
+                self._write_frame_sync(frame_packet)
+            finally:
+                self._queue.task_done()
+
+    def _write_frame_sync(self, frame_packet: FramePacket):
         iq_payload = np.asarray(frame_packet.iq, dtype=np.dtype("<i2")).tobytes(order="C")
         byte_offset = self.bytes_written
         self.raw_data_file.write(iq_payload)
@@ -441,6 +474,13 @@ class RawFrameCaptureWriter:
         self.raw_index_file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._queue.put(None)
+        self._worker.join(timeout=10.0)
+        if self._worker.is_alive():
+            print("Warning: raw capture writer did not finish within 10s.")
         if self.raw_data_file is not None:
             self.raw_data_file.close()
             self.raw_data_file = None

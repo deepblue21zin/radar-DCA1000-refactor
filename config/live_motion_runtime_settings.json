@@ -1,5 +1,5 @@
 {
-  "config_path": "config/profile_3d.cfg",
+  "config_path": "config/profile_3d_150ms.cfg",
   "tuning_path": "config/live_motion_tuning.json",
   "cli_port": "COM11",
   "logging": {
@@ -9,6 +9,7 @@
     "input_mode": "live",
     "source_capture": "",
     "notes": "",
+    "capture_duration_s": 25.0,
     "write_raw_capture": true,
     "raw_capture_root": "logs/raw",
     "write_processed_frames": true,

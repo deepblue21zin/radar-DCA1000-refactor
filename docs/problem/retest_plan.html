@@ -431,7 +431,7 @@
         </article>
         <article class="step">
           <strong>4. 각 세션의 점수와 stage timing을 기록한다</strong>
-          <p><code>ops_report.html</code>에서 operational score, slowest stage, power plan, host IP match를 확인한다. 발자취가 예상과 다르면 <code>trajectory_replay.html</code>에서 같은 세션을 시간축 기준으로 재생해 실제 끊김과 방향 전환 구간을 본다. 이제는 <code>performance_report.html</code>의 path geometry 카드도 같이 봐서, 점수는 괜찮은데 경로가 지저분한 세션을 따로 구분한다.</p>
+          <p><code>ops_report.html</code>에서 operational score, slowest stage, power plan, host IP match를 확인한다. 발자취가 예상과 다르면 <code>trajectory_replay.html</code>에서 같은 세션을 시간축 기준으로 재생해 실제 끊김과 방향 전환 구간을 본다. 이제는 <code>performance_report.html</code>의 path geometry 카드와 <code>Transport Quality</code> 배지도 같이 봐서, 점수는 괜찮은데 raw가 noisy한 세션과 알고리즘 자체가 흔들린 세션을 따로 구분한다.</p>
         </article>
         <article class="step">
           <strong>5. 비교는 평균뿐 아니라 p95와 invalid rate까지 본다</strong>
@@ -502,7 +502,18 @@
         </article>
         <article class="card">
           <h3>권장 비교 순서</h3>
-          <p>같은 raw capture를 baseline 코드와 수정 코드에서 각각 replay하고, <code>replay_report.html</code>, <code>summary.json</code>, <code>performance_report.html</code>, <code>trajectory_replay.html</code>를 함께 비교한다. 특히 <code>Path Cleanliness</code>, <code>Max Gap Frames</code>, <code>Local Residual RMS</code>, <code>Jump Ratio</code>가 같이 좋아지는지 확인한다. track-conditioned local remeasurement 이후에는 <code>display_held_track_count</code>도 함께 봐서 실제 tracking 개선과 화면 hold 효과를 분리해야 한다.</p>
+          <p>같은 raw capture를 baseline 코드와 수정 코드에서 각각 replay하고, <code>replay_report.html</code>, <code>summary.json</code>, <code>performance_report.html</code>, <code>trajectory_replay.html</code>를 함께 비교한다. 특히 <code>Path Cleanliness</code>, <code>Max Gap Frames</code>, <code>Local Residual RMS</code>, <code>Jump Ratio</code>가 같이 좋아지는지 확인한다. track-conditioned local remeasurement 이후에는 <code>display_held_track_count</code>도 함께 봐서 실제 tracking 개선과 화면 hold 효과를 분리해야 하고, 최근에는 <code>measurement_quality</code>, <code>measurement_residual_m</code>도 같이 보면서 "이번 프레임에서 tracker가 measurement를 얼마나 덜 믿었는지"를 확인하는 것이 좋다.</p>
+          <p>이제 같은 raw를 <code>raw -&gt; radar cube -&gt; shared FFT -&gt; RDI/RAI -&gt; detections -&gt; tracker input -&gt; tracks</code> 순서의 1차 stage cache로 남기고 프레임별 artifact를 다시 볼 수 있다. 다음 목표는 여기서 더 나아가 필요한 단계부터만 다시 실행하는 step-by-step replay로 확장하는 것이다. 그래야 detection 수정인지 tracking 수정인지 병목 위치를 더 빨리 분리할 수 있다.</p>
+        </article>
+      </div>
+      <div class="grid2" style="margin-top:16px;">
+        <article class="card">
+          <h3>실험 관리 도구</h3>
+          <p>세션이 쌓이면 raw 품질이 좋은지, baseline으로 보존할지, 버릴지부터 관리가 필요하다. 최근에는 <code>localhost</code> 전용 <code>Radar Lab</code>을 추가해 <code>Runs / Captures / Compare / Stage Debug</code> 기준으로 세션을 분류하고 태깅할 수 있게 했고, Stage Debug에서는 raw를 다시 처리한 stage cache를 프레임별로 확인할 수 있게 됐다.</p>
+        </article>
+        <article class="card">
+          <h3>권장 운영 방식</h3>
+          <p>good 또는 baseline으로 태그한 raw capture를 따로 관리하고, 알고리즘을 바꿀 때는 같은 capture에 연결된 replay run만 비교하는 것이 가장 안전하다. 즉 이제는 실험 실행뿐 아니라 세션 triage와 benchmark set 운영도 같이 해야 한다.</p>
         </article>
       </div>
     </section>

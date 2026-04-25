@@ -147,6 +147,21 @@ LOG_CAPTURE_SYSTEM_SNAPSHOT = bool(RUNTIME['logging'].get('capture_system_snapsh
 LOG_CAPTURE_STAGE_TIMING = bool(RUNTIME['logging'].get('capture_stage_timing', True))
 LOG_REPORT_GENERATION_MODE = str(RUNTIME['logging'].get('report_generation_mode', 'deferred'))
 
+
+def _normalize_capture_duration_s(value):
+    try:
+        duration_s = float(value)
+    except (TypeError, ValueError):
+        return None
+    if duration_s <= 0:
+        return None
+    return duration_s
+
+
+LOG_CAPTURE_DURATION_S = _normalize_capture_duration_s(
+    RUNTIME['logging'].get('capture_duration_s')
+)
+
 class MotionViewer:
     def __init__(
         self,
@@ -166,6 +181,10 @@ class MotionViewer:
         self.hardware_enabled = self.input_mode != 'replay'
         self.report_generation_mode = 'inline' if self.input_mode == 'replay' else LOG_REPORT_GENERATION_MODE
         self.replay_completion_requested = False
+        self.capture_duration_s = (
+            LOG_CAPTURE_DURATION_S if self.hardware_enabled else None
+        )
+        self.capture_stop_timer = None
         self.write_raw_capture = bool(
             LOG_WRITE_RAW_CAPTURE if write_raw_capture is None else write_raw_capture
         ) and self.hardware_enabled
@@ -333,6 +352,7 @@ class MotionViewer:
             'log_replay_speed': self.replay_speed if self.input_mode == 'replay' else None,
             'log_replay_loop': self.replay_loop if self.input_mode == 'replay' else None,
             'log_notes': LOG_NOTES,
+            'log_capture_duration_s': self.capture_duration_s,
             'log_enabled': LOG_ENABLED,
             'log_write_raw_capture': self.write_raw_capture,
             'log_raw_capture_root': str(self.raw_capture_root),
@@ -639,6 +659,7 @@ class MotionViewer:
         if self.input_mode == 'replay':
             capture_path = self.resolve_source_capture_path()
             self.stream_started_at = time.perf_counter()
+            self.stop_capture_timer()
             self.waiting_for_data_logged = False
             self.first_image_logged = False
             self.frame_index = 0
@@ -679,7 +700,43 @@ class MotionViewer:
         self.skipped_render_frames = 0
         self.display_hysteresis_state.clear()
         self.log_event('radar_open_complete')
+        self.arm_capture_timer()
         self.update_figure()
+
+    def stop_capture_timer(self):
+        if self.capture_stop_timer is not None and self.capture_stop_timer.isActive():
+            self.capture_stop_timer.stop()
+
+    def arm_capture_timer(self):
+        self.stop_capture_timer()
+        if self.capture_duration_s is None or self.capture_stop_timer is None:
+            return
+        duration_ms = max(int(round(self.capture_duration_s * 1000.0)), 1)
+        self.capture_stop_timer.start(duration_ms)
+        self.log_event(
+            'capture_duration_armed',
+            duration_s=self.capture_duration_s,
+            duration_ms=duration_ms,
+        )
+        if self.ui is not None:
+            self.ui.statusbar.showMessage(
+                f'Live capture will auto-stop after {self.capture_duration_s:.1f}s.'
+            )
+        print(f'Live capture auto-stop armed for {self.capture_duration_s:.1f}s')
+
+    def handle_capture_duration_elapsed(self):
+        if self.capture_duration_s is None:
+            return
+        self.log_event('capture_duration_elapsed', duration_s=self.capture_duration_s)
+        if self.ui is not None:
+            self.ui.statusbar.showMessage(
+                f'Capture duration reached ({self.capture_duration_s:.1f}s). Stopping session...'
+            )
+        print(
+            f'Capture duration reached ({self.capture_duration_s:.1f}s). '
+            'Stopping session.'
+        )
+        QtCore.QTimer.singleShot(0, self.app.instance().exit)
 
     def pull_latest_processed_frame(self):
         frame_packet = self.processed_frame_queue.get_nowait()
@@ -1024,7 +1081,7 @@ class MotionViewer:
 
         self.replay_plot = self.ui.graphicsView.addPlot(row=0, col=0)
         self.replay_plot.showGrid(x=True, y=True, alpha=0.25)
-        self.replay_plot.setLabel('bottom', 'x: left / right (m)')
+        self.replay_plot.setLabel('bottom', 'x: radar-left (-) / radar-right (+) (m)')
         self.replay_plot.setLabel('left', 'y: forward (m)')
         self.replay_plot.setXRange(-ROI_LATERAL_M, ROI_LATERAL_M, padding=0.04)
         self.replay_plot.setYRange(0.0, ROI_FORWARD_M, padding=0.04)
@@ -1214,6 +1271,9 @@ class MotionViewer:
 
         self.ui.pushButton_start.clicked.connect(self.open_radar)
         self.ui.pushButton_exit.clicked.connect(self.app.instance().exit)
+        self.capture_stop_timer = QtCore.QTimer(self.main_window)
+        self.capture_stop_timer.setSingleShot(True)
+        self.capture_stop_timer.timeout.connect(self.handle_capture_duration_elapsed)
         self.main_window.show()
         if (
             self.input_mode != 'replay'
@@ -1228,6 +1288,7 @@ class MotionViewer:
 
     def shutdown(self):
         self.log_event('shutdown_start')
+        self.stop_capture_timer()
         if self.collector is not None:
             close_collector = getattr(self.collector, 'close', None)
             if callable(close_collector):

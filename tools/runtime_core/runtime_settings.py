@@ -38,6 +38,7 @@ DEFAULT_RUNTIME_SETTINGS = {
         "input_mode": "live",
         "source_capture": "",
         "notes": "",
+        "capture_duration_s": None,
         "write_raw_capture": True,
         "raw_capture_root": "logs/raw",
         "write_processed_frames": True,
