@@ -1,141 +1,19 @@
-from dataclasses import dataclass
 from math import atan2, hypot
 
 import numpy as np
 
 from .dbscan_cluster import cluster_points
-
-
-@dataclass(frozen=True)
-class DetectionRegion:
-    lateral_limit_m: float
-    forward_limit_m: float
-    min_forward_m: float = 0.0
-    max_targets: int = 6
-    allow_strongest_fallback: bool = False
-    adaptive_eps_bands: object = None
-    cluster_min_samples: int = 1
-    cluster_velocity_weight: float = 0.0
-
-
-@dataclass(frozen=True)
-class DetectionCandidate:
-    range_bin: int
-    doppler_bin: int
-    angle_bin: int
-    range_m: float
-    angle_deg: float
-    x_m: float
-    y_m: float
-    rdi_peak: float
-    rai_peak: float
-    score: float
-
-
-def _trace_candidate(candidate, digits=4):
-    return {
-        "range_bin": int(candidate.range_bin),
-        "doppler_bin": int(candidate.doppler_bin),
-        "angle_bin": int(candidate.angle_bin),
-        "range_m": round(float(candidate.range_m), digits),
-        "angle_deg": round(float(candidate.angle_deg), 3),
-        "x_m": round(float(candidate.x_m), digits),
-        "y_m": round(float(candidate.y_m), digits),
-        "rdi_peak": round(float(candidate.rdi_peak), digits),
-        "rai_peak": round(float(candidate.rai_peak), digits),
-        "score": round(float(candidate.score), digits),
-    }
-
-
-def _trace_candidates(candidates, limit=12):
-    return [_trace_candidate(candidate) for candidate in list(candidates or [])[: int(limit)]]
-
-
-def _trace_reject(reject_reasons, reason):
-    reject_reasons[reason] = int(reject_reasons.get(reason, 0)) + 1
-
-
-def _local_maxima_mask(power_map):
-    rows, cols = power_map.shape
-    padded = np.pad(power_map, 1, mode='constant', constant_values=-np.inf)
-    center = padded[1:-1, 1:-1]
-    maxima_mask = np.ones((rows, cols), dtype=bool)
-
-    for row_offset in (-1, 0, 1):
-        for col_offset in (-1, 0, 1):
-            if row_offset == 0 and col_offset == 0:
-                continue
-            neighbor = padded[
-                1 + row_offset:1 + row_offset + rows,
-                1 + col_offset:1 + col_offset + cols,
-            ]
-            maxima_mask &= center >= neighbor
-
-    return maxima_mask
-
-
-def _build_integral_image(power_map):
-    padded = np.pad(power_map, ((1, 0), (1, 0)), mode='constant')
-    return padded.cumsum(axis=0).cumsum(axis=1)
-
-
-def _rect_sum(integral_image, top, left, bottom, right):
-    return (
-        integral_image[bottom, right]
-        - integral_image[top, right]
-        - integral_image[bottom, left]
-        + integral_image[top, left]
-    )
-
-
-def cfar_threshold_2d(power_map, training_cells=(6, 6), guard_cells=(1, 1)):
-    rows, cols = power_map.shape
-    train_rows, train_cols = training_cells
-    guard_rows, guard_cols = guard_cells
-    outer_rows = train_rows + guard_rows
-    outer_cols = train_cols + guard_cols
-    padded = np.pad(
-        power_map,
-        ((outer_rows, outer_rows), (outer_cols, outer_cols)),
-        mode='edge',
-    )
-    integral = _build_integral_image(padded)
-    thresholds = np.zeros_like(power_map, dtype=np.float64)
-    outer_count = (2 * outer_rows + 1) * (2 * outer_cols + 1)
-    guard_count = (2 * guard_rows + 1) * (2 * guard_cols + 1)
-    training_count = max(outer_count - guard_count, 1)
-
-    for row_index in range(rows):
-        padded_row = row_index + outer_rows
-        outer_top = padded_row - outer_rows
-        outer_bottom = padded_row + outer_rows + 1
-        guard_top = padded_row - guard_rows
-        guard_bottom = padded_row + guard_rows + 1
-
-        for col_index in range(cols):
-            padded_col = col_index + outer_cols
-            outer_left = padded_col - outer_cols
-            outer_right = padded_col + outer_cols + 1
-            guard_left = padded_col - guard_cols
-            guard_right = padded_col + guard_cols + 1
-
-            outer_sum = _rect_sum(
-                integral,
-                outer_top,
-                outer_left,
-                outer_bottom,
-                outer_right,
-            )
-            guard_sum = _rect_sum(
-                integral,
-                guard_top,
-                guard_left,
-                guard_bottom,
-                guard_right,
-            )
-            thresholds[row_index, col_index] = (outer_sum - guard_sum) / training_count
-
-    return thresholds
+from .detection_core.cfar import cfar_threshold_2d, local_maxima_mask as _local_maxima_mask
+from .detection_core.refinement import (
+    body_center_patch_for_range as _body_center_patch_for_range,
+    refine_body_center_from_patch as _refine_body_center_from_patch,
+)
+from .detection_core.trace import (
+    trace_candidate as _trace_candidate,
+    trace_candidates as _trace_candidates,
+    trace_reject as _trace_reject,
+)
+from .detection_core.types import DetectionCandidate, DetectionRegion
 
 
 def _angle_roi_mask(range_m, angle_axis_rad, detection_region):
@@ -183,48 +61,6 @@ def _angle_centroid_radius_for_range(range_m, radius_bands, default_radius=1):
     return int(default_radius)
 
 
-def _body_center_patch_for_range(
-    range_m,
-    patch_bands,
-    default_range_radius_bins=1,
-    default_angle_radius_bins=2,
-    default_relative_floor=0.55,
-):
-    range_radius_bins = int(default_range_radius_bins)
-    angle_radius_bins = int(default_angle_radius_bins)
-    relative_floor = float(default_relative_floor)
-
-    if not patch_bands:
-        return range_radius_bins, angle_radius_bins, relative_floor
-
-    for band in patch_bands:
-        try:
-            r_min = float(band.get("r_min", 0.0))
-            r_max = band.get("r_max")
-        except (TypeError, ValueError, AttributeError):
-            continue
-
-        if range_m < r_min:
-            continue
-        if r_max is not None and float(range_m) >= float(r_max):
-            continue
-
-        try:
-            range_radius_bins = max(1, int(band.get("range_radius_bins", range_radius_bins)))
-            angle_radius_bins = max(1, int(band.get("angle_radius_bins", angle_radius_bins)))
-            relative_floor = float(band.get("relative_floor", relative_floor))
-        except (TypeError, ValueError, AttributeError):
-            return (
-                int(default_range_radius_bins),
-                int(default_angle_radius_bins),
-                float(default_relative_floor),
-            )
-        break
-
-    relative_floor = float(np.clip(relative_floor, 0.0, 0.95))
-    return range_radius_bins, angle_radius_bins, relative_floor
-
-
 def _candidate_merge_window_for_range(
     range_m,
     merge_bands,
@@ -264,38 +100,6 @@ def _candidate_merge_window_for_range(
         break
 
     return merge_radius_m, range_bin_radius, doppler_bin_radius
-
-
-def _connected_component_mask(binary_mask, seed_row, seed_col):
-    rows, cols = binary_mask.shape
-    if rows == 0 or cols == 0:
-        return np.zeros_like(binary_mask, dtype=bool)
-
-    seed_row = int(np.clip(seed_row, 0, rows - 1))
-    seed_col = int(np.clip(seed_col, 0, cols - 1))
-    if not bool(binary_mask[seed_row, seed_col]):
-        return np.zeros_like(binary_mask, dtype=bool)
-
-    component = np.zeros_like(binary_mask, dtype=bool)
-    stack = [(seed_row, seed_col)]
-    component[seed_row, seed_col] = True
-
-    while stack:
-        row_index, col_index = stack.pop()
-        for row_offset in (-1, 0, 1):
-            for col_offset in (-1, 0, 1):
-                if row_offset == 0 and col_offset == 0:
-                    continue
-                next_row = row_index + row_offset
-                next_col = col_index + col_offset
-                if not (0 <= next_row < rows and 0 <= next_col < cols):
-                    continue
-                if component[next_row, next_col] or not bool(binary_mask[next_row, next_col]):
-                    continue
-                component[next_row, next_col] = True
-                stack.append((next_row, next_col))
-
-    return component
 
 
 def _refine_angle_centroid(
@@ -339,111 +143,6 @@ def _doppler_bin_distance(left_bin, right_bin, fft_size):
     if fft_size <= 0:
         return delta
     return min(delta, max(fft_size - delta, 0))
-
-
-def _refine_body_center_from_patch(
-    rai_map,
-    runtime_config,
-    seed_range_bin,
-    seed_angle_bin,
-    angle_mask,
-    angle_floor=0.0,
-    range_radius_bins=1,
-    angle_radius_bins=2,
-    relative_floor=0.55,
-):
-    range_radius_bins = max(1, int(range_radius_bins))
-    angle_radius_bins = max(1, int(angle_radius_bins))
-    relative_floor = float(np.clip(relative_floor, 0.0, 0.95))
-    range_count, angle_count = rai_map.shape
-
-    range_lower = max(int(seed_range_bin) - range_radius_bins, 0)
-    range_upper = min(int(seed_range_bin) + range_radius_bins + 1, range_count)
-    angle_lower = max(int(seed_angle_bin) - angle_radius_bins, 0)
-    angle_upper = min(int(seed_angle_bin) + angle_radius_bins + 1, angle_count)
-
-    patch = np.asarray(rai_map[range_lower:range_upper, angle_lower:angle_upper], dtype=np.float64)
-    if patch.size == 0:
-        seed_range_m = float(runtime_config.range_axis_m[int(seed_range_bin)])
-        seed_angle_rad = float(runtime_config.angle_axis_rad[int(seed_angle_bin)])
-        return (
-            int(seed_range_bin),
-            int(seed_angle_bin),
-            seed_range_m,
-            seed_angle_rad,
-            float(seed_range_m * np.sin(seed_angle_rad)),
-            float(seed_range_m * np.cos(seed_angle_rad)),
-        )
-
-    local_angle_mask = np.asarray(angle_mask[angle_lower:angle_upper], dtype=bool)
-    if not np.any(local_angle_mask):
-        seed_range_m = float(runtime_config.range_axis_m[int(seed_range_bin)])
-        seed_angle_rad = float(runtime_config.angle_axis_rad[int(seed_angle_bin)])
-        return (
-            int(seed_range_bin),
-            int(seed_angle_bin),
-            seed_range_m,
-            seed_angle_rad,
-            float(seed_range_m * np.sin(seed_angle_rad)),
-            float(seed_range_m * np.cos(seed_angle_rad)),
-        )
-
-    patch_mask = np.broadcast_to(local_angle_mask[np.newaxis, :], patch.shape)
-    seed_row = int(seed_range_bin) - range_lower
-    seed_col = int(seed_angle_bin) - angle_lower
-    seed_value = float(patch[seed_row, seed_col]) if patch.size else 0.0
-    component_floor = max(float(angle_floor), seed_value * relative_floor)
-    threshold_mask = patch_mask & (patch >= component_floor)
-    if patch_mask[seed_row, seed_col]:
-        threshold_mask = np.array(threshold_mask, copy=True)
-        threshold_mask[seed_row, seed_col] = True
-
-    component_mask = _connected_component_mask(threshold_mask, seed_row, seed_col)
-    if not np.any(component_mask):
-        component_mask = patch_mask & (patch > 0.0)
-    if not np.any(component_mask):
-        seed_range_m = float(runtime_config.range_axis_m[int(seed_range_bin)])
-        seed_angle_rad = float(runtime_config.angle_axis_rad[int(seed_angle_bin)])
-        return (
-            int(seed_range_bin),
-            int(seed_angle_bin),
-            seed_range_m,
-            seed_angle_rad,
-            float(seed_range_m * np.sin(seed_angle_rad)),
-            float(seed_range_m * np.cos(seed_angle_rad)),
-        )
-
-    weights = np.where(component_mask, np.maximum(patch - component_floor, 0.0), 0.0)
-    weight_sum = float(np.sum(weights))
-    if weight_sum <= 1e-9:
-        weights = np.where(component_mask, np.maximum(patch, 0.0), 0.0)
-        weight_sum = float(np.sum(weights))
-    if weight_sum <= 1e-9:
-        seed_range_m = float(runtime_config.range_axis_m[int(seed_range_bin)])
-        seed_angle_rad = float(runtime_config.angle_axis_rad[int(seed_angle_bin)])
-        return (
-            int(seed_range_bin),
-            int(seed_angle_bin),
-            seed_range_m,
-            seed_angle_rad,
-            float(seed_range_m * np.sin(seed_angle_rad)),
-            float(seed_range_m * np.cos(seed_angle_rad)),
-        )
-
-    local_range_axis = np.asarray(runtime_config.range_axis_m[range_lower:range_upper], dtype=np.float64)
-    local_angle_axis = np.asarray(runtime_config.angle_axis_rad[angle_lower:angle_upper], dtype=np.float64)
-    range_grid = local_range_axis[:, np.newaxis]
-    angle_grid = local_angle_axis[np.newaxis, :]
-    x_grid = range_grid * np.sin(angle_grid)
-    y_grid = range_grid * np.cos(angle_grid)
-
-    x_m = float(np.sum(x_grid * weights) / weight_sum)
-    y_m = float(np.sum(y_grid * weights) / weight_sum)
-    range_m = float(hypot(x_m, y_m))
-    angle_rad = float(atan2(x_m, max(y_m, 1e-6)))
-    range_bin = _nearest_axis_bin(runtime_config.range_axis_m, range_m)
-    angle_bin = _nearest_axis_bin(runtime_config.angle_axis_rad, angle_rad)
-    return range_bin, angle_bin, range_m, angle_rad, x_m, y_m
 
 
 def _merge_candidate_pool(
@@ -557,6 +256,43 @@ def _merge_candidate_pool(
     return merged_candidates
 
 
+def _select_cluster_representative(members, cluster):
+    """Pick an actual candidate so DBSCAN does not invent an off-path centroid."""
+    if len(members) <= 1:
+        return members[0]
+
+    xs = np.asarray([float(member.x_m) for member in members], dtype=np.float64)
+    ys = np.asarray([float(member.y_m) for member in members], dtype=np.float64)
+    median_x = float(np.median(xs))
+    median_y = float(np.median(ys))
+    eps_used = max(float(cluster.get("eps_used", 0.0)), 1e-6)
+    max_score = max(max(float(member.score) for member in members), 1e-6)
+    max_rdi = max(max(float(member.rdi_peak) for member in members), 1e-6)
+    max_rai = max(max(float(member.rai_peak) for member in members), 1e-6)
+
+    def _rank(member):
+        distance_m = float(hypot(float(member.x_m) - median_x, float(member.y_m) - median_y))
+        distance_penalty = min(distance_m / eps_used, 2.0)
+        score_norm = float(member.score) / max_score
+        rdi_norm = float(member.rdi_peak) / max_rdi
+        rai_norm = float(member.rai_peak) / max_rai
+        representative_score = (
+            score_norm
+            + (0.10 * rdi_norm)
+            + (0.10 * rai_norm)
+            - (0.25 * distance_penalty)
+        )
+        return (
+            representative_score,
+            float(member.score),
+            float(member.rdi_peak),
+            float(member.rai_peak),
+            -distance_m,
+        )
+
+    return max(members, key=_rank)
+
+
 def _cluster_detection_candidates(
     candidate_pool,
     runtime_config,
@@ -585,7 +321,7 @@ def _cluster_detection_candidates(
         adaptive_eps_bands=detection_region.adaptive_eps_bands,
     )
     if not clusters:
-        if candidate_pool and detection_region.max_targets <= 1:
+        if candidate_pool:
             fallback = max(
                 candidate_pool,
                 key=lambda candidate: (candidate.score, candidate.rdi_peak, candidate.rai_peak),
@@ -605,13 +341,13 @@ def _cluster_detection_candidates(
             continue
 
         members = [candidate_pool[index] for index in member_indices]
-        seed = max(members, key=lambda candidate: (candidate.score, candidate.rdi_peak, candidate.rai_peak))
-        x_m = float(cluster["x"])
-        y_m = float(cluster["y"])
-        range_m = float(hypot(x_m, y_m))
+        representative = _select_cluster_representative(members, cluster)
+        x_m = float(representative.x_m)
+        y_m = float(representative.y_m)
+        range_m = float(representative.range_m)
         angle_rad = float(atan2(x_m, max(y_m, 1e-6)))
-        range_bin = _nearest_axis_bin(runtime_config.range_axis_m, range_m)
-        angle_bin = _nearest_axis_bin(runtime_config.angle_axis_rad, angle_rad)
+        range_bin = int(representative.range_bin)
+        angle_bin = int(representative.angle_bin)
         doppler_bin = int(
             round(
                 sum(member.doppler_bin * member.score for member in members)
@@ -629,7 +365,10 @@ def _cluster_detection_candidates(
                 y_m=y_m,
                 rdi_peak=max(member.rdi_peak for member in members),
                 rai_peak=max(member.rai_peak for member in members),
-                score=float(max(cluster.get("peak_score", 0.0), seed.score) * max(cluster.get("confidence", 0.0), 0.5)),
+                score=float(
+                    max(cluster.get("peak_score", 0.0), representative.score)
+                    * max(cluster.get("confidence", 0.0), 0.5)
+                ),
             )
         )
 
@@ -638,6 +377,80 @@ def _cluster_detection_candidates(
         reverse=True,
     )
     return detections
+
+
+def _suppress_duplicate_candidates(
+    candidates,
+    runtime_config,
+    enabled=True,
+    radius_m=0.55,
+    range_scale=0.0,
+    doppler_bins=6,
+    score_ratio=0.82,
+):
+    if not enabled or len(candidates) <= 1:
+        return list(candidates), []
+
+    radius_m = max(0.0, float(radius_m))
+    range_scale = max(0.0, float(range_scale))
+    doppler_bins = max(0, int(doppler_bins))
+    score_ratio = float(np.clip(score_ratio, 0.0, 1.0))
+    if radius_m <= 0.0 or score_ratio <= 0.0:
+        return list(candidates), []
+
+    ordered = sorted(
+        candidates,
+        key=lambda candidate: (candidate.score, candidate.rdi_peak, candidate.rai_peak),
+        reverse=True,
+    )
+    kept = []
+    suppressed = []
+    for candidate in ordered:
+        duplicate_of = None
+        duplicate_distance_m = None
+        duplicate_doppler_bins = None
+        duplicate_score_ratio = None
+        for reference in kept:
+            effective_radius_m = radius_m + (
+                range_scale * max(float(candidate.range_m), float(reference.range_m))
+            )
+            distance_m = float(hypot(candidate.x_m - reference.x_m, candidate.y_m - reference.y_m))
+            if distance_m > effective_radius_m:
+                continue
+
+            doppler_distance = _doppler_bin_distance(
+                candidate.doppler_bin,
+                reference.doppler_bin,
+                runtime_config.doppler_fft_size,
+            )
+            if doppler_distance > doppler_bins:
+                continue
+
+            relative_score = float(candidate.score) / max(float(reference.score), 1e-6)
+            if relative_score > score_ratio:
+                continue
+
+            duplicate_of = reference
+            duplicate_distance_m = distance_m
+            duplicate_doppler_bins = doppler_distance
+            duplicate_score_ratio = relative_score
+            break
+
+        if duplicate_of is None:
+            kept.append(candidate)
+            continue
+
+        suppressed.append(
+            {
+                "candidate": _trace_candidate(candidate),
+                "duplicate_of": _trace_candidate(duplicate_of),
+                "distance_m": round(float(duplicate_distance_m), 4),
+                "doppler_bins": int(duplicate_doppler_bins),
+                "score_ratio": round(float(duplicate_score_ratio), 4),
+            }
+        )
+
+    return kept, suppressed
 
 
 def detect_targets(
@@ -657,6 +470,11 @@ def detect_targets(
     angle_centroid_radius_bands=None,
     body_center_patch_bands=None,
     candidate_merge_bands=None,
+    duplicate_suppression_enabled=True,
+    duplicate_suppression_radius_m=0.55,
+    duplicate_suppression_range_scale=0.03,
+    duplicate_suppression_doppler_bins=6,
+    duplicate_suppression_score_ratio=0.82,
     trace=None,
 ):
     trace_enabled = trace is not None
@@ -993,6 +811,32 @@ def detect_targets(
             trace["dbscan"]["output_count"] = 0
             trace["dbscan"]["output_top"] = []
             trace["early_exit"] = "dbscan_empty"
+        return []
+    pre_duplicate_suppression = list(clustered_detections)
+    clustered_detections, suppressed_duplicates = _suppress_duplicate_candidates(
+        clustered_detections,
+        runtime_config,
+        enabled=duplicate_suppression_enabled,
+        radius_m=duplicate_suppression_radius_m,
+        range_scale=duplicate_suppression_range_scale,
+        doppler_bins=duplicate_suppression_doppler_bins,
+        score_ratio=duplicate_suppression_score_ratio,
+    )
+    if trace_enabled:
+        trace["duplicate_suppression"] = {
+            "enabled": bool(duplicate_suppression_enabled),
+            "before_count": int(len(pre_duplicate_suppression)),
+            "after_count": int(len(clustered_detections)),
+            "suppressed_count": int(len(suppressed_duplicates)),
+            "radius_m": round(float(duplicate_suppression_radius_m), 4),
+            "range_scale": round(float(duplicate_suppression_range_scale), 4),
+            "doppler_bins": int(duplicate_suppression_doppler_bins),
+            "score_ratio": round(float(duplicate_suppression_score_ratio), 4),
+            "suppressed": suppressed_duplicates[:12],
+        }
+    if not clustered_detections:
+        if trace_enabled:
+            trace["early_exit"] = "duplicate_suppression_empty"
         return []
     output = clustered_detections[:detection_region.max_targets]
     if trace_enabled:

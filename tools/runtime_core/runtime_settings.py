@@ -1,4 +1,5 @@
 import json
+import os
 from copy import deepcopy
 from pathlib import Path
 
@@ -128,6 +129,11 @@ DEFAULT_TUNING_SETTINGS = {
                     "doppler_bin_radius": 4,
                 },
             ],
+            "duplicate_suppression_enabled": True,
+            "duplicate_suppression_radius_m": 0.55,
+            "duplicate_suppression_range_scale": 0.03,
+            "duplicate_suppression_doppler_bins": 6,
+            "duplicate_suppression_score_ratio": 0.82,
         },
         "dbscan_adaptive_eps_bands": [
             {"r_min": 0.25, "r_max": 1.0, "eps": 0.34, "min_samples": 2},
@@ -151,6 +157,10 @@ DEFAULT_TUNING_SETTINGS = {
         "tentative_gate_factor": 0.65,
         "birth_suppression_radius_m": 0.55,
         "primary_track_birth_scale": 1.35,
+        "birth_suppression_weak_radius_scale": 1.0,
+        "birth_suppression_score_ratio": 0.0,
+        "birth_suppression_confidence_ratio": 0.0,
+        "birth_suppression_doppler_bins": 0,
         "birth_suppression_miss_tolerance": 3,
         "primary_track_hold_frames": 4,
         "lateral_deadband_m": 0.05,
@@ -307,9 +317,10 @@ def load_runtime_settings(
     settings = _deep_merge(settings, _load_json_if_exists(resolved_static_settings_path))
     settings = _deep_merge(settings, _load_json_if_exists(resolved_runtime_settings_path))
 
+    env_tuning_path = os.environ.get("RADAR_TUNING_PATH")
     resolved_tuning_path = _resolve_config_path(
         project_root,
-        tuning_path if tuning_path is not None else settings.get("tuning_path"),
+        tuning_path if tuning_path is not None else (env_tuning_path or settings.get("tuning_path")),
         "config/live_motion_tuning.json",
     )
     settings = _deep_merge(settings, _load_json_if_exists(resolved_tuning_path))

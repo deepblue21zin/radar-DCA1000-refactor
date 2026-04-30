@@ -77,6 +77,10 @@ TRACK_LOST_GATE_FACTOR = float(TUNING['tracking']['lost_gate_factor'])
 TRACK_TENTATIVE_GATE_FACTOR = float(TUNING['tracking']['tentative_gate_factor'])
 TRACK_BIRTH_SUPPRESSION_RADIUS_M = float(TUNING['tracking']['birth_suppression_radius_m'])
 TRACK_PRIMARY_TRACK_BIRTH_SCALE = float(TUNING['tracking']['primary_track_birth_scale'])
+TRACK_BIRTH_SUPPRESSION_WEAK_RADIUS_SCALE = float(TUNING['tracking'].get('birth_suppression_weak_radius_scale', 1.0))
+TRACK_BIRTH_SUPPRESSION_SCORE_RATIO = float(TUNING['tracking'].get('birth_suppression_score_ratio', 0.0))
+TRACK_BIRTH_SUPPRESSION_CONFIDENCE_RATIO = float(TUNING['tracking'].get('birth_suppression_confidence_ratio', 0.0))
+TRACK_BIRTH_SUPPRESSION_DOPPLER_BINS = int(TUNING['tracking'].get('birth_suppression_doppler_bins', 0))
 TRACK_BIRTH_SUPPRESSION_MISS_TOLERANCE = int(TUNING['tracking']['birth_suppression_miss_tolerance'])
 TRACK_PRIMARY_TRACK_HOLD_FRAMES = int(TUNING['tracking']['primary_track_hold_frames'])
 TRACK_LATERAL_DEADBAND_M = float(TUNING['tracking']['lateral_deadband_m'])
@@ -118,6 +122,11 @@ DETECTION_TUNING = {
     'angle_centroid_radius_bands': list(DETECTION_ALGORITHM.get('angle_centroid_radius_bands', [])),
     'body_center_patch_bands': list(DETECTION_ALGORITHM.get('body_center_patch_bands', [])),
     'candidate_merge_bands': list(DETECTION_ALGORITHM.get('candidate_merge_bands', [])),
+    'duplicate_suppression_enabled': bool(DETECTION_ALGORITHM.get('duplicate_suppression_enabled', True)),
+    'duplicate_suppression_radius_m': float(DETECTION_ALGORITHM.get('duplicate_suppression_radius_m', 0.55)),
+    'duplicate_suppression_range_scale': float(DETECTION_ALGORITHM.get('duplicate_suppression_range_scale', 0.03)),
+    'duplicate_suppression_doppler_bins': int(DETECTION_ALGORITHM.get('duplicate_suppression_doppler_bins', 6)),
+    'duplicate_suppression_score_ratio': float(DETECTION_ALGORITHM.get('duplicate_suppression_score_ratio', 0.82)),
 }
 LOG_ROOT = PROJECT_ROOT / 'logs' / 'live_motion_viewer'
 SPATIAL_VIEW_HEIGHT = int(STATIC['spatial_view']['height'])
@@ -317,6 +326,10 @@ class MotionViewer:
             'track_doppler_cost_weight': TRACK_DOPPLER_COST_WEIGHT,
             'track_birth_suppression_radius_m': TRACK_BIRTH_SUPPRESSION_RADIUS_M,
             'track_primary_track_birth_scale': TRACK_PRIMARY_TRACK_BIRTH_SCALE,
+            'track_birth_suppression_weak_radius_scale': TRACK_BIRTH_SUPPRESSION_WEAK_RADIUS_SCALE,
+            'track_birth_suppression_score_ratio': TRACK_BIRTH_SUPPRESSION_SCORE_RATIO,
+            'track_birth_suppression_confidence_ratio': TRACK_BIRTH_SUPPRESSION_CONFIDENCE_RATIO,
+            'track_birth_suppression_doppler_bins': TRACK_BIRTH_SUPPRESSION_DOPPLER_BINS,
             'track_birth_suppression_miss_tolerance': TRACK_BIRTH_SUPPRESSION_MISS_TOLERANCE,
             'track_primary_track_hold_frames': TRACK_PRIMARY_TRACK_HOLD_FRAMES,
             'track_lateral_deadband_m': TRACK_LATERAL_DEADBAND_M,
@@ -398,6 +411,10 @@ class MotionViewer:
             tentative_gate_factor=TRACK_TENTATIVE_GATE_FACTOR,
             birth_suppression_radius_m=TRACK_BIRTH_SUPPRESSION_RADIUS_M,
             primary_track_birth_scale=TRACK_PRIMARY_TRACK_BIRTH_SCALE,
+            birth_suppression_weak_radius_scale=TRACK_BIRTH_SUPPRESSION_WEAK_RADIUS_SCALE,
+            birth_suppression_score_ratio=TRACK_BIRTH_SUPPRESSION_SCORE_RATIO,
+            birth_suppression_confidence_ratio=TRACK_BIRTH_SUPPRESSION_CONFIDENCE_RATIO,
+            birth_suppression_doppler_bins=TRACK_BIRTH_SUPPRESSION_DOPPLER_BINS,
             birth_suppression_miss_tolerance=TRACK_BIRTH_SUPPRESSION_MISS_TOLERANCE,
             primary_track_hold_frames=TRACK_PRIMARY_TRACK_HOLD_FRAMES,
             lateral_deadband_m=TRACK_LATERAL_DEADBAND_M,

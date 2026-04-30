@@ -5,14 +5,14 @@
     "invert_lateral_axis": false
   },
   "roi": {
-    "lateral_m": 1.5,
+    "lateral_m": 1.25,
     "forward_m": 4.0,
     "min_forward_m": 0.7
   },
   "detection": {
     "allow_strongest_fallback": false,
     "max_targets": 1,
-    "display_min_confidence": 0.26,
+    "display_min_confidence": 0.3,
     "cluster_min_samples": 2,
     "cluster_velocity_weight": 0.0,
     "algorithm": {
@@ -24,21 +24,9 @@
       "angle_contrast_scale": 1.35,
       "min_cartesian_separation_m": 0.65,
       "angle_centroid_radius_bands": [
-        {
-          "r_min": 0.0,
-          "r_max": 1.5,
-          "radius": 1
-        },
-        {
-          "r_min": 1.5,
-          "r_max": 3.0,
-          "radius": 2
-        },
-        {
-          "r_min": 3.0,
-          "r_max": null,
-          "radius": 3
-        }
+        {"r_min": 0.0, "r_max": 1.5, "radius": 1},
+        {"r_min": 1.5, "r_max": 3.0, "radius": 2},
+        {"r_min": 3.0, "r_max": null, "radius": 3}
       ],
       "body_center_patch_bands": [
         {
@@ -93,24 +81,9 @@
       "duplicate_suppression_score_ratio": 0.82
     },
     "dbscan_adaptive_eps_bands": [
-      {
-        "r_min": 0.25,
-        "r_max": 1.0,
-        "eps": 0.34,
-        "min_samples": 2
-      },
-      {
-        "r_min": 1.0,
-        "r_max": 2.0,
-        "eps": 0.44,
-        "min_samples": 2
-      },
-      {
-        "r_min": 2.0,
-        "r_max": 3.5,
-        "eps": 0.56,
-        "min_samples": 2
-      }
+      {"r_min": 0.25, "r_max": 1.0, "eps": 0.34, "min_samples": 2},
+      {"r_min": 1.0, "r_max": 2.0, "eps": 0.44, "min_samples": 2},
+      {"r_min": 2.0, "r_max": 3.5, "eps": 0.56, "min_samples": 2}
     ]
   },
   "tracking": {

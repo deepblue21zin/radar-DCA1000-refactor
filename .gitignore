@@ -25,6 +25,7 @@ Thumbs.db
 /logs/
 /lab_data/
 /lab_state/
+/.codex_tmp/
 /.radar_lab.sqlite3
 /another1.db
 /another2.sqlite3
@@ -45,6 +46,15 @@ Thumbs.db
 /docs/**/*.html
 !/docs/problem/
 !/docs/problem/**/*.html
+
+# Evaluation run outputs
+/docs/evals/runs/
+
+# Generated document/CAD artifacts
+/docs/System_SW_1Month_Quest.docx
+/docs/REQ/*.docx
+/hardware/cad/stl/
+/hardware/cad/preview_*.png
 
 # Local change notes
 /docs/change/

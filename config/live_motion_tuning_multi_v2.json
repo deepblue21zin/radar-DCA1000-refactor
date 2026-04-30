@@ -11,7 +11,7 @@
   },
   "detection": {
     "allow_strongest_fallback": false,
-    "max_targets": 1,
+    "max_targets": 3,
     "display_min_confidence": 0.26,
     "cluster_min_samples": 2,
     "cluster_velocity_weight": 0.0,
@@ -22,23 +22,11 @@
       "global_quantile": 0.985,
       "angle_quantile": 0.75,
       "angle_contrast_scale": 1.35,
-      "min_cartesian_separation_m": 0.65,
+      "min_cartesian_separation_m": 0.78,
       "angle_centroid_radius_bands": [
-        {
-          "r_min": 0.0,
-          "r_max": 1.5,
-          "radius": 1
-        },
-        {
-          "r_min": 1.5,
-          "r_max": 3.0,
-          "radius": 2
-        },
-        {
-          "r_min": 3.0,
-          "r_max": null,
-          "radius": 3
-        }
+        {"r_min": 0.0, "r_max": 1.5, "radius": 1},
+        {"r_min": 1.5, "r_max": 3.0, "radius": 2},
+        {"r_min": 3.0, "r_max": null, "radius": 3}
       ],
       "body_center_patch_bands": [
         {
@@ -67,50 +55,35 @@
         {
           "r_min": 0.0,
           "r_max": 1.5,
-          "merge_radius_m": 0.32,
+          "merge_radius_m": 0.45,
           "range_bin_radius": 1,
           "doppler_bin_radius": 2
         },
         {
           "r_min": 1.5,
           "r_max": 3.0,
-          "merge_radius_m": 0.48,
+          "merge_radius_m": 0.64,
           "range_bin_radius": 2,
           "doppler_bin_radius": 3
         },
         {
           "r_min": 3.0,
           "r_max": null,
-          "merge_radius_m": 0.62,
+          "merge_radius_m": 0.8,
           "range_bin_radius": 3,
           "doppler_bin_radius": 4
         }
       ],
       "duplicate_suppression_enabled": true,
-      "duplicate_suppression_radius_m": 0.55,
-      "duplicate_suppression_range_scale": 0.03,
-      "duplicate_suppression_doppler_bins": 6,
-      "duplicate_suppression_score_ratio": 0.82
+      "duplicate_suppression_radius_m": 0.7,
+      "duplicate_suppression_range_scale": 0.04,
+      "duplicate_suppression_doppler_bins": 8,
+      "duplicate_suppression_score_ratio": 0.95
     },
     "dbscan_adaptive_eps_bands": [
-      {
-        "r_min": 0.25,
-        "r_max": 1.0,
-        "eps": 0.34,
-        "min_samples": 2
-      },
-      {
-        "r_min": 1.0,
-        "r_max": 2.0,
-        "eps": 0.44,
-        "min_samples": 2
-      },
-      {
-        "r_min": 2.0,
-        "r_max": 3.5,
-        "eps": 0.56,
-        "min_samples": 2
-      }
+      {"r_min": 0.25, "r_max": 1.0, "eps": 0.45, "min_samples": 2},
+      {"r_min": 1.0, "r_max": 2.0, "eps": 0.58, "min_samples": 2},
+      {"r_min": 2.0, "r_max": 3.5, "eps": 0.72, "min_samples": 2}
     ]
   },
   "tracking": {
@@ -124,29 +97,29 @@
     "doppler_zero_guard_bins": 3,
     "doppler_gate_bins": 18,
     "doppler_cost_weight": 0.65,
-    "report_miss_tolerance": 3,
+    "report_miss_tolerance": 5,
     "lost_gate_factor": 1.6,
-    "tentative_gate_factor": 0.65,
-    "birth_suppression_radius_m": 0.55,
-    "primary_track_birth_scale": 1.35,
-    "birth_suppression_weak_radius_scale": 1.0,
-    "birth_suppression_score_ratio": 0.0,
-    "birth_suppression_confidence_ratio": 0.0,
-    "birth_suppression_doppler_bins": 0,
-    "birth_suppression_miss_tolerance": 3,
-    "primary_track_hold_frames": 4,
-    "lateral_deadband_m": 0.05,
-    "lateral_deadband_range_scale": 0.03,
-    "lateral_smoothing_alpha": 0.45,
-    "lateral_velocity_damping": 0.55,
+    "tentative_gate_factor": 0.7,
+    "birth_suppression_radius_m": 0.75,
+    "primary_track_birth_scale": 1.8,
+    "birth_suppression_weak_radius_scale": 1.65,
+    "birth_suppression_score_ratio": 0.95,
+    "birth_suppression_confidence_ratio": 0.95,
+    "birth_suppression_doppler_bins": 8,
+    "birth_suppression_miss_tolerance": 5,
+    "primary_track_hold_frames": 6,
+    "lateral_deadband_m": 0.08,
+    "lateral_deadband_range_scale": 0.04,
+    "lateral_smoothing_alpha": 0.32,
+    "lateral_velocity_damping": 0.45,
     "local_remeasurement_enabled": true,
-    "local_remeasurement_blend": 0.35,
-    "local_remeasurement_max_shift_m": 0.28,
-    "local_remeasurement_track_bias": 0.15,
+    "local_remeasurement_blend": 0.25,
+    "local_remeasurement_max_shift_m": 0.16,
+    "local_remeasurement_track_bias": 0.35,
     "measurement_soft_gate_enabled": true,
     "measurement_soft_gate_floor": 0.35,
-    "measurement_soft_gate_start_m": 0.16,
-    "measurement_soft_gate_full_m": 0.52,
+    "measurement_soft_gate_start_m": 0.14,
+    "measurement_soft_gate_full_m": 0.48,
     "measurement_soft_gate_range_scale": 0.05,
     "measurement_soft_gate_speed_scale": 0.06,
     "local_remeasurement_patch_bands": [
@@ -186,11 +159,11 @@
     }
   },
   "visualization": {
-    "show_tentative_tracks": true,
-    "tentative_min_confidence": 0.3,
-    "tentative_min_hits": 2,
-    "display_hysteresis_frames": 5,
+    "show_tentative_tracks": false,
+    "tentative_min_confidence": 0.35,
+    "tentative_min_hits": 3,
+    "display_hysteresis_frames": 8,
     "display_hysteresis_confidence_floor": 0.12,
-    "display_primary_bonus_frames": 3
+    "display_primary_bonus_frames": 5
   }
 }

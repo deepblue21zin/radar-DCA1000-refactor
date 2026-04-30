@@ -4,6 +4,7 @@ import base64
 import html
 import io
 import json
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -23,6 +24,9 @@ except ImportError as error:  # pragma: no cover
 
 from tools.lab import analytics, registry, stage_cache, wandb_sync
 
+
+EVAL_TASKS_DIR = PROJECT_ROOT / "docs" / "evals" / "tasks"
+EVAL_RUNS_DIR = PROJECT_ROOT / "docs" / "evals" / "runs"
 
 LABEL_OPTIONS = ["", "baseline", "good", "usable", "interesting", "discard"]
 MOTION_OPTIONS = [
@@ -195,6 +199,185 @@ def _render_file_links(items: dict[str, Path | str | None]) -> None:
         st.markdown("\n".join(lines))
     else:
         st.caption("열 수 있는 로컬 파일이 아직 없습니다.")
+
+
+def _relative_to_project(path: Path | str | None) -> str:
+    if path is None:
+        return ""
+    candidate = Path(path)
+    try:
+        return str(candidate.resolve().relative_to(PROJECT_ROOT.resolve()))
+    except Exception:
+        return str(candidate)
+
+
+def _eval_task_files(*, include_templates: bool = False) -> list[Path]:
+    if not EVAL_TASKS_DIR.exists():
+        return []
+    tasks = sorted(EVAL_TASKS_DIR.glob("*.json"))
+    if not include_templates:
+        tasks = [path for path in tasks if ".template." not in path.name]
+    return tasks
+
+
+def _load_json_file(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _eval_outcome_files() -> list[Path]:
+    if not EVAL_RUNS_DIR.exists():
+        return []
+    return sorted(
+        EVAL_RUNS_DIR.glob("*/outcome.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def _load_eval_outcomes(limit: int = 80) -> list[dict]:
+    outcomes = []
+    for path in _eval_outcome_files()[:limit]:
+        outcome = _load_json_file(path)
+        if not outcome:
+            continue
+        outcome["_outcome_path"] = str(path)
+        outcome["_run_dir"] = str(path.parent)
+        outcomes.append(outcome)
+    return outcomes
+
+
+def _eval_status(outcome: dict) -> str:
+    return str(outcome.get("status") or "unknown").lower()
+
+
+def _eval_status_mark(status: str) -> str:
+    normalized = str(status or "unknown").lower()
+    if normalized == "pass":
+        return "PASS"
+    if normalized == "fail":
+        return "FAIL"
+    if normalized == "dry_run":
+        return "DRY"
+    return normalized.upper()
+
+
+def _eval_status_tone(status: str) -> str:
+    normalized = str(status or "").lower()
+    if normalized == "pass":
+        return "good"
+    if normalized == "fail":
+        return "bad"
+    if normalized == "dry_run":
+        return "warn"
+    return "neutral"
+
+
+def _criterion_pass_text(criteria: list[dict]) -> str:
+    if not criteria:
+        return "n/a"
+    passed = sum(1 for item in criteria if item.get("passed"))
+    return f"{passed}/{len(criteria)}"
+
+
+def _eval_outcome_rows(outcomes: list[dict]) -> list[dict]:
+    rows = []
+    for outcome in outcomes:
+        candidate = outcome.get("candidate") or {}
+        baseline = outcome.get("baseline") or {}
+        task = outcome.get("task") or {}
+        criteria = outcome.get("criteria") or []
+        rows.append(
+            {
+                "status": _eval_status_mark(_eval_status(outcome)),
+                "task": task.get("name") or "",
+                "generated_at": outcome.get("generated_at") or "",
+                "criteria": _criterion_pass_text(criteria),
+                "candidate": candidate.get("session_id") or "",
+                "baseline": baseline.get("session_id") or "",
+                "transport": _nested_get(candidate, "summary", "transport_quality", default=""),
+                "path_clean": _format_float(
+                    _nested_get(candidate, "summary", "path_cleanliness_score_10", default=None),
+                    2,
+                ),
+                "policy": str(_nested_get(candidate, "summary", "path_shape_policy_pass", default="")),
+                "outcome": _relative_to_project(outcome.get("_outcome_path")),
+            }
+        )
+    return rows
+
+
+def _extract_outcome_path(stdout_text: str) -> Path | None:
+    for line in reversed((stdout_text or "").splitlines()):
+        text = line.strip()
+        if text.lower().startswith("outcome:"):
+            value = text.split(":", 1)[1].strip()
+            path = Path(value)
+            if not path.is_absolute():
+                path = PROJECT_ROOT / path
+            if path.exists():
+                return path
+    return None
+
+
+def _latest_outcome_for_task(task_name: str, *, after_dirs: set[Path] | None = None) -> Path | None:
+    matches = []
+    for outcome_path in _eval_outcome_files():
+        run_dir = outcome_path.parent.resolve()
+        if after_dirs is not None and run_dir not in after_dirs:
+            continue
+        outcome = _load_json_file(outcome_path)
+        name = _nested_get(outcome, "task", "name", default="") or outcome_path.parent.name
+        if str(name) == task_name or str(name) in outcome_path.parent.name:
+            matches.append(outcome_path)
+    return matches[0] if matches else None
+
+
+def _build_eval_command(
+    task_path: Path,
+    *,
+    mode: str,
+    baseline_session: str,
+    candidate_session: str,
+    no_stage_cache: bool,
+    force_baseline: bool,
+    skip_baseline: bool,
+    dry_run: bool,
+    timeout_s: float | None,
+) -> list[str]:
+    command = [
+        sys.executable,
+        "-B",
+        "-m",
+        "tools.eval_harness.run_task",
+        str(task_path),
+    ]
+    if baseline_session.strip():
+        command.extend(["--baseline-session", baseline_session.strip()])
+    if mode == "기존 candidate session 채점" and candidate_session.strip():
+        command.extend(["--candidate-session", candidate_session.strip()])
+    if no_stage_cache:
+        command.append("--no-stage-cache")
+    if force_baseline:
+        command.append("--force-baseline")
+    if skip_baseline:
+        command.append("--skip-baseline")
+    if dry_run:
+        command.append("--dry-run")
+    if timeout_s and timeout_s > 0:
+        command.extend(["--timeout-s", str(float(timeout_s))])
+    return command
+
+
+def _run_eval_command(command: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        command,
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _heatmap_image(array) -> np.ndarray:
@@ -1139,6 +1322,142 @@ def _trajectory_stats(trajectory: list[dict], frame_count: int) -> dict:
     }
 
 
+def _load_compare_final_trajectory(session_id: str) -> dict:
+    trace_rows = stage_cache.load_stage_traces(PROJECT_ROOT, session_id)
+    manifest = stage_cache.load_stage_cache_manifest(PROJECT_ROOT, session_id) or {}
+    if not trace_rows:
+        return {
+            "session_id": session_id,
+            "trace_rows": [],
+            "stage": "display",
+            "stage_label": "Display output",
+            "trajectory": [],
+            "stats": _trajectory_stats([], 0),
+            "manifest": manifest,
+        }
+
+    for stage, label in [("display", "Display output"), ("tracks", "Tracker state")]:
+        trajectory = _collect_stage_trajectory(trace_rows, stage)
+        if trajectory:
+            return {
+                "session_id": session_id,
+                "trace_rows": trace_rows,
+                "stage": stage,
+                "stage_label": label,
+                "trajectory": trajectory,
+                "stats": _trajectory_stats(trajectory, len(trace_rows)),
+                "manifest": manifest,
+            }
+    return {
+        "session_id": session_id,
+        "trace_rows": trace_rows,
+        "stage": "display",
+        "stage_label": "Display output",
+        "trajectory": [],
+        "stats": _trajectory_stats([], len(trace_rows)),
+        "manifest": manifest,
+    }
+
+
+def _render_compare_final_trajectory_grid(run_roles: list[tuple[str, dict]]) -> None:
+    if not run_roles:
+        return
+
+    loaded = [(role, detail, _load_compare_final_trajectory(detail["session_id"])) for role, detail in run_roles]
+    trajectories = [item[2]["trajectory"] for item in loaded if item[2]["trajectory"]]
+    if not trajectories:
+        st.info(
+            "비교할 final tracking trajectory가 없습니다. Stage Debug에서 각 replay run의 stage cache를 먼저 생성해 주세요."
+        )
+        return
+
+    all_points = [point for trajectory in trajectories for point in trajectory]
+    xs = np.asarray([point["x_m"] for point in all_points], dtype=float)
+    ys = np.asarray([point["y_m"] for point in all_points], dtype=float)
+    x_abs = max(float(np.max(np.abs(xs))) + 0.15, 0.6)
+    y_max = max(float(np.max(ys)) + 0.25, 3.0)
+
+    panels = len(loaded)
+    colors = ["#172232", "#1b7a4c", "#d88922", "#5176b8"]
+    fig, plt = _make_figure(width=max(4.0 * panels, 8.0), height=4.3)
+    axes = fig.subplots(1, panels, squeeze=False)[0]
+    fig.suptitle(
+        "Final Tracking Trajectory Comparison",
+        x=0.01,
+        ha="left",
+        fontsize=13,
+        fontweight="bold",
+        color="#163044",
+    )
+
+    stat_rows = []
+    for index, (role, detail, payload) in enumerate(loaded):
+        ax = axes[index]
+        trajectory = payload["trajectory"]
+        color = colors[index % len(colors)]
+        title_id = detail["session_id"]
+        annotation = _annotation_summary(detail, include_notes=True)
+        if trajectory:
+            tx = [point["x_m"] for point in trajectory]
+            ty = [point["y_m"] for point in trajectory]
+            ax.plot(tx, ty, color=color, linewidth=1.9, marker="o", markersize=2.6)
+            ax.scatter([tx[0]], [ty[0]], s=48, color=color, edgecolors="white", linewidth=0.8, zorder=5)
+            ax.scatter([tx[-1]], [ty[-1]], s=64, color=color, edgecolors="#172232", linewidth=1.0, zorder=5)
+        else:
+            ax.text(
+                0.5,
+                0.52,
+                "No stage cache\nor no final track",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                color="#63788a",
+                fontsize=10,
+            )
+        ax.scatter([0.0], [0.0], s=56, color="#172232", marker="s", zorder=6)
+        stats = payload["stats"]
+        manifest = payload.get("manifest") or {}
+        limit_requested = manifest.get("frame_limit_requested")
+        cache_note = "partial cache" if limit_requested else "full cache"
+        ax.set_title(
+            f"{role}: {title_id}\n{annotation}\n{cache_note} | coverage {stats['coverage']} | max step {stats['max_step_m']}m",
+            fontsize=9,
+            color="#20384d",
+        )
+        ax.set_xlim(-x_abs * 1.08, x_abs * 1.08)
+        ax.set_ylim(0.0, y_max * 1.06)
+        ax.set_xlabel("x (m)")
+        ax.set_ylabel("y (m)")
+        ax.grid(True, color="#e5edf2", linewidth=0.8)
+        ax.set_facecolor("#fbfdfe")
+        ax.spines[["top", "right"]].set_visible(False)
+
+        stat_rows.append(
+            {
+                "role": role,
+                "session_id": detail["session_id"],
+                "stage": payload["stage_label"],
+                "cached_frames": len(payload.get("trace_rows") or []),
+                "cache_scope": f"limit {limit_requested}" if limit_requested else "all",
+                "trajectory_frames": stats["trajectory_frames"],
+                "coverage": stats["coverage"],
+                "path_length_m": stats["path_length_m"],
+                "max_step_m": stats["max_step_m"],
+                "p95_step_m": stats["p95_step_m"],
+            }
+        )
+
+    fig.tight_layout(rect=[0, 0, 1, 0.88])
+    _render_matplotlib_figure(
+        fig,
+        caption=(
+            "Baseline과 replay 후보를 같은 x/y 축으로 비교합니다. "
+            "Display output이 있으면 그것을 우선 사용하고, 없으면 Tracker state로 fallback합니다."
+        ),
+    )
+    _render_table(stat_rows, key="compare-final-trajectory-stats", height=180)
+
+
 def _render_sequence_trajectory_overlay(trace_rows: list[dict], selected_stages: list[tuple[str, str, str]]) -> None:
     trajectories = [
         (stage, label, color, _collect_stage_trajectory(trace_rows, stage))
@@ -1349,6 +1668,61 @@ def _parameter_diff_rows(role_parameters: dict[str, list[dict]], *, show_unchang
         }
         row.update({role: role_values[role] if role_values[role] is not None else "" for role in role_parameters.keys()})
         row["changed"] = "yes" if changed else "no"
+        rows.append(row)
+    return rows
+
+
+def _run_select_label(session_id: str, runs_by_id: dict[str, dict]) -> str:
+    if not session_id:
+        return "None"
+    row = runs_by_id.get(session_id, {})
+    return f"{session_id} | {_annotation_summary(row, include_notes=True)}"
+
+
+def _compare_metric_display(value) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if abs(numeric) >= 100:
+        return f"{numeric:.1f}"
+    if abs(numeric) >= 10:
+        return f"{numeric:.2f}"
+    return f"{numeric:.4f}".rstrip("0").rstrip(".")
+
+
+def _compare_metric_delta(value, baseline_value, direction: str) -> str:
+    if value is None or baseline_value is None:
+        return "n/a"
+    try:
+        delta = float(value) - float(baseline_value)
+    except (TypeError, ValueError):
+        return "n/a"
+    if abs(delta) < 1e-9:
+        verdict = "same"
+    elif direction == "lower":
+        verdict = "improved" if delta < 0 else "regressed"
+    else:
+        verdict = "improved" if delta > 0 else "regressed"
+    sign = "+" if delta > 0 else ""
+    return f"{sign}{delta:.4f}".rstrip("0").rstrip(".") + f" ({verdict})"
+
+
+def _compare_metric_rows(run_roles: list[tuple[str, dict]], metrics: list[tuple[str, str, str]]) -> list[dict]:
+    if not run_roles:
+        return []
+    baseline = run_roles[0][1]
+    rows = []
+    for label, key, direction in metrics:
+        row = {"metric": label}
+        baseline_value = baseline.get(key)
+        for role, detail in run_roles:
+            value = detail.get(key)
+            row[role] = _compare_metric_display(value)
+            if role != run_roles[0][0]:
+                row[f"{role}_delta"] = _compare_metric_delta(value, baseline_value, direction)
         rows.append(row)
     return rows
 
@@ -1800,77 +2174,92 @@ def _compare_page() -> None:
         st.info("비교할 run이 2개 이상 필요합니다.")
         return
     st.subheader("Compare Runs")
+    st.caption(
+        "한 raw capture를 baseline으로 고정하고 replay 결과를 최대 3개까지 나란히 올려서 "
+        "알고리즘 수정 전후의 KPI와 최종 tracking 궤적 변화를 봅니다."
+    )
     runs_by_id = {row["session_id"]: row for row in runs}
     capture_counts: dict[str, int] = {}
     for row in runs:
         capture_id = row.get("capture_id")
         if capture_id:
             capture_counts[capture_id] = capture_counts.get(capture_id, 0) + 1
-    same_capture_default = any(count >= 2 for count in capture_counts.values())
-    same_capture_only = st.checkbox(
-        "Compare only runs from the same raw capture",
-        value=same_capture_default,
-        help="같은 raw capture replay끼리 비교하면 튜닝 변경 효과를 더 공정하게 볼 수 있습니다.",
-    )
 
-    before_candidates = (
-        [
-            row
-            for row in runs
-            if row.get("capture_id") and capture_counts.get(row.get("capture_id"), 0) >= 2
-        ]
-        if same_capture_only
-        else list(runs)
-    )
-    if not before_candidates:
-        st.warning("same raw capture 비교에 쓸 수 있는 raw-linked run이 없습니다.")
-        return
-    before_options = [row["session_id"] for row in before_candidates]
-    before_id = st.selectbox("Before", before_options, index=1 if len(before_options) > 1 else 0)
-    before_seed = runs_by_id.get(before_id, {})
-    before_capture = before_seed.get("capture_id")
-
-    after_candidates = [
-        row
-        for row in runs
-        if row["session_id"] != before_id
-        and (not same_capture_only or (before_capture and row.get("capture_id") == before_capture))
-    ]
-    if not after_candidates:
-        st.warning("선택한 Before와 같은 raw capture를 쓰는 다른 run이 없습니다. 필터를 끄거나 다른 Before를 골라 주세요.")
-        return
-    after_options = [row["session_id"] for row in after_candidates]
-    after_id = st.selectbox("After", after_options, index=0)
-
-    baseline_candidates = [
-        row
-        for row in runs
-        if not same_capture_only or (before_capture and row.get("capture_id") == before_capture)
-    ] or list(runs)
-    baseline_options = [row["session_id"] for row in baseline_candidates]
+    baseline_options = [row["session_id"] for row in runs]
     baseline_default = next(
         (
             index
-            for index, row in enumerate(baseline_candidates)
-            if (row.get("variant") or "").lower() == "baseline"
+            for index, row in enumerate(runs)
+            if (row.get("annotation_label") or "").lower() == "baseline"
+            or (row.get("variant") or "").lower() == "baseline"
         ),
-        baseline_options.index(before_id) if before_id in baseline_options else 0,
+        0,
     )
-    baseline_id = st.selectbox("Baseline", baseline_options, index=baseline_default)
+    baseline_id = st.selectbox(
+        "Baseline",
+        baseline_options,
+        index=baseline_default,
+        format_func=lambda session_id: _run_select_label(session_id, runs_by_id),
+        help="기준으로 둘 baseline run입니다. 보통 같은 raw capture를 replay한 튜닝 결과들과 비교합니다.",
+    )
+    baseline_seed = runs_by_id.get(baseline_id, {})
+    baseline_capture = baseline_seed.get("capture_id")
+    same_capture_default = bool(baseline_capture and capture_counts.get(baseline_capture, 0) >= 2)
+    same_capture_only = st.checkbox(
+        "Compare only runs from the baseline raw capture",
+        value=same_capture_default,
+        help="같은 raw capture replay끼리 비교하면 튜닝 변경 효과를 더 공정하게 볼 수 있습니다.",
+    )
+    replay_candidates = (
+        [
+            row
+            for row in runs
+            if row["session_id"] != baseline_id
+            and baseline_capture
+            and row.get("capture_id") == baseline_capture
+        ]
+        if same_capture_only
+        else [row for row in runs if row["session_id"] != baseline_id]
+    )
+    replay_options = [""] + [row["session_id"] for row in replay_candidates]
+    if len(replay_options) == 1:
+        st.warning("선택한 baseline과 비교할 replay run이 없습니다. 필터를 끄거나 다른 baseline을 골라 주세요.")
+        return
+
+    slot_columns = st.columns(3)
+    replay_ids: list[str] = []
+    for slot_index, column in enumerate(slot_columns, start=1):
+        default_index = slot_index if slot_index < len(replay_options) else 0
+        selected = column.selectbox(
+            f"Replay {slot_index}",
+            replay_options,
+            index=default_index,
+            key=f"compare-replay-slot-{slot_index}",
+            format_func=lambda session_id: _run_select_label(session_id, runs_by_id),
+        )
+        if selected and selected not in replay_ids:
+            replay_ids.append(selected)
+
+    if not replay_ids:
+        st.info("비교할 replay run을 하나 이상 선택해 주세요.")
+        return
 
     baseline = registry.fetch_run_detail(PROJECT_ROOT, baseline_id)
-    before = registry.fetch_run_detail(PROJECT_ROOT, before_id)
-    after = registry.fetch_run_detail(PROJECT_ROOT, after_id)
-    if baseline is None or before is None or after is None:
+    replay_details = [
+        detail
+        for detail in (registry.fetch_run_detail(PROJECT_ROOT, session_id) for session_id in replay_ids)
+        if detail is not None
+    ]
+    if baseline is None or not replay_details:
         return
+    run_roles = [("baseline", baseline)] + [
+        (f"replay{index}", detail)
+        for index, detail in enumerate(replay_details, start=1)
+    ]
 
     st.markdown("### Run Context")
     _render_table(
-        [
-            _run_context_row("baseline", baseline),
-            _run_context_row("before", before),
-            _run_context_row("after", after),
-        ],
+        [_run_context_row(role, detail) for role, detail in run_roles],
         key="compare-run-context",
     )
 
@@ -1886,28 +2275,18 @@ def _compare_page() -> None:
         ("Path Residual RMS", "path_local_residual_rms_m", "lower"),
         ("Path Jump Ratio", "path_jump_ratio", "lower"),
     ]
-    rows = []
-    for label, key, direction in metrics:
-        before_value = before.get(key)
-        after_value = after.get(key)
-        delta = None if before_value is None or after_value is None else float(after_value) - float(before_value)
-        if delta is None:
-            verdict = "n/a"
-        elif direction == "lower":
-            verdict = "improved" if delta < 0 else "regressed" if delta > 0 else "same"
-        else:
-            verdict = "improved" if delta > 0 else "regressed" if delta < 0 else "same"
-        rows.append({"metric": label, "before": before_value, "after": after_value, "delta": delta, "verdict": verdict})
 
-    st.markdown("### KPI Diff")
-    _render_table(rows, key="compare-metrics")
+    st.markdown("### KPI vs Baseline")
+    _render_table(_compare_metric_rows(run_roles, metrics), key="compare-metrics")
+
+    st.markdown("### Final Tracking Trajectory")
+    _render_compare_final_trajectory_grid(run_roles)
 
     st.markdown("### Parameter Diff")
     show_unchanged_params = st.checkbox("Show unchanged parameters", value=False, key="compare-show-unchanged-params")
     role_parameters = {
-        "baseline": registry.fetch_run_parameters(PROJECT_ROOT, baseline_id),
-        "before": registry.fetch_run_parameters(PROJECT_ROOT, before_id),
-        "after": registry.fetch_run_parameters(PROJECT_ROOT, after_id),
+        role: registry.fetch_run_parameters(PROJECT_ROOT, detail["session_id"])
+        for role, detail in run_roles
     }
     parameter_diff = _parameter_diff_rows(role_parameters, show_unchanged=show_unchanged_params)
     if not any(role_parameters.values()):
@@ -1915,28 +2294,23 @@ def _compare_page() -> None:
     else:
         _render_table(parameter_diff, key="compare-parameter-diff", height=360)
 
-    left, right = st.columns(2)
-    with left:
-        st.markdown(f"#### Before `{before_id}`")
-        _render_file_links(
-            {
-                "performance report": Path(before["session_dir"]) / "performance_report.html",
-                "trajectory replay": Path(before["session_dir"]) / "trajectory_replay.html",
-            }
-        )
-    with right:
-        st.markdown(f"#### After `{after_id}`")
-        _render_file_links(
-            {
-                "performance report": Path(after["session_dir"]) / "performance_report.html",
-                "trajectory replay": Path(after["session_dir"]) / "trajectory_replay.html",
-            }
-        )
+    st.markdown("### Local Reports")
+    report_columns = st.columns(min(len(run_roles), 4))
+    for index, (role, detail) in enumerate(run_roles):
+        with report_columns[index % len(report_columns)]:
+            st.markdown(f"#### {role} `{detail['session_id']}`")
+            _render_file_links(
+                {
+                    "performance report": Path(detail["session_dir"]) / "performance_report.html",
+                    "trajectory replay": Path(detail["session_dir"]) / "trajectory_replay.html",
+                }
+            )
 
-    if before.get("capture_id") and before.get("capture_id") == after.get("capture_id"):
-        st.success(f"두 run 모두 같은 raw capture `{before['capture_id']}` 기준입니다.")
+    selected_capture_ids = {detail.get("capture_id") for _, detail in run_roles if detail.get("capture_id")}
+    if len(selected_capture_ids) == 1:
+        st.success(f"모든 선택 run이 같은 raw capture `{next(iter(selected_capture_ids))}` 기준입니다.")
     else:
-        st.warning("두 run의 raw capture가 다를 수 있습니다. 공정 비교인지 다시 확인하는 편이 좋습니다.")
+        st.warning("선택한 run들의 raw capture가 다를 수 있습니다. 공정 비교인지 다시 확인하는 편이 좋습니다.")
 
 
 def _analytics_page() -> None:
@@ -2122,6 +2496,276 @@ def _analytics_page() -> None:
             "summary.json": session_dir / "summary.json",
         }
     )
+
+
+def _eval_page() -> None:
+    include_templates = st.sidebar.checkbox("Show template tasks", value=False, key="eval-show-templates")
+    status_filter = st.sidebar.selectbox(
+        "Eval Status Filter",
+        ["all", "pass", "fail", "dry_run"],
+        key="eval-status-filter",
+    )
+
+    tasks = _eval_task_files(include_templates=include_templates)
+    all_outcomes = _load_eval_outcomes()
+    outcomes = all_outcomes
+    if status_filter != "all":
+        outcomes = [outcome for outcome in outcomes if _eval_status(outcome) == status_filter]
+
+    st.subheader("Eval Harness")
+    st.caption(
+        "같은 raw capture를 replay하고, task JSON의 acceptance criteria로 candidate run을 PASS/FAIL 판정합니다. "
+        "새 replay를 실행하면 일반 run처럼 `logs/live_motion_viewer/<session_id>` 아래에 세션이 생깁니다."
+    )
+
+    status_counts = {"pass": 0, "fail": 0, "dry_run": 0, "unknown": 0}
+    for outcome in all_outcomes:
+        status = _eval_status(outcome)
+        status_counts[status] = status_counts.get(status, 0) + 1
+    a, b, c, d = st.columns(4)
+    a.metric("Eval Runs", len(all_outcomes))
+    b.metric("PASS", status_counts.get("pass", 0))
+    c.metric("FAIL", status_counts.get("fail", 0))
+    d.metric("DRY", status_counts.get("dry_run", 0))
+
+    st.markdown("### Run Eval")
+    if not tasks:
+        st.info("`docs/evals/tasks` 아래에 실행할 task JSON이 없습니다.")
+    else:
+        task_by_name = {path.name: path for path in tasks}
+        task_names = list(task_by_name.keys())
+        default_name = (
+            "diagonal_positive_x_trajectory_fidelity.json"
+            if "diagonal_positive_x_trajectory_fidelity.json" in task_by_name
+            else task_names[0]
+        )
+        selected_task_name = st.selectbox(
+            "Task",
+            task_names,
+            index=task_names.index(default_name),
+            key="eval-task",
+        )
+        task_path = task_by_name[selected_task_name]
+        task = _load_json_file(task_path)
+        task_name = str(task.get("name") or task_path.stem)
+
+        latest_for_task = next(
+            (
+                outcome
+                for outcome in all_outcomes
+                if _nested_get(outcome, "task", "name", default="") == task_name
+            ),
+            None,
+        )
+        latest_baseline = _nested_get(latest_for_task, "baseline", "session_id", default="") if latest_for_task else ""
+
+        runs = registry.fetch_runs(PROJECT_ROOT)
+        runs_by_id = {row["session_id"]: row for row in runs}
+        run_options = [""] + [row["session_id"] for row in runs]
+        baseline_default = str(_nested_get(task, "baseline", "session", default="") or latest_baseline or "")
+        if not baseline_default:
+            baseline_default = next(
+                (
+                    row["session_id"]
+                    for row in runs
+                    if (row.get("annotation_label") or "").lower() == "baseline"
+                ),
+                "",
+            )
+        baseline_index = run_options.index(baseline_default) if baseline_default in run_options else 0
+
+        top_left, top_right = st.columns([1.2, 1])
+        with top_left:
+            st.markdown("#### Task Summary")
+            _render_table(
+                [
+                    {
+                        "name": task_name,
+                        "capture": task.get("capture") or "",
+                        "speed": task.get("speed") or "",
+                        "baseline_tuning": _nested_get(task, "baseline", "tuning", default=""),
+                        "candidate_tuning": _nested_get(task, "candidate", "tuning", default=""),
+                        "criteria": len(task.get("acceptance") or []),
+                    }
+                ],
+                key=f"eval-task-summary-{task_name}",
+            )
+            if task.get("description"):
+                st.caption(str(task.get("description")))
+        with top_right:
+            st.markdown("#### Local Files")
+            _render_file_links(
+                {
+                    "task json": task_path,
+                    "eval runs": EVAL_RUNS_DIR,
+                    "eval README": PROJECT_ROOT / "docs" / "evals" / "README.md",
+                }
+            )
+
+        mode = st.radio(
+            "Execution Mode",
+            ["새 candidate replay 실행", "기존 candidate session 채점"],
+            horizontal=True,
+            key="eval-execution-mode",
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            baseline_session = st.selectbox(
+                "Baseline Session",
+                run_options,
+                index=baseline_index,
+                format_func=lambda session_id: _run_select_label(session_id, runs_by_id),
+                help="delta 기준이 되는 baseline입니다. 비워두면 task 설정대로 baseline replay를 실행할 수 있습니다.",
+                key="eval-baseline-session",
+            )
+        with c2:
+            candidate_session = ""
+            if mode == "기존 candidate session 채점":
+                candidate_session = st.selectbox(
+                    "Candidate Session",
+                    run_options,
+                    index=0,
+                    format_func=lambda session_id: _run_select_label(session_id, runs_by_id),
+                    help="이미 생성된 replay/live run을 task criteria로 채점합니다.",
+                    key="eval-candidate-session",
+                )
+            else:
+                st.info("실행하면 새 replay session이 생성되고, 그 session이 candidate가 됩니다.")
+
+        option_cols = st.columns(4)
+        with option_cols[0]:
+            build_stage_cache = st.checkbox("Fail 시 Stage Cache", value=True, key="eval-stage-cache")
+        with option_cols[1]:
+            force_baseline = st.checkbox("Force Baseline Replay", value=False, key="eval-force-baseline")
+        with option_cols[2]:
+            skip_baseline = st.checkbox("Skip Baseline", value=False, key="eval-skip-baseline")
+        with option_cols[3]:
+            dry_run = st.checkbox("Dry Run", value=False, key="eval-dry-run")
+        timeout_s = st.number_input(
+            "Subprocess Timeout Seconds (0 = no timeout)",
+            min_value=0,
+            max_value=3600,
+            value=0,
+            step=30,
+            key="eval-timeout",
+        )
+
+        command = _build_eval_command(
+            task_path,
+            mode=mode,
+            baseline_session=baseline_session,
+            candidate_session=candidate_session,
+            no_stage_cache=not build_stage_cache,
+            force_baseline=force_baseline,
+            skip_baseline=skip_baseline,
+            dry_run=dry_run,
+            timeout_s=float(timeout_s) if timeout_s else None,
+        )
+        with st.expander("Command Preview", expanded=False):
+            st.code(subprocess.list2cmdline(command), language="powershell")
+
+        disabled = mode == "기존 candidate session 채점" and not candidate_session
+        if st.button("Run Eval Task", width="stretch", disabled=disabled):
+            before_dirs = {path.parent.resolve() for path in _eval_outcome_files()}
+            with st.spinner("eval task를 실행하는 중입니다. replay 모드면 새 candidate session이 생성됩니다..."):
+                completed = _run_eval_command(command)
+            st.code(completed.stdout[-6000:] if completed.stdout else "(no stdout)", language="text")
+            if completed.stderr:
+                with st.expander("stderr", expanded=False):
+                    st.code(completed.stderr[-6000:], language="text")
+
+            outcome_path = _extract_outcome_path(completed.stdout or "")
+            after_dirs = {path.parent.resolve() for path in _eval_outcome_files()} - before_dirs
+            if outcome_path is None and after_dirs:
+                outcome_path = _latest_outcome_for_task(task_name, after_dirs=after_dirs)
+            outcome = _load_json_file(outcome_path) if outcome_path else {}
+            if outcome:
+                status = _eval_status(outcome)
+                if status == "pass":
+                    st.success(f"PASS: `{task_name}`")
+                elif status == "fail":
+                    st.error(f"FAIL: `{task_name}`")
+                else:
+                    st.warning(f"{_eval_status_mark(status)}: `{task_name}`")
+                candidate = outcome.get("candidate") or {}
+                st.caption(
+                    f"candidate=`{candidate.get('session_id') or 'n/a'}` | "
+                    f"outcome=`{_relative_to_project(outcome_path)}`"
+                )
+                if completed.returncode == 0 or status in {"pass", "fail", "dry_run"}:
+                    registry.refresh_registry(PROJECT_ROOT)
+                    all_outcomes = _load_eval_outcomes()
+                    outcomes = all_outcomes if status_filter == "all" else [
+                        item for item in all_outcomes if _eval_status(item) == status_filter
+                    ]
+            elif completed.returncode != 0:
+                st.error(f"eval command failed before writing outcome.json (exit {completed.returncode}).")
+            else:
+                st.warning("eval command는 끝났지만 outcome.json을 찾지 못했습니다.")
+
+    st.markdown("### Recent Eval Outcomes")
+    if outcomes:
+        _render_table(_eval_outcome_rows(outcomes[:40]), key="eval-outcomes", height=360)
+
+        selected_outcome_path = st.selectbox(
+            "Outcome Detail",
+            [outcome["_outcome_path"] for outcome in outcomes],
+            format_func=lambda value: _relative_to_project(value),
+            key="eval-outcome-detail",
+        )
+        selected = next((outcome for outcome in outcomes if outcome["_outcome_path"] == selected_outcome_path), None)
+        if selected:
+            status = _eval_status(selected)
+            cards = st.columns(4)
+            candidate = selected.get("candidate") or {}
+            baseline = selected.get("baseline") or {}
+            cards[0].markdown(
+                _stage_card("status", _eval_status_mark(status), "task verdict", _eval_status_tone(status)),
+                unsafe_allow_html=True,
+            )
+            cards[1].markdown(
+                _stage_card("criteria", _criterion_pass_text(selected.get("criteria") or []), "passed / total"),
+                unsafe_allow_html=True,
+            )
+            cards[2].markdown(
+                _stage_card("candidate", candidate.get("session_id") or "n/a", "graded run"),
+                unsafe_allow_html=True,
+            )
+            cards[3].markdown(
+                _stage_card("baseline", baseline.get("session_id") or "n/a", "comparison run"),
+                unsafe_allow_html=True,
+            )
+
+            st.markdown("#### Criteria")
+            _render_table(
+                [
+                    {
+                        "result": "PASS" if item.get("passed") else "FAIL",
+                        "name": item.get("name") or "",
+                        "metric": item.get("metric") or "",
+                        "mode": item.get("mode") or "",
+                        "actual": item.get("actual"),
+                        "op": item.get("op") or "",
+                        "expected": item.get("expected"),
+                    }
+                    for item in selected.get("criteria") or []
+                ],
+                key="eval-outcome-criteria",
+            )
+
+            candidate_dir = candidate.get("session_dir")
+            run_dir = selected.get("_run_dir")
+            st.markdown("#### Local Reports / Files")
+            _render_file_links(
+                {
+                    "outcome.json": selected_outcome_path,
+                    "eval run folder": run_dir,
+                    "candidate trajectory": Path(candidate_dir) / "trajectory_replay.html" if candidate_dir else None,
+                    "candidate summary": Path(candidate_dir) / "summary.json" if candidate_dir else None,
+                }
+            )
+    else:
+        st.info("아직 저장된 eval outcome이 없습니다. 위에서 task를 실행하면 PASS/FAIL 기록이 여기에 쌓입니다.")
 
 
 def _stage_timeline_page() -> None:
@@ -2354,8 +2998,9 @@ def _stage_page() -> None:
             "Frame Limit (0 = all frames)",
             min_value=0,
             max_value=5000,
-            value=int((manifest or {}).get("frame_count") or 60),
+            value=0 if not manifest else int((manifest or {}).get("frame_limit_requested") or 0),
             step=10,
+            help="Compare/논문용 분석은 0으로 전체 프레임을 생성하는 편이 안전합니다. 작은 값은 빠른 샘플 디버깅용입니다.",
         )
     with force_col:
         force_rebuild = st.checkbox("Force Rebuild", value=False)
@@ -2578,7 +3223,16 @@ def main() -> None:
         st.caption(f"Last refresh: `{overview['last_refresh_at'] or 'n/a'}`")
         page = st.radio(
             "Page",
-            ["Dashboard", "Runs", "Captures", "Compare", "Analytics/Triage", "Stage Timeline", "Stage Debug"],
+            [
+                "Dashboard",
+                "Runs",
+                "Captures",
+                "Compare",
+                "Eval Harness",
+                "Analytics/Triage",
+                "Stage Timeline",
+                "Stage Debug",
+            ],
         )
 
     if page == "Dashboard":
@@ -2589,6 +3243,8 @@ def main() -> None:
         _captures_page()
     elif page == "Compare":
         _compare_page()
+    elif page == "Eval Harness":
+        _eval_page()
     elif page == "Analytics/Triage":
         _analytics_page()
     elif page == "Stage Timeline":

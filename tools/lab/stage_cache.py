@@ -271,6 +271,18 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict):
         tentative_gate_factor=float(runtime_summary.get("track_tentative_gate_factor", 0.5)),
         birth_suppression_radius_m=float(runtime_summary.get("track_birth_suppression_radius_m", 0.0)),
         primary_track_birth_scale=float(runtime_summary.get("track_primary_track_birth_scale", 1.0)),
+        birth_suppression_weak_radius_scale=float(
+            runtime_summary.get("track_birth_suppression_weak_radius_scale", 1.0)
+        ),
+        birth_suppression_score_ratio=float(
+            runtime_summary.get("track_birth_suppression_score_ratio", 0.0)
+        ),
+        birth_suppression_confidence_ratio=float(
+            runtime_summary.get("track_birth_suppression_confidence_ratio", 0.0)
+        ),
+        birth_suppression_doppler_bins=int(
+            runtime_summary.get("track_birth_suppression_doppler_bins", 0)
+        ),
         birth_suppression_miss_tolerance=int(
             runtime_summary.get("track_birth_suppression_miss_tolerance", 0)
         ),
@@ -601,18 +613,28 @@ def _frame_bottleneck(feature: dict) -> tuple[str, float, str]:
         return "detection_dropout", 8.0, "detection 후보가 0개입니다."
     if int(feature.get("tracker_input_count") or 0) > 0 and int(feature.get("confirmed_track_count") or 0) == 0:
         return "tracking_not_confirming", 7.0, "tracker input은 있지만 confirmed track이 없습니다."
-    if bool(feature.get("lead_switch")):
-        return "lead_id_switch", 7.0, "lead track id가 이전 프레임 대비 변경되었습니다."
     lead_step = feature.get("lead_step_m")
-    if lead_step is not None and float(lead_step) >= 0.45:
-        return "path_jump", 8.0, f"lead step={float(lead_step):.3f}m로 큽니다."
-    residual = feature.get("lead_measurement_residual_m")
-    if residual is not None and float(residual) >= 0.18:
-        return "representative_point_jump", 7.5, f"lead residual={float(residual):.3f}m로 큽니다."
+    lead_step_value = None if lead_step is None else float(lead_step)
+    if bool(feature.get("lead_switch")):
+        if lead_step_value is not None and lead_step_value >= 0.45:
+            return "lead_id_switch", 8.5, f"lead id 변경과 함께 step={lead_step_value:.3f}m 점프가 발생했습니다."
+        return "lead_id_switch", 7.0, "lead track id가 이전 프레임 대비 변경되었습니다."
+    if lead_step_value is not None and lead_step_value >= 0.45:
+        return "path_jump", 8.0, f"final lead step={lead_step_value:.3f}m로 큽니다."
     candidate_count = int(feature.get("detection_count") or 0)
     confirmed_count = int(feature.get("confirmed_track_count") or 0)
     if confirmed_count > 0 and candidate_count / max(confirmed_count, 1) >= 2.0:
         return "detection_over_split", 6.0, "confirmed track 대비 detection 후보가 많습니다."
+    residual = feature.get("lead_measurement_residual_m")
+    if residual is not None and float(residual) >= 1.0:
+        return "representative_point_jump", 6.5, f"lead residual={float(residual):.3f}m로 매우 큽니다."
+    if (
+        residual is not None
+        and float(residual) >= 0.45
+        and lead_step_value is not None
+        and lead_step_value >= 0.25
+    ):
+        return "representative_point_jump", 6.0, f"lead residual={float(residual):.3f}m, step={lead_step_value:.3f}m입니다."
     rai_contrast = feature.get("rai_peak_to_median")
     if rai_contrast is not None and float(rai_contrast) <= 2.0:
         return "weak_rai_evidence", 5.5, "RAI peak contrast가 낮습니다."

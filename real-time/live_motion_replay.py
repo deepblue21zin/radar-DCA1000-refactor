@@ -38,6 +38,10 @@ def parse_args():
         action="store_true",
         help="Open the replay UI and wait for the Start Replay button instead of auto-starting.",
     )
+    parser.add_argument(
+        "--tuning",
+        help="Optional tuning JSON path, for example config/live_motion_tuning_multi.json.",
+    )
     return parser.parse_args()
 
 
@@ -63,9 +67,16 @@ def resolve_capture_path(project_root: Path, capture_arg: str | None) -> Path:
 
 def main():
     args = parse_args()
+    capture_path = resolve_capture_path(PROJECT_ROOT, args.capture)
+    if args.tuning:
+        tuning_path = resolve_project_path(PROJECT_ROOT, args.tuning)
+        if not tuning_path.exists():
+            raise SystemExit(f"Tuning file not found: {tuning_path}")
+        os.environ["RADAR_TUNING_PATH"] = str(tuning_path)
+        print(f"Replay tuning: {tuning_path}")
+
     from live_motion_viewer import MotionViewer
 
-    capture_path = resolve_capture_path(PROJECT_ROOT, args.capture)
     print(f"Replay source: {capture_path}")
     viewer = MotionViewer(
         input_mode="replay",

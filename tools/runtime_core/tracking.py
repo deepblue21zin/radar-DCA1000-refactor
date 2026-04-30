@@ -1,228 +1,18 @@
 """Lightweight multi-target Kalman tracker for radar cluster centroids."""
 
-from dataclasses import dataclass
-from enum import Enum, auto
 from math import atan2, degrees, hypot
-from pathlib import Path
 from typing import List, Optional, Tuple
-import sys
 
 import numpy as np
 
-from .detection import _refine_body_center_from_patch
-
-try:
-    from scipy.optimize import linear_sum_assignment as _scipy_linear_sum_assignment
-except ImportError:
-    _scipy_linear_sum_assignment = None
-
-
-class _SimpleKalmanFilter:
-    """Minimal linear Kalman filter fallback."""
-
-    def __init__(self, dim_x: int, dim_z: int):
-        self.dim_x = dim_x
-        self.dim_z = dim_z
-        self.x = np.zeros((dim_x, 1), dtype=float)
-        self.F = np.eye(dim_x, dtype=float)
-        self.H = np.zeros((dim_z, dim_x), dtype=float)
-        self.P = np.eye(dim_x, dtype=float)
-        self.Q = np.eye(dim_x, dtype=float)
-        self.R = np.eye(dim_z, dtype=float)
-
-    def predict(self) -> np.ndarray:
-        self.x = self.F @ self.x
-        self.P = self.F @ self.P @ self.F.T + self.Q
-        return self.x
-
-    def update(self, z: np.ndarray) -> np.ndarray:
-        y = z - (self.H @ self.x)
-        pht = self.P @ self.H.T
-        s = self.H @ pht + self.R
-        try:
-            k = np.linalg.solve(s, pht.T).T
-        except np.linalg.LinAlgError:
-            k = pht @ np.linalg.pinv(s)
-        self.x = self.x + (k @ y)
-        identity = np.eye(self.dim_x, dtype=float)
-        kh = k @ self.H
-        self.P = (identity - kh) @ self.P @ (identity - kh).T + k @ self.R @ k.T
-        return self.x
-
-
-def _fallback_q_discrete_white_noise(
-    dim: int,
-    dt: float = 1.0,
-    var: float = 1.0,
-    block_size: int = 1,
-    order_by_dim: bool = True,
-) -> np.ndarray:
-    if dim != 2:
-        raise NotImplementedError("Fallback Q builder only supports dim=2.")
-
-    q = np.array(
-        [[0.25 * dt**4, 0.5 * dt**3], [0.5 * dt**3, dt**2]],
-        dtype=float,
-    ) * float(var)
-
-    if block_size == 1:
-        return q
-    if block_size < 1:
-        raise ValueError("block_size must be positive.")
-
-    if order_by_dim:
-        return np.kron(np.eye(block_size, dtype=float), q)
-    return np.kron(q, np.eye(block_size, dtype=float))
-
-
-def _load_filterpy():
-    """Import filterpy, falling back to a local linear KF implementation."""
-    try:
-        from filterpy.common import Q_discrete_white_noise
-        from filterpy.kalman import KalmanFilter
-        return KalmanFilter, Q_discrete_white_noise
-    except ImportError:
-        vendor_root = Path(__file__).resolve().parents[1] / "filterpy-master"
-        if vendor_root.exists() and str(vendor_root) not in sys.path:
-            sys.path.insert(0, str(vendor_root))
-        try:
-            from filterpy.common import Q_discrete_white_noise
-            from filterpy.kalman import KalmanFilter
-            return KalmanFilter, Q_discrete_white_noise
-        except ImportError:
-            return _SimpleKalmanFilter, _fallback_q_discrete_white_noise
-
-
-def _hungarian_fallback(cost_matrix: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Pure-numpy assignment fallback for rectangular cost matrices."""
-    cost = np.asarray(cost_matrix, dtype=float)
-    if cost.ndim != 2:
-        raise ValueError("cost_matrix must be 2-dimensional.")
-    if cost.size == 0:
-        return np.array([], dtype=int), np.array([], dtype=int)
-
-    transposed = False
-    rows, cols = cost.shape
-    if rows > cols:
-        cost = cost.T
-        rows, cols = cost.shape
-        transposed = True
-
-    u = np.zeros(rows + 1, dtype=float)
-    v = np.zeros(cols + 1, dtype=float)
-    p = np.zeros(cols + 1, dtype=int)
-    way = np.zeros(cols + 1, dtype=int)
-
-    for row in range(1, rows + 1):
-        p[0] = row
-        col0 = 0
-        minv = np.full(cols + 1, np.inf, dtype=float)
-        used = np.zeros(cols + 1, dtype=bool)
-        while True:
-            used[col0] = True
-            row0 = p[col0]
-            delta = np.inf
-            col1 = 0
-            for col in range(1, cols + 1):
-                if used[col]:
-                    continue
-                cur = cost[row0 - 1, col - 1] - u[row0] - v[col]
-                if cur < minv[col]:
-                    minv[col] = cur
-                    way[col] = col0
-                if minv[col] < delta:
-                    delta = minv[col]
-                    col1 = col
-            for col in range(cols + 1):
-                if used[col]:
-                    u[p[col]] += delta
-                    v[col] -= delta
-                else:
-                    minv[col] -= delta
-            col0 = col1
-            if p[col0] == 0:
-                break
-
-        while True:
-            col1 = way[col0]
-            p[col0] = p[col1]
-            col0 = col1
-            if col0 == 0:
-                break
-
-    row_ind = []
-    col_ind = []
-    for col in range(1, cols + 1):
-        if p[col] != 0:
-            row_ind.append(p[col] - 1)
-            col_ind.append(col - 1)
-
-    row_ind_array = np.asarray(row_ind, dtype=int)
-    col_ind_array = np.asarray(col_ind, dtype=int)
-    order = np.argsort(row_ind_array)
-    row_ind_array = row_ind_array[order]
-    col_ind_array = col_ind_array[order]
-
-    if transposed:
-        return col_ind_array, row_ind_array
-    return row_ind_array, col_ind_array
-
-
-def _linear_sum_assignment(cost_matrix: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    if _scipy_linear_sum_assignment is not None:
-        return _scipy_linear_sum_assignment(cost_matrix)
-    return _hungarian_fallback(cost_matrix)
+from .detection_core.refinement import refine_body_center_from_patch as _refine_body_center_from_patch
+from .tracking_core.assignment import linear_sum_assignment as _linear_sum_assignment
+from .tracking_core.kalman import load_filterpy as _load_filterpy
+from .tracking_core.types import Track as _Track, TrackEstimate, TrackState
 
 
 def _nearest_axis_bin(axis_values, value) -> int:
     return int(np.argmin(np.abs(np.asarray(axis_values) - float(value))))
-
-
-class TrackState(Enum):
-    TENTATIVE = auto()
-    CONFIRMED = auto()
-    LOST = auto()
-
-
-@dataclass
-class TrackEstimate:
-    track_id: int
-    x_m: float
-    y_m: float
-    vx_m_s: float
-    vy_m_s: float
-    range_m: float
-    angle_deg: float
-    doppler_bin: int
-    rdi_peak: float
-    rai_peak: float
-    score: float
-    confidence: float
-    age: int
-    hits: int
-    misses: int
-    measurement_quality: float = 1.0
-    measurement_residual_m: float = 0.0
-    is_primary: bool = False
-
-
-@dataclass
-class _Track:
-    track_id: int
-    kf: object
-    age: int
-    hits: int
-    misses: int
-    last_update_ts: float
-    confidence: float
-    score: float
-    state: TrackState
-    consecutive_hits: int
-    doppler_bin: int
-    rdi_peak: float
-    rai_peak: float
-    last_measurement_quality: float = 1.0
-    last_measurement_residual_m: float = 0.0
 
 
 class MultiTargetTracker:
@@ -247,6 +37,10 @@ class MultiTargetTracker:
         tentative_gate_factor=0.5,
         birth_suppression_radius_m=0.0,
         primary_track_birth_scale=1.0,
+        birth_suppression_weak_radius_scale=1.0,
+        birth_suppression_score_ratio=0.0,
+        birth_suppression_confidence_ratio=0.0,
+        birth_suppression_doppler_bins=0,
         birth_suppression_miss_tolerance=0,
         primary_track_hold_frames=0,
         lateral_deadband_m=0.0,
@@ -299,6 +93,12 @@ class MultiTargetTracker:
             raise ValueError("birth_suppression_radius_m must be non-negative.")
         if primary_track_birth_scale <= 0:
             raise ValueError("primary_track_birth_scale must be positive.")
+        if birth_suppression_weak_radius_scale < 1.0:
+            raise ValueError("birth_suppression_weak_radius_scale must be >= 1.")
+        if birth_suppression_score_ratio < 0 or birth_suppression_confidence_ratio < 0:
+            raise ValueError("birth suppression ratios must be non-negative.")
+        if birth_suppression_doppler_bins < 0:
+            raise ValueError("birth_suppression_doppler_bins must be non-negative.")
         if birth_suppression_miss_tolerance < 0:
             raise ValueError("birth_suppression_miss_tolerance must be non-negative.")
         if primary_track_hold_frames < 0:
@@ -347,6 +147,10 @@ class MultiTargetTracker:
         self.tentative_gate_factor = float(tentative_gate_factor)
         self.birth_suppression_radius_m = float(birth_suppression_radius_m)
         self.primary_track_birth_scale = float(primary_track_birth_scale)
+        self.birth_suppression_weak_radius_scale = float(birth_suppression_weak_radius_scale)
+        self.birth_suppression_score_ratio = float(birth_suppression_score_ratio)
+        self.birth_suppression_confidence_ratio = float(birth_suppression_confidence_ratio)
+        self.birth_suppression_doppler_bins = int(birth_suppression_doppler_bins)
         self.birth_suppression_miss_tolerance = int(birth_suppression_miss_tolerance)
         self.primary_track_hold_frames = int(primary_track_hold_frames)
         self.lateral_deadband_m = float(lateral_deadband_m)
@@ -444,15 +248,71 @@ class MultiTargetTracker:
             return 1
         return 0
 
-    def _update_primary_track_id(self) -> None:
-        current_primary = self._track_by_id(self._primary_track_id)
-        if (
-            current_primary is not None
-            and current_primary.state != TrackState.TENTATIVE
-            and current_primary.misses <= self.primary_track_hold_frames
-        ):
-            return
+    @staticmethod
+    def _track_is_weak_confirmed(track: _Track) -> bool:
+        if track.state != TrackState.CONFIRMED:
+            return False
+        low_quality = float(track.confidence) < 0.08 and float(track.score) < 0.2
+        residually_weak = (
+            float(track.confidence) < 0.12
+            and float(track.score) < 0.35
+            and float(track.last_measurement_residual_m) >= 0.45
+        )
+        return bool(low_quality or residually_weak)
 
+    def _primary_candidate_key(self, track: _Track) -> tuple:
+        capped_hits = min(int(track.hits), int(self.min_confirmed_hits) + 4)
+        residual_m = min(float(track.last_measurement_residual_m), 9.99)
+        return (
+            self._track_state_rank(track),
+            -int(track.misses),
+            float(track.confidence),
+            float(track.score),
+            float(track.last_measurement_quality),
+            -residual_m,
+            capped_hits,
+            int(track.consecutive_hits),
+            int(track.age),
+        )
+
+    def _primary_handoff_needed(self, current: _Track, candidate: _Track) -> bool:
+        if int(current.track_id) == int(candidate.track_id):
+            return False
+        if current.state == TrackState.TENTATIVE:
+            return True
+        if current.misses > self.primary_track_hold_frames:
+            return True
+        if candidate.state == TrackState.TENTATIVE and candidate.hits < self.min_confirmed_hits:
+            return False
+        if not self._track_is_weak_confirmed(current):
+            return False
+
+        current_x = float(current.kf.x[0][0])
+        current_y = float(current.kf.x[1][0])
+        candidate_x = float(candidate.kf.x[0][0])
+        candidate_y = float(candidate.kf.x[1][0])
+        handoff_distance_m = float(hypot(candidate_x - current_x, candidate_y - current_y))
+        current_range_m = float(hypot(current_x, current_y))
+        handoff_limit_m = max(0.55, min(0.9, 0.35 + (0.12 * current_range_m)))
+        if current.misses <= self.primary_track_hold_frames and handoff_distance_m > handoff_limit_m:
+            return False
+
+        candidate_strong = float(candidate.confidence) >= 0.25 or float(candidate.score) >= 1.0
+        confidence_advantage = float(candidate.confidence) >= max(
+            float(current.confidence) * 3.0,
+            float(current.confidence) + 0.15,
+        )
+        score_advantage = float(candidate.score) >= max(
+            float(current.score) * 3.0,
+            float(current.score) + 0.5,
+        )
+        residual_advantage = (
+            float(candidate.last_measurement_residual_m) + 0.15
+            <= float(current.last_measurement_residual_m)
+        ) or float(current.last_measurement_residual_m) >= 0.45
+        return bool(candidate_strong and residual_advantage and (confidence_advantage or score_advantage))
+
+    def _update_primary_track_id(self) -> None:
         candidates = [
             track
             for track in self._tracks
@@ -462,18 +322,16 @@ class MultiTargetTracker:
             self._primary_track_id = None
             return
 
-        best_track = max(
-            candidates,
-            key=lambda track: (
-                self._track_state_rank(track),
-                -track.misses,
-                track.hits,
-                track.consecutive_hits,
-                track.confidence,
-                track.score,
-                track.age,
-            ),
-        )
+        best_track = max(candidates, key=self._primary_candidate_key)
+        current_primary = self._track_by_id(self._primary_track_id)
+        if (
+            current_primary is not None
+            and current_primary.state != TrackState.TENTATIVE
+            and current_primary.misses <= self.primary_track_hold_frames
+            and not self._primary_handoff_needed(current_primary, best_track)
+        ):
+            return
+
         self._primary_track_id = best_track.track_id
 
     def _birth_suppression_radius_for_track(self, track: _Track) -> float:
@@ -481,6 +339,136 @@ class MultiTargetTracker:
         if track.track_id == self._primary_track_id:
             radius *= self.primary_track_birth_scale
         return radius
+
+    def _doppler_distance_bins(self, left_bin: int, right_bin: int) -> float:
+        return abs(self._signed_doppler_bin(left_bin) - self._signed_doppler_bin(right_bin))
+
+    def _weak_duplicate_birth(self, track: _Track, measurement: dict) -> bool:
+        score_ratio_limit = float(self.birth_suppression_score_ratio)
+        confidence_ratio_limit = float(self.birth_suppression_confidence_ratio)
+        if score_ratio_limit <= 0.0 and confidence_ratio_limit <= 0.0:
+            return False
+
+        if self.birth_suppression_doppler_bins > 0:
+            doppler_distance = self._doppler_distance_bins(track.doppler_bin, measurement["doppler_bin"])
+            if doppler_distance > self.birth_suppression_doppler_bins:
+                return False
+
+        weak_score = False
+        if score_ratio_limit > 0.0:
+            score_ratio = float(measurement["score"]) / max(float(track.score), 1e-6)
+            weak_score = weak_score or score_ratio <= score_ratio_limit
+        if confidence_ratio_limit > 0.0:
+            confidence_ratio = float(measurement["confidence"]) / max(float(track.confidence), 1e-6)
+            weak_score = weak_score or confidence_ratio <= confidence_ratio_limit
+        return bool(weak_score)
+
+    def _track_is_stronger_duplicate_reference(self, track: _Track, reference: _Track) -> bool:
+        if reference.track_id == track.track_id:
+            return False
+        if reference.misses > self.birth_suppression_miss_tolerance:
+            return False
+        if reference.state == TrackState.CONFIRMED:
+            return True
+        if reference.state == TrackState.LOST:
+            return reference.hits >= track.hits
+        if reference.hits > track.hits:
+            return True
+        if reference.hits < track.hits:
+            return False
+        return (
+            reference.consecutive_hits,
+            reference.confidence,
+            reference.score,
+            reference.age,
+            -reference.track_id,
+        ) >= (
+            track.consecutive_hits,
+            track.confidence,
+            track.score,
+            track.age,
+            -track.track_id,
+        )
+
+    def _weak_duplicate_track(self, track: _Track, reference: _Track) -> bool:
+        score_ratio_limit = float(self.birth_suppression_score_ratio)
+        confidence_ratio_limit = float(self.birth_suppression_confidence_ratio)
+        if score_ratio_limit <= 0.0 and confidence_ratio_limit <= 0.0:
+            return track.hits <= reference.hits
+
+        if self.birth_suppression_doppler_bins > 0:
+            doppler_distance = self._doppler_distance_bins(track.doppler_bin, reference.doppler_bin)
+            if doppler_distance > self.birth_suppression_doppler_bins:
+                return False
+
+        weak_score = False
+        if score_ratio_limit > 0.0:
+            score_ratio = float(track.score) / max(float(reference.score), 1e-6)
+            weak_score = weak_score or score_ratio <= score_ratio_limit
+        if confidence_ratio_limit > 0.0:
+            confidence_ratio = float(track.confidence) / max(float(reference.confidence), 1e-6)
+            weak_score = weak_score or confidence_ratio <= confidence_ratio_limit
+        return bool(weak_score)
+
+    def _should_prune_duplicate_tentative(self, track: _Track) -> bool:
+        if track.state != TrackState.TENTATIVE or self.birth_suppression_radius_m <= 0:
+            return False
+
+        for reference in self._tracks:
+            if not self._track_is_stronger_duplicate_reference(track, reference):
+                continue
+
+            radius = self._birth_suppression_radius_for_track(reference)
+            if radius <= 0:
+                continue
+
+            dx = float(reference.kf.x[0][0]) - float(track.kf.x[0][0])
+            dy = float(reference.kf.x[1][0]) - float(track.kf.x[1][0])
+            distance_m = float(hypot(dx, dy))
+            if distance_m <= radius:
+                return True
+            if (
+                self.birth_suppression_weak_radius_scale > 1.0
+                and distance_m <= radius * self.birth_suppression_weak_radius_scale
+                and self._weak_duplicate_track(track, reference)
+            ):
+                return True
+
+        return False
+
+    def _should_prune_weak_confirmed_duplicate(self, track: _Track) -> bool:
+        if self.birth_suppression_radius_m <= 0:
+            return False
+        if int(track.track_id) == int(self._primary_track_id or -1):
+            return False
+        if not self._track_is_weak_confirmed(track):
+            return False
+
+        for reference in self._tracks:
+            if int(reference.track_id) == int(track.track_id):
+                continue
+            if reference.state != TrackState.CONFIRMED:
+                continue
+            if reference.misses > self.birth_suppression_miss_tolerance:
+                continue
+            if float(reference.confidence) < 0.25 and float(reference.score) < 1.0:
+                continue
+            if not self._weak_duplicate_track(track, reference):
+                continue
+
+            radius = self._birth_suppression_radius_for_track(reference)
+            if radius <= 0:
+                continue
+            dx = float(reference.kf.x[0][0]) - float(track.kf.x[0][0])
+            dy = float(reference.kf.x[1][0]) - float(track.kf.x[1][0])
+            distance_m = float(hypot(dx, dy))
+            expanded_radius = radius * max(float(self.birth_suppression_weak_radius_scale), 1.0)
+            if distance_m <= expanded_radius:
+                return True
+            if abs(dx) <= radius and abs(dy) <= expanded_radius * 1.35:
+                return True
+
+        return False
 
     def _should_suppress_birth(self, measurement: dict) -> bool:
         if self.birth_suppression_radius_m <= 0:
@@ -498,7 +486,14 @@ class MultiTargetTracker:
 
             dx = float(track.kf.x[0][0]) - float(measurement["x_m"])
             dy = float(track.kf.x[1][0]) - float(measurement["y_m"])
-            if hypot(dx, dy) <= radius:
+            distance_m = float(hypot(dx, dy))
+            if distance_m <= radius:
+                return True
+            if (
+                self.birth_suppression_weak_radius_scale > 1.0
+                and distance_m <= radius * self.birth_suppression_weak_radius_scale
+                and self._weak_duplicate_birth(track, measurement)
+            ):
                 return True
 
         return False
@@ -1101,7 +1096,18 @@ class MultiTargetTracker:
                     }
                 )
 
-            if previous_state == TrackState.LOST or track.consecutive_hits >= self.min_confirmed_hits:
+            healthy_confirmed = (
+                previous_state == TrackState.CONFIRMED
+                and (track.confidence >= 0.08 or track.score >= 0.2)
+            )
+            if previous_state == TrackState.CONFIRMED:
+                keep_primary = int(track.track_id) == int(self._primary_track_id or -1)
+                track.state = (
+                    TrackState.CONFIRMED
+                    if healthy_confirmed or keep_primary
+                    else TrackState.TENTATIVE
+                )
+            elif previous_state == TrackState.LOST or track.consecutive_hits >= self.min_confirmed_hits:
                 track.state = TrackState.CONFIRMED
             else:
                 track.state = TrackState.TENTATIVE
@@ -1169,6 +1175,23 @@ class MultiTargetTracker:
             )
 
         before_prune_ids = {int(track.track_id) for track in self._tracks}
+        duplicate_confirmed_ids = [
+            int(track.track_id)
+            for track in self._tracks
+            if self._should_prune_weak_confirmed_duplicate(track)
+        ]
+        duplicate_tentative_ids = [
+            int(track.track_id)
+            for track in self._tracks
+            if self._should_prune_duplicate_tentative(track)
+        ]
+        duplicate_track_ids = sorted(set(duplicate_confirmed_ids) | set(duplicate_tentative_ids))
+        if duplicate_track_ids:
+            duplicate_track_id_set = set(duplicate_track_ids)
+            self._tracks = [
+                track for track in self._tracks
+                if int(track.track_id) not in duplicate_track_id_set
+            ]
         self._tracks = [
             track for track in self._tracks
             if not (track.state == TrackState.TENTATIVE and track.misses > 1)
@@ -1195,6 +1218,8 @@ class MultiTargetTracker:
                 "missed_tracks": missed_events,
                 "births": birth_events,
                 "suppressed_births": suppressed_births[:12],
+                "duplicate_confirmed_deleted_ids": duplicate_confirmed_ids,
+                "duplicate_tentative_deleted_ids": duplicate_tentative_ids,
                 "deleted_track_ids": deleted_ids,
                 "primary_track_id": self._primary_track_id,
                 "tracks_after_prune": [self._trace_track(track) for track in self._tracks[:12]],
