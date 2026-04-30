@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime
 import html
 import io
 import json
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -176,6 +178,90 @@ def _render_table(rows: list[dict], *, key: str, height: int | None = None) -> N
     for row in display_rows:
         lines.append(" | ".join(fmt_cell(column, row.get(column, "")) for column in columns))
     st.code("\n".join(lines), language="text")
+
+
+def _registry_export_name() -> str:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"radar_lab_registry_{stamp}.db"
+
+
+def _validate_registry_db(path: Path) -> None:
+    expected_tables = {"captures", "runs", "run_parameters", "annotations", "registry_meta"}
+    with sqlite3.connect(path) as connection:
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()
+        if not integrity or str(integrity[0]).lower() != "ok":
+            raise ValueError("SQLite integrity check failed.")
+        rows = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+
+    table_names = {str(row[0]) for row in rows}
+    missing = sorted(expected_tables - table_names)
+    if missing:
+        raise ValueError(f"Not a Radar Lab registry DB. Missing tables: {', '.join(missing)}")
+
+
+def _import_registry_db(uploaded_bytes: bytes) -> Path | None:
+    if not uploaded_bytes:
+        raise ValueError("Uploaded DB file is empty.")
+
+    db_path = registry.database_path(PROJECT_ROOT)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = db_path.with_name("_incoming_radar_lab_registry.db")
+    tmp_path.write_bytes(uploaded_bytes)
+
+    try:
+        _validate_registry_db(tmp_path)
+        backup_path = None
+        if db_path.exists():
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = db_path.with_name(f"radar_lab_registry_backup_{stamp}.db")
+            db_path.replace(backup_path)
+        tmp_path.replace(db_path)
+        return backup_path
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+
+
+def _render_registry_share_tools() -> None:
+    db_path = registry.database_path(PROJECT_ROOT)
+    with st.expander("DB Import / Export", expanded=False):
+        st.caption(
+            "라벨, annotation, 세션 인덱스만 공유합니다. raw logs, reports, stage cache 파일은 별도로 공유해야 합니다."
+        )
+        if db_path.exists():
+            st.download_button(
+                "Export Registry DB",
+                data=db_path.read_bytes(),
+                file_name=_registry_export_name(),
+                mime="application/vnd.sqlite3",
+                width="stretch",
+            )
+        else:
+            st.info("아직 export할 registry DB가 없습니다. Refresh Registry를 먼저 눌러 주세요.")
+
+        uploaded_db = st.file_uploader(
+            "Import Registry DB",
+            type=["db", "sqlite", "sqlite3"],
+            accept_multiple_files=False,
+            key="registry-db-import",
+        )
+        if uploaded_db is not None:
+            st.warning(
+                "Import하면 현재 로컬 Radar Lab DB가 업로드한 DB로 교체됩니다. "
+                "기존 DB는 lab_data에 backup으로 남깁니다."
+            )
+            if st.button("Import Uploaded DB", width="stretch"):
+                try:
+                    backup_path = _import_registry_db(uploaded_db.getvalue())
+                except Exception as error:
+                    st.error(f"DB import failed: {error}")
+                else:
+                    backup_text = f" Backup: `{backup_path}`" if backup_path else ""
+                    st.success(f"DB import complete.{backup_text}")
+                    _rerun()
 
 
 def _file_uri(path_value: Path | str | None) -> str | None:
@@ -3221,6 +3307,7 @@ def main() -> None:
             _rerun()
         st.caption(f"DB: `{overview['db_path']}`")
         st.caption(f"Last refresh: `{overview['last_refresh_at'] or 'n/a'}`")
+        _render_registry_share_tools()
         page = st.radio(
             "Page",
             [
