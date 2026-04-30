@@ -57,7 +57,7 @@ DEFAULT_TUNING_SETTINGS = {
     "processing": {
         "remove_static": True,
         "doppler_guard_bins": 2,
-        "invert_lateral_axis": False,
+        "invert_lateral_axis": True,
     },
     "roi": {
         "lateral_m": 1.5,

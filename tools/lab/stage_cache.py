@@ -18,10 +18,11 @@ from tools.runtime_core.real_time_process import (
     load_raw_capture,
     process_frame_packet,
 )
+from tools.runtime_core.runtime_settings import load_runtime_settings
 from tools.runtime_core.tracking import MultiTargetTracker
 
 
-STAGE_CACHE_SCHEMA_VERSION = 2
+STAGE_CACHE_SCHEMA_VERSION = 3
 STAGE_FEATURE_SCHEMA_VERSION = 1
 
 
@@ -149,6 +150,35 @@ def _estimate_angle_resolution_rad(runtime_config) -> float:
     return float(np.mean(np.abs(diffs)))
 
 
+def _bool_from_config(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _current_lateral_axis_sign(project_root: Path) -> tuple[float | None, str | None]:
+    try:
+        settings = load_runtime_settings(project_root)
+    except Exception:
+        return None, None
+
+    invert = _nested_get(settings, "tuning", "processing", "invert_lateral_axis")
+    if invert is None:
+        return None, None
+    return (-1.0 if _bool_from_config(invert) else 1.0), "current_tuning"
+
+
+def _logged_lateral_axis_sign(runtime_summary: dict) -> tuple[float, str]:
+    lateral_axis_sign = runtime_summary.get("lateral_axis_sign")
+    if lateral_axis_sign is not None:
+        return float(lateral_axis_sign), "logged_summary"
+
+    invert = runtime_summary.get("invert_lateral_axis")
+    if invert is None:
+        invert = _nested_get(runtime_summary, "tuning_snapshot", "processing", "invert_lateral_axis", default=False)
+    return (-1.0 if _bool_from_config(invert) else 1.0), "logged_tuning"
+
+
 def _build_runtime_components(project_root: Path, runtime_summary: dict):
     cfg_path = _resolve_cfg_path(project_root, runtime_summary)
     remove_static = bool(
@@ -160,9 +190,9 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict):
     doppler_guard_bins = int(
         _nested_get(runtime_summary, "tuning_snapshot", "processing", "doppler_guard_bins", default=1)
     )
-    lateral_axis_sign = runtime_summary.get("lateral_axis_sign")
+    lateral_axis_sign, lateral_axis_sign_source = _current_lateral_axis_sign(project_root)
     if lateral_axis_sign is None:
-        lateral_axis_sign = -1.0 if runtime_summary.get("invert_lateral_axis") else 1.0
+        lateral_axis_sign, lateral_axis_sign_source = _logged_lateral_axis_sign(runtime_summary)
 
     runtime_config = parse_runtime_config(
         cfg_path,
@@ -338,6 +368,7 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict):
         "roi_lateral_m": roi_lateral_m,
         "roi_forward_m": roi_forward_m,
         "roi_min_forward_m": roi_min_forward_m,
+        "lateral_axis_sign_source": lateral_axis_sign_source,
     }
 
 
@@ -1034,6 +1065,7 @@ def build_stage_cache(
             "doppler_fft_size": int(components["runtime_config"].doppler_fft_size),
             "angle_fft_size": int(components["runtime_config"].angle_fft_size),
             "lateral_axis_sign": float(components["runtime_config"].lateral_axis_sign),
+            "lateral_axis_sign_source": components["lateral_axis_sign_source"],
         },
         "roi": {
             "lateral_m": round(float(components["roi_lateral_m"]), 4),

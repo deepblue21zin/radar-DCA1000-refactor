@@ -2,7 +2,7 @@
   "processing": {
     "remove_static": true,
     "doppler_guard_bins": 2,
-    "invert_lateral_axis": false
+    "invert_lateral_axis": true
   },
   "roi": {
     "lateral_m": 1.25,
