@@ -25,12 +25,15 @@ except ImportError as error:  # pragma: no cover
     ) from error
 
 from tools.lab import analytics, registry, stage_cache, wandb_sync
+from tools.tuning_loop.run_loop import ISK_SCENARIOS, PARAMETER_SPECS
 
 
 EVAL_TASKS_DIR = PROJECT_ROOT / "docs" / "evals" / "tasks"
 EVAL_RUNS_DIR = PROJECT_ROOT / "docs" / "evals" / "runs"
+TUNING_RUNS_DIR = PROJECT_ROOT / "lab_data" / "tuning_runs"
 
 LABEL_OPTIONS = ["", "baseline", "good", "usable", "interesting", "discard"]
+BOARD_OPTIONS = ["", "IWR6843ISK", "IWR6843ISK-ODS", "unknown", "mixed"]
 MOTION_OPTIONS = [
     "",
     "center",
@@ -83,9 +86,44 @@ def _option_index(options: list[str], value: str) -> int:
     return options.index(value) if value in options else 0
 
 
+def _normalize_board_label(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    compact = text.lower().replace("_", "-").replace(" ", "")
+    aliases = {
+        "isk": "IWR6843ISK",
+        "iwr6843isk": "IWR6843ISK",
+        "ods": "IWR6843ISK-ODS",
+        "isk-ods": "IWR6843ISK-ODS",
+        "iwr6843isk-ods": "IWR6843ISK-ODS",
+        "iwr6843iskods": "IWR6843ISK-ODS",
+        "unknown": "unknown",
+        "mixed": "mixed",
+    }
+    return aliases.get(compact, text)
+
+
+def _row_board(row: dict) -> str:
+    for value in (
+        row.get("annotation_board_type"),
+        row.get("board_type"),
+        _nested_get(row.get("runtime_config"), "radar_board", default=""),
+        _nested_get(row.get("runtime_config"), "runtime_snapshot", "radar_board", default=""),
+        _nested_get(row.get("summary"), "runtime_config", "radar_board", default=""),
+        _nested_get(row.get("manifest"), "runtime_summary", "radar_board", default=""),
+        _nested_get(row.get("manifest"), "raw_capture", "radar_board", default=""),
+    ):
+        board = _normalize_board_label(value)
+        if board:
+            return board
+    return ""
+
+
 def _annotation_summary(row: dict, *, include_notes: bool = False) -> str:
     parts = [
         row.get("annotation_label") or "",
+        _row_board(row),
         row.get("annotation_motion_pattern") or "",
         row.get("scenario_id") or "",
     ]
@@ -1681,6 +1719,7 @@ def _run_filters(
     transport: str,
     input_mode: str,
     label: str,
+    board: str,
     motion: str,
     benchmark_only: bool,
 ) -> list[dict]:
@@ -1691,6 +1730,8 @@ def _run_filters(
         filtered = [row for row in filtered if (row.get("input_mode") or "unknown") == input_mode]
     if label != "all":
         filtered = [row for row in filtered if (row.get("annotation_label") or "") == label]
+    if board != "all":
+        filtered = [row for row in filtered if _row_board(row) == board]
     if motion != "all":
         filtered = [row for row in filtered if (row.get("annotation_motion_pattern") or "") == motion]
     if benchmark_only:
@@ -1710,6 +1751,7 @@ def _run_context_row(role: str, row: dict | None) -> dict:
         "session_id": row.get("session_id") or "",
         "variant": row.get("variant") or "",
         "scenario_id": row.get("scenario_id") or "",
+        "board": _row_board(row),
         "label": row.get("annotation_label") or "",
         "motion": row.get("annotation_motion_pattern") or "",
         "description": _short_text(row.get("annotation_notes"), 56),
@@ -1813,12 +1855,14 @@ def _compare_metric_rows(run_roles: list[tuple[str, dict]], metrics: list[tuple[
     return rows
 
 
-def _capture_filters(rows: list[dict], *, transport: str, label: str, motion: str, benchmark_only: bool) -> list[dict]:
+def _capture_filters(rows: list[dict], *, transport: str, label: str, board: str, motion: str, benchmark_only: bool) -> list[dict]:
     filtered = rows
     if transport != "all":
         filtered = [row for row in filtered if (row.get("transport_category") or "unknown") == transport]
     if label != "all":
         filtered = [row for row in filtered if (row.get("annotation_label") or "") == label]
+    if board != "all":
+        filtered = [row for row in filtered if _row_board(row) == board]
     if motion != "all":
         filtered = [row for row in filtered if (row.get("annotation_motion_pattern") or "") == motion]
     if benchmark_only:
@@ -1828,13 +1872,14 @@ def _capture_filters(rows: list[dict], *, transport: str, label: str, motion: st
 
 def _annotation_form(target_type: str, target_id: str, row: dict) -> None:
     label_default = row.get("annotation_label") or ""
+    board_default = _row_board(row)
     people_default = int(row.get("annotation_people_count") or 1)
     motion_default = row.get("annotation_motion_pattern") or ""
     notes_default = row.get("annotation_notes") or ""
     keep_default = bool(row.get("annotation_keep_flag"))
 
     with st.form(f"annotation-{target_type}-{target_id}"):
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             label = st.selectbox(
                 "Label",
@@ -1843,12 +1888,19 @@ def _annotation_form(target_type: str, target_id: str, row: dict) -> None:
             )
             people_count = st.number_input("People Count", min_value=0, max_value=20, value=people_default, step=1)
         with col2:
+            board_type = st.selectbox(
+                "Board",
+                BOARD_OPTIONS,
+                index=_option_index(BOARD_OPTIONS, board_default),
+                help="이 측정이 어떤 안테나 보드 기준인지 기록합니다.",
+            )
+            keep_flag = st.checkbox("Benchmark Set에 포함", value=keep_default)
+        with col3:
             motion_pattern = st.selectbox(
                 "Motion / Scenario",
                 MOTION_OPTIONS,
                 index=_option_index(MOTION_OPTIONS, motion_default),
             )
-            keep_flag = st.checkbox("Benchmark Set에 포함", value=keep_default)
         notes = st.text_area(
             "Description / Notes",
             value=notes_default,
@@ -1864,6 +1916,7 @@ def _annotation_form(target_type: str, target_id: str, row: dict) -> None:
                 keep_flag=keep_flag,
                 people_count=int(people_count) if people_count > 0 else None,
                 motion_pattern=motion_pattern,
+                board_type=board_type,
                 notes=notes,
             )
             st.success("annotation을 저장했습니다.")
@@ -2043,6 +2096,7 @@ def _overview_page() -> None:
                 "op_score": row.get("operational_score"),
                 "perf_score": _format_float(row.get("performance_score"), 1),
                 "path_clean": _format_float(row.get("path_cleanliness_score_10"), 2),
+                "board": _row_board(row),
                 "annotation": _annotation_summary(row),
                 "motion": row.get("annotation_motion_pattern") or "",
                 "notes": _short_text(row.get("annotation_notes"), 56),
@@ -2062,6 +2116,7 @@ def _overview_page() -> None:
                 "frames": row.get("frame_count"),
                 "invalid_rate": _format_percent(row.get("invalid_rate")),
                 "linked_runs": row.get("linked_run_count"),
+                "board": _row_board(row),
                 "annotation": _annotation_summary(row),
                 "motion": row.get("annotation_motion_pattern") or "",
                 "notes": _short_text(row.get("annotation_notes"), 56),
@@ -2077,6 +2132,7 @@ def _runs_page() -> None:
     transport = st.sidebar.selectbox("Run Transport Filter", ["all", "clean", "noisy", "unusable", "insufficient"])
     input_mode = st.sidebar.selectbox("Run Input Mode", ["all", "live", "replay"])
     label = st.sidebar.selectbox("Run Label Filter", ["all", *LABEL_OPTIONS[1:]])
+    board = st.sidebar.selectbox("Run Board Filter", ["all", *BOARD_OPTIONS[1:]])
     motion = st.sidebar.selectbox("Run Motion Filter", ["all", *MOTION_OPTIONS[1:]])
     benchmark_only = st.sidebar.checkbox("Benchmark-tagged only", value=False)
     runs = _run_filters(
@@ -2084,6 +2140,7 @@ def _runs_page() -> None:
         transport=transport,
         input_mode=input_mode,
         label=label,
+        board=board,
         motion=motion,
         benchmark_only=benchmark_only,
     )
@@ -2102,6 +2159,7 @@ def _runs_page() -> None:
                 "op_score": row.get("operational_score"),
                 "perf_score": _format_float(row.get("performance_score"), 1),
                 "path_clean": _format_float(row.get("path_cleanliness_score_10"), 2),
+                "board": _row_board(row),
                 "label": row.get("annotation_label") or "",
                 "motion": row.get("annotation_motion_pattern") or "",
                 "description": _short_text(row.get("annotation_notes"), 72),
@@ -2180,9 +2238,17 @@ def _captures_page() -> None:
     all_captures = registry.fetch_captures(PROJECT_ROOT)
     transport = st.sidebar.selectbox("Capture Transport Filter", ["all", "clean", "noisy", "unusable", "insufficient"], key="capture-transport")
     label = st.sidebar.selectbox("Capture Label Filter", ["all", *LABEL_OPTIONS[1:]], key="capture-label")
+    board = st.sidebar.selectbox("Capture Board Filter", ["all", *BOARD_OPTIONS[1:]], key="capture-board")
     motion = st.sidebar.selectbox("Capture Motion Filter", ["all", *MOTION_OPTIONS[1:]], key="capture-motion")
     benchmark_only = st.sidebar.checkbox("Benchmark-tagged captures only", value=False, key="capture-benchmark")
-    captures = _capture_filters(all_captures, transport=transport, label=label, motion=motion, benchmark_only=benchmark_only)
+    captures = _capture_filters(
+        all_captures,
+        transport=transport,
+        label=label,
+        board=board,
+        motion=motion,
+        benchmark_only=benchmark_only,
+    )
 
     st.subheader("Raw Capture Library")
     st.caption(f"{len(captures)} raw captures matched the current filter.")
@@ -2194,6 +2260,7 @@ def _captures_page() -> None:
                 "frames": row.get("frame_count"),
                 "invalid_rate": _format_percent(row.get("invalid_rate")),
                 "linked_runs": row.get("linked_run_count"),
+                "board": _row_board(row),
                 "label": row.get("annotation_label") or "",
                 "motion": row.get("annotation_motion_pattern") or "",
                 "description": _short_text(row.get("annotation_notes"), 72),
@@ -2239,6 +2306,7 @@ def _captures_page() -> None:
                     "input_mode": row.get("input_mode"),
                     "transport": row.get("transport_category"),
                     "perf_score": _format_float(row.get("performance_score"), 1),
+                    "board": _row_board(row),
                     "label": row.get("annotation_label") or "",
                     "motion": row.get("annotation_motion_pattern") or "",
                     "description": _short_text(row.get("annotation_notes"), 56),
@@ -2416,6 +2484,11 @@ def _analytics_page() -> None:
         ["all", *LABEL_OPTIONS[1:]],
         key="analytics-label",
     )
+    board = st.sidebar.selectbox(
+        "Analytics Board Filter",
+        ["all", *BOARD_OPTIONS[1:]],
+        key="analytics-board",
+    )
     motion = st.sidebar.selectbox(
         "Analytics Motion Filter",
         ["all", *MOTION_OPTIONS[1:]],
@@ -2431,6 +2504,7 @@ def _analytics_page() -> None:
         transport=transport,
         input_mode=input_mode,
         label=label,
+        board=board,
         motion=motion,
         benchmark_only=benchmark_only,
     )
@@ -2582,6 +2656,413 @@ def _analytics_page() -> None:
             "summary.json": session_dir / "summary.json",
         }
     )
+
+
+def _tuning_config_options() -> list[str]:
+    config_dir = PROJECT_ROOT / "config"
+    paths = sorted(config_dir.glob("live_motion_tuning*.json"))
+    baseline_dir = config_dir / "baselines"
+    if baseline_dir.exists():
+        paths.extend(sorted(baseline_dir.glob("*.json")))
+    options = []
+    for path in paths:
+        try:
+            options.append(path.relative_to(PROJECT_ROOT).as_posix())
+        except ValueError:
+            options.append(str(path))
+    return options
+
+
+def _runtime_config_options() -> list[str]:
+    config_dir = PROJECT_ROOT / "config"
+    paths = sorted(config_dir.glob("live_motion_runtime*.json"))
+    options = []
+    for path in paths:
+        try:
+            options.append(path.relative_to(PROJECT_ROOT).as_posix())
+        except ValueError:
+            options.append(str(path))
+    return options
+
+
+def _tuning_result_files() -> list[Path]:
+    if not TUNING_RUNS_DIR.exists():
+        return []
+    return sorted(
+        TUNING_RUNS_DIR.glob("*/result.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def _extract_tuning_result_path(stdout_text: str) -> Path | None:
+    for line in reversed((stdout_text or "").splitlines()):
+        text = line.strip()
+        if text.lower().startswith("tuning loop result:"):
+            value = text.split(":", 1)[1].strip()
+            path = Path(value)
+            if not path.is_absolute():
+                path = PROJECT_ROOT / path
+            if path.exists():
+                return path
+    return None
+
+
+def _run_tuning_loop_command(command: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        command,
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _format_tuning_change(changes: list[dict]) -> str:
+    if not changes:
+        return "seed"
+    parts = []
+    for change in changes[:3]:
+        parts.append(f"{change.get('path')}: {change.get('before')} -> {change.get('after')}")
+    if len(changes) > 3:
+        parts.append(f"+{len(changes) - 3} more")
+    return "; ".join(parts)
+
+
+def _format_tuning_reasons(reasons: list[str] | None) -> str:
+    if not reasons:
+        return ""
+    return ", ".join(str(reason) for reason in reasons)
+
+
+def _tuning_kpi_rows(result: dict) -> list[dict]:
+    baseline = ((result.get("baseline") or {}).get("kpis") or {})
+    best = ((result.get("best") or {}).get("kpis") or {})
+    metrics = [
+        ("score", "Loop Score", "", "higher"),
+        ("policy_overall_pass", "Policy Overall Pass", "", "must pass"),
+        ("policy_preserves_tracking_shape", "Preserves Tracking Shape", "", "must pass"),
+        ("policy_smooths_jumpy_raw", "Smooths Jumpy Raw", "", "must pass"),
+        ("path_cleanliness_score_10", "Path Cleanliness", "/10", "higher"),
+        ("output_x_span_m", "Output X Span", "m", "scenario"),
+        ("output_y_span_m", "Output Y Span", "m", "scenario"),
+        ("output_vs_tracking_x_span_ratio", "Output/Tracking X Ratio", "", "higher"),
+        ("output_width_ratio", "Output Width Ratio", "", "scenario"),
+        ("output_step_p95_m", "Output Step P95", "m", "lower"),
+        ("output_max_step_m", "Output Max Step", "m", "lower"),
+        ("trajectory_distance_p95_m", "Trajectory Distance P95", "m", "lower"),
+        ("candidate_to_confirmed_ratio", "Candidate/Confirmed", "", "lower"),
+        ("lead_switch_count", "Lead Switch Count", "", "lower"),
+    ]
+    rows = []
+    for key, label, unit, direction in metrics:
+        before = (result.get("baseline") or {}).get("score") if key == "score" else baseline.get(key)
+        after = (result.get("best") or {}).get("score") if key == "score" else best.get(key)
+        delta = None
+        try:
+            if before is not None and after is not None:
+                delta = float(after) - float(before)
+        except (TypeError, ValueError):
+            delta = None
+        rows.append(
+            {
+                "metric": label,
+                "baseline": _safe_cell(before),
+                "best": _safe_cell(after),
+                "delta": _safe_cell(delta),
+                "unit": unit,
+                "direction": direction,
+            }
+        )
+    return rows
+
+
+def _load_jsonl(path: Path) -> list[dict]:
+    rows: list[dict] = []
+    if not path.exists():
+        return rows
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
+def _lead_track_point(record: dict) -> dict | None:
+    for key in ("display_tracks", "tentative_display_tracks", "confirmed_tracks", "tentative_tracks"):
+        items = record.get(key) or []
+        if not isinstance(items, list) or not items:
+            continue
+        candidates = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            x_m = _as_float(item.get("x_m"))
+            y_m = _as_float(item.get("y_m"))
+            if x_m is None or y_m is None:
+                continue
+            candidates.append(
+                {
+                    "x_m": x_m,
+                    "y_m": y_m,
+                    "score": _as_float(item.get("score"), 0.0) or 0.0,
+                    "confidence": _as_float(item.get("confidence"), 0.0) or 0.0,
+                    "is_primary": bool(item.get("is_primary")),
+                }
+            )
+        if candidates:
+            return max(
+                candidates,
+                key=lambda item: (
+                    1 if item.get("is_primary") else 0,
+                    item.get("confidence") or 0.0,
+                    item.get("score") or 0.0,
+                ),
+            )
+    return None
+
+
+def _session_output_trajectory(session_dir: Path) -> list[dict]:
+    rows = _load_jsonl(session_dir / "render_frames.jsonl")
+    if not rows:
+        rows = _load_jsonl(session_dir / "processed_frames.jsonl")
+    trajectory = []
+    for index, row in enumerate(rows):
+        point = _lead_track_point(row)
+        if point is None:
+            continue
+        trajectory.append(
+            {
+                "index": int(row.get("frame_index", row.get("frame_id", index)) or index),
+                "x_m": float(point["x_m"]),
+                "y_m": float(point["y_m"]),
+            }
+        )
+    return trajectory
+
+
+def _render_tuning_trajectory_compare(result: dict) -> None:
+    baseline = result.get("baseline") or {}
+    best = result.get("best") or {}
+    items = [
+        ("baseline", baseline.get("session_id"), baseline.get("session_dir"), "#172232"),
+        ("best", best.get("session_id"), best.get("session_dir"), "#1b7a4c"),
+    ]
+    trajectories = []
+    for role, session_id, session_dir, color in items:
+        if not session_dir:
+            continue
+        trajectory = _session_output_trajectory(Path(session_dir))
+        if trajectory:
+            trajectories.append((role, session_id, color, trajectory))
+    if not trajectories:
+        st.info("비교할 output trajectory가 없습니다. replay 결과의 render_frames/processed_frames를 확인해 주세요.")
+        return
+
+    all_points = [point for _, _, _, trajectory in trajectories for point in trajectory]
+    xs = np.asarray([point["x_m"] for point in all_points], dtype=float)
+    ys = np.asarray([point["y_m"] for point in all_points], dtype=float)
+    x_abs = max(float(np.max(np.abs(xs))) + 0.2, 0.8)
+    y_max = max(float(np.max(ys)) + 0.25, 3.0)
+    y_min = min(float(np.min(ys)) - 0.2, 0.0)
+
+    fig, plt = _make_figure(width=9.5, height=5.0)
+    ax = fig.add_subplot(111)
+    for role, session_id, color, trajectory in trajectories:
+        tx = [point["x_m"] for point in trajectory]
+        ty = [point["y_m"] for point in trajectory]
+        ax.plot(tx, ty, color=color, linewidth=1.9, alpha=0.9, label=f"{role} {session_id}")
+        ax.scatter([tx[0]], [ty[0]], s=46, color=color, marker="o", zorder=5)
+        ax.scatter([tx[-1]], [ty[-1]], s=64, facecolors="white", edgecolors=color, linewidths=2, zorder=6)
+    ax.scatter([0], [0], s=54, marker="s", color="#263848", label="radar")
+    ax.set_xlim(-x_abs, x_abs)
+    ax.set_ylim(y_min, y_max)
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
+    ax.set_title("Before/After Output Trajectory", loc="left", fontsize=12, fontweight="bold", color="#163044")
+    ax.grid(True, color="#e5edf2", linewidth=0.8)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(loc="best", frameon=False)
+    ax.set_facecolor("#fbfdfe")
+    _render_matplotlib_figure(fig, caption="작은 원은 시작점, 테두리 원은 마지막점입니다.")
+
+
+def _tuning_page() -> None:
+    st.subheader("Tuning Loop")
+    st.caption(
+        "ISK 4개 raw 중 하나를 고정 입력으로 선택하고, baseline tuning과 candidate tuning을 같은 raw로 replay해 "
+        "config 파라미터 후보를 자동 비교합니다. 선택한 candidate tuning 원본은 덮어쓰지 않고 run별 tuning 복사본을 만듭니다."
+    )
+
+    scenario_keys = list(ISK_SCENARIOS.keys())
+    scenario = st.selectbox(
+        "Baseline Scenario / Raw Capture",
+        scenario_keys,
+        index=scenario_keys.index("right-diagonal") if "right-diagonal" in scenario_keys else 0,
+        format_func=lambda key: f"{key} - {ISK_SCENARIOS[key]['capture']}",
+    )
+    capture = st.text_input("Raw Capture", value=ISK_SCENARIOS[scenario]["capture"])
+
+    config_options = _tuning_config_options()
+    if not config_options:
+        st.error("config/live_motion_tuning*.json 파일을 찾지 못했습니다.")
+        return
+    default_isk = "config/live_motion_tuning_isk.json"
+    baseline_tuning = st.selectbox(
+        "Baseline Tuning",
+        config_options,
+        index=_option_index(config_options, default_isk),
+        help="비교 기준으로만 사용하는 tuning입니다.",
+    )
+    candidate_tuning = st.selectbox(
+        "Candidate Tuning Seed",
+        config_options,
+        index=_option_index(config_options, default_isk),
+        help="후보 tuning의 시작점입니다. 원본은 덮어쓰지 않고 복사본으로 trial을 만듭니다.",
+    )
+    runtime_options = _runtime_config_options()
+    default_runtime = "config/live_motion_runtime_isk.json"
+    runtime_settings = st.selectbox(
+        "Runtime Settings",
+        runtime_options or [default_runtime],
+        index=_option_index(runtime_options or [default_runtime], default_runtime),
+        help="replay 실행 시 RADAR_RUNTIME_SETTINGS_PATH로 고정됩니다. ISK 측정 비교는 ISK runtime을 선택하세요.",
+    )
+    if baseline_tuning == candidate_tuning:
+        st.warning(
+            "baseline과 candidate seed가 같은 파일입니다. 첫 seed 결과는 baseline과 비슷할 수 있지만, "
+            "trial tuning 복사본은 선택 파라미터를 바꿔 비교합니다."
+        )
+
+    param_labels = {spec["key"]: f"{spec['label']} ({spec['key']})" for spec in PARAMETER_SPECS}
+    selected_params = st.multiselect(
+        "Tunable Parameters",
+        [spec["key"] for spec in PARAMETER_SPECS],
+        default=[spec["key"] for spec in PARAMETER_SPECS],
+        format_func=lambda key: param_labels.get(key, key),
+        help="이번 1차 버전은 config-only 파라미터 탐색입니다. 코드 파일은 자동 수정하지 않습니다.",
+    )
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        max_trials = st.number_input("Max Candidate Trials", min_value=1, max_value=40, value=6, step=1)
+    with col2:
+        speed = st.number_input("Replay Speed", min_value=0.5, max_value=20.0, value=5.0, step=0.5)
+    with col3:
+        target_score = st.number_input("Target Score", min_value=1.0, max_value=100.0, value=80.0, step=1.0)
+    timeout_s = st.number_input(
+        "Per-command timeout seconds",
+        min_value=0,
+        max_value=3600,
+        value=0,
+        step=30,
+        help="0이면 timeout을 걸지 않습니다.",
+    )
+
+    command = [
+        sys.executable,
+        "-B",
+        "-m",
+        "tools.tuning_loop.run_loop",
+        "--scenario",
+        scenario,
+        "--capture",
+        capture,
+        "--baseline-tuning",
+        baseline_tuning,
+        "--candidate-tuning",
+        candidate_tuning,
+        "--runtime-settings",
+        runtime_settings,
+        "--max-trials",
+        str(int(max_trials)),
+        "--speed",
+        str(float(speed)),
+        "--target-score",
+        str(float(target_score)),
+    ]
+    if int(timeout_s) > 0:
+        command.extend(["--timeout-s", str(int(timeout_s))])
+    if selected_params:
+        command.append("--params")
+        command.extend(selected_params)
+
+    with st.expander("Command Preview"):
+        st.code(" ".join(command), language="powershell")
+
+    if st.button("Run Tuning Loop", type="primary", width="stretch", disabled=not selected_params):
+        with st.spinner("Replay tuning loop 실행 중입니다. 선택한 trial 수만큼 시간이 걸릴 수 있습니다."):
+            completed = _run_tuning_loop_command(command)
+        st.code(completed.stdout or "", language="text")
+        if completed.stderr:
+            st.code(completed.stderr, language="text")
+        if completed.returncode != 0:
+            st.error(f"Tuning loop 실패: exit={completed.returncode}")
+        else:
+            result_path = _extract_tuning_result_path(completed.stdout or "")
+            if result_path:
+                st.success(f"결과 저장: {result_path}")
+            else:
+                st.success("Tuning loop가 끝났습니다. 아래 Recent Results에서 최신 결과를 확인하세요.")
+            registry.refresh_registry(PROJECT_ROOT)
+
+    result_files = _tuning_result_files()
+    st.markdown("### Recent Results")
+    if not result_files:
+        st.info("아직 tuning loop 결과가 없습니다.")
+        return
+
+    selected_result_path = st.selectbox(
+        "Result",
+        result_files,
+        index=0,
+        format_func=lambda path: str(path.parent.name),
+    )
+    result = _load_json_file(Path(selected_result_path))
+    status = str(result.get("status") or "unknown").upper()
+    best = result.get("best") or {}
+    baseline = result.get("baseline") or {}
+
+    a, b, c, d = st.columns(4)
+    a.metric("Status", status)
+    b.metric("Best Score", _format_float(best.get("score"), 2))
+    c.metric("Baseline Session", baseline.get("session_id") or "n/a")
+    d.metric("Best Session", best.get("session_id") or "n/a")
+    if best.get("reject_reasons"):
+        st.warning("Best 후보 제외 사유: " + _format_tuning_reasons(best.get("reject_reasons") or []))
+    elif best.get("accepted"):
+        st.success("Best 후보가 baseline safety 정책을 통과했습니다.")
+
+    _render_file_links(
+        {
+            "result.json": selected_result_path,
+            "best tuning": best.get("best_tuning_path"),
+            "runtime settings": result.get("runtime_settings"),
+            "baseline summary": baseline.get("summary_path"),
+            "best summary": best.get("summary_path"),
+        }
+    )
+
+    st.markdown("#### KPI Before / After")
+    _render_table(_tuning_kpi_rows(result), key=f"tuning-kpis-{Path(selected_result_path).parent.name}", height=330)
+
+    st.markdown("#### Trajectory Before / After")
+    _render_tuning_trajectory_compare(result)
+
+    st.markdown("#### Trial History")
+    trial_rows = [
+        {
+            "trial": trial.get("label"),
+            "session": trial.get("session_id"),
+            "score": trial.get("score"),
+            "accepted": trial.get("accepted"),
+            "target_pass": trial.get("target_pass"),
+            "reject_reasons": _format_tuning_reasons(trial.get("reject_reasons") or []),
+            "changes": _format_tuning_change(trial.get("changes") or []),
+            "tuning": trial.get("tuning"),
+        }
+        for trial in (result.get("trials") or [])
+    ]
+    _render_table(trial_rows, key=f"tuning-trials-{Path(selected_result_path).parent.name}", height=360)
 
 
 def _eval_page() -> None:
@@ -3315,6 +3796,7 @@ def main() -> None:
                 "Runs",
                 "Captures",
                 "Compare",
+                "Tuning Loop",
                 "Eval Harness",
                 "Analytics/Triage",
                 "Stage Timeline",
@@ -3330,6 +3812,8 @@ def main() -> None:
         _captures_page()
     elif page == "Compare":
         _compare_page()
+    elif page == "Tuning Loop":
+        _tuning_page()
     elif page == "Eval Harness":
         _eval_page()
     elif page == "Analytics/Triage":

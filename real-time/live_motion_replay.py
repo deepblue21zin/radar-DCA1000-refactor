@@ -42,6 +42,11 @@ def parse_args():
         "--tuning",
         help="Optional tuning JSON path, for example config/live_motion_tuning_multi.json.",
     )
+    parser.add_argument(
+        "--no-open-report",
+        action="store_true",
+        help="Do not open the generated trajectory replay HTML in a browser.",
+    )
     return parser.parse_args()
 
 
@@ -91,10 +96,11 @@ def main():
     trajectory_replay_path = viewer.session_logger.session_dir / "trajectory_replay.html"
     if trajectory_replay_path.exists():
         print(f"Trajectory replay report: {trajectory_replay_path}")
-        try:
-            webbrowser.open(trajectory_replay_path.resolve().as_uri())
-        except Exception as exc:
-            print(f"Warning: failed to open trajectory replay report automatically: {exc!r}")
+        if not args.no_open_report:
+            try:
+                webbrowser.open(trajectory_replay_path.resolve().as_uri())
+            except Exception as exc:
+                print(f"Warning: failed to open trajectory replay report automatically: {exc!r}")
     else:
         print(
             "Replay finished, but trajectory replay report was not found yet: "
