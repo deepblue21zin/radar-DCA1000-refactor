@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>2026-05-11 multitarget phase1 ablation modes</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; line-height: 1.55; color: #172033; }
+    code, pre { background: #f3f5f8; border-radius: 6px; }
+    code { padding: 1px 4px; }
+    pre { padding: 12px; overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+    th, td { border: 1px solid #d7dde8; padding: 6px 8px; text-align: left; }
+    th { background: #eef3f8; }
+  </style>
+</head>
+<body>
+  <h1>Multi-target Phase 1 Ablation Replay 모드 추가 및 검증</h1>
+
+  <h2>목적</h2>
+  <p>
+    기준 세션 <code>20260508_193458</code>에서 2명 교차/왕복 추적이 어느 처리 단계에서 무너지는지
+    같은 raw 데이터의 ablation replay로 분리했다.
+  </p>
+
+  <h2>수정 파일</h2>
+  <ul>
+    <li><code>tools/lab/stage_cache.py</code></li>
+    <li><code>tools/diagnostics/multitarget_stage_eval.py</code></li>
+  </ul>
+
+  <h2>변경 내용</h2>
+  <ul>
+    <li>Stage Cache ablation mode에 <code>no_duplicate_suppression</code>을 추가했다.</li>
+    <li><code>no_duplicate_suppression</code> 모드에서는 <code>duplicate_suppression_enabled=false</code>로 재처리한다.</li>
+    <li>진단 도구가 <code>--mode</code>로 <code>&lt;session&gt;__&lt;mode&gt;</code> 캐시를 읽을 수 있게 했다.</li>
+  </ul>
+
+  <h2>검증 명령 또는 확인 방법</h2>
+  <pre><code>python -c "from pathlib import Path; compile(Path('tools/diagnostics/multitarget_stage_eval.py').read_text(encoding='utf-8'), 'tools/diagnostics/multitarget_stage_eval.py', 'exec'); compile(Path('tools/lab/stage_cache.py').read_text(encoding='utf-8'), 'tools/lab/stage_cache.py', 'exec'); print('syntax ok')"
+
+$modes = @('baseline','no_body_center','no_duplicate_suppression','no_dbscan','tracker_off','doppler_slice_angle')
+foreach ($m in $modes) {
+  python -B -m tools.lab.stage_cache --session 20260508_193458 --mode $m --force
+  python -B -m tools.diagnostics.multitarget_stage_eval --session 20260508_193458 --mode $m --expected-max 2 --min-separation-m 0.65 --min-doppler-bins 5 --min-score-ratio 0.05 --jump-threshold-m 0.85
+}</code></pre>
+
+  <h2>결과</h2>
+  <table>
+    <thead>
+      <tr><th>mode</th><th>display_two_or_more_rate</th><th>dbscan collapse</th><th>tracker collapse</th><th>display count 분포</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>baseline</td><td>0.236</td><td>0.6474</td><td>0.631</td><td>0:6, 1:185, 2:59</td></tr>
+      <tr><td>no_body_center</td><td>0.244</td><td>0.5707</td><td>0.6373</td><td>0:3, 1:186, 2:61</td></tr>
+      <tr><td>no_duplicate_suppression</td><td>0.236</td><td>0.6474</td><td>0.631</td><td>0:6, 1:185, 2:59</td></tr>
+      <tr><td>no_dbscan</td><td>0.780</td><td>0.0053</td><td>0.2218</td><td>0:3, 1:52, 2:190, 3:5</td></tr>
+      <tr><td>tracker_off</td><td>0.000</td><td>0.6474</td><td>1.000</td><td>0:250</td></tr>
+      <tr><td>doppler_slice_angle</td><td>0.236</td><td>0.6474</td><td>0.631</td><td>0:6, 1:185, 2:59</td></tr>
+    </tbody>
+  </table>
+  <p>
+    <code>no_dbscan</code>에서 2명 이상 표시 비율이 크게 올라가므로, 현재 기준 세션의 주요 병목은
+    duplicate suppression보다는 DBSCAN/cluster 병합 쪽으로 판단한다.
+  </p>
+
+  <h2>남은 위험 또는 다음 후보</h2>
+  <ul>
+    <li><code>no_dbscan</code>은 2명 유지에는 유리하지만 3개 과분리 프레임이 일부 생긴다.</li>
+    <li>다음 단계에서는 DBSCAN을 단순 제거하지 않고, range/doppler/angle 분리 근거로 예상 object count를 추정한 뒤 merge/cluster가 그 수를 과하게 줄이지 않도록 조정해야 한다.</li>
+  </ul>
+</body>
+</html>

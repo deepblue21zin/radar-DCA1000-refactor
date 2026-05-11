@@ -145,6 +145,82 @@ def _doppler_bin_distance(left_bin, right_bin, fft_size):
     return min(delta, max(fft_size - delta, 0))
 
 
+def _candidate_strength(candidate):
+    score = float(getattr(candidate, "score", 0.0) or 0.0)
+    if score > 0.0:
+        return score
+    rdi_peak = float(getattr(candidate, "rdi_peak", 0.0) or 0.0)
+    if rdi_peak > 0.0:
+        return rdi_peak
+    return float(getattr(candidate, "rai_peak", 0.0) or 0.0)
+
+
+def _estimate_object_count_from_candidates(
+    candidates,
+    runtime_config,
+    *,
+    enabled=True,
+    max_objects=3,
+    min_separation_m=0.65,
+    min_doppler_bins=5,
+    min_score_ratio=0.05,
+):
+    if not enabled:
+        return {
+            "enabled": False,
+            "input_count": int(len(candidates or [])),
+            "estimated_count": 0,
+            "selected": [],
+        }
+
+    candidate_list = list(candidates or [])
+    if not candidate_list:
+        return {
+            "enabled": True,
+            "input_count": 0,
+            "estimated_count": 0,
+            "selected": [],
+        }
+
+    max_objects = max(1, int(max_objects))
+    min_separation_m = max(0.0, float(min_separation_m))
+    min_doppler_bins = max(0, int(min_doppler_bins))
+    min_score_ratio = float(np.clip(float(min_score_ratio), 0.0, 1.0))
+    ordered = sorted(candidate_list, key=_candidate_strength, reverse=True)
+    strongest = max(_candidate_strength(ordered[0]), 1e-9)
+    selected = []
+
+    for candidate in ordered:
+        if _candidate_strength(candidate) < strongest * min_score_ratio:
+            continue
+        independent = True
+        for reference in selected:
+            cart_distance = float(hypot(candidate.x_m - reference.x_m, candidate.y_m - reference.y_m))
+            doppler_distance = _doppler_bin_distance(
+                candidate.doppler_bin,
+                reference.doppler_bin,
+                runtime_config.doppler_fft_size,
+            )
+            if cart_distance < min_separation_m and doppler_distance < min_doppler_bins:
+                independent = False
+                break
+        if independent:
+            selected.append(candidate)
+            if len(selected) >= max_objects:
+                break
+
+    return {
+        "enabled": True,
+        "input_count": int(len(candidate_list)),
+        "estimated_count": int(len(selected)),
+        "max_objects": int(max_objects),
+        "min_separation_m": round(float(min_separation_m), 4),
+        "min_doppler_bins": int(min_doppler_bins),
+        "min_score_ratio": round(float(min_score_ratio), 4),
+        "selected": _trace_candidates(selected),
+    }
+
+
 def _merge_candidate_pool(
     candidate_pool,
     runtime_config,
@@ -453,6 +529,15 @@ def _suppress_duplicate_candidates(
     return kept, suppressed
 
 
+def _candidate_angle_map(rai_map, rai_cube, doppler_bin, angle_source):
+    source = str(angle_source or "collapsed_rai").strip().lower()
+    if source in {"doppler_slice_rai", "doppler_slice", "rda_slice"} and rai_cube is not None:
+        cube = np.asarray(rai_cube)
+        if cube.ndim == 3 and 0 <= int(doppler_bin) < cube.shape[0]:
+            return np.asarray(cube[int(doppler_bin)], dtype=np.float64), "doppler_slice_rai"
+    return np.asarray(rai_map, dtype=np.float64), "collapsed_rai"
+
+
 def detect_targets(
     rdi_map,
     rai_map,
@@ -460,6 +545,8 @@ def detect_targets(
     min_range_bin,
     max_range_bin,
     detection_region,
+    rai_cube=None,
+    angle_source=None,
     cfar_training_cells=(6, 6),
     cfar_guard_cells=(1, 1),
     cfar_scale=5.0,
@@ -475,8 +562,23 @@ def detect_targets(
     duplicate_suppression_range_scale=0.03,
     duplicate_suppression_doppler_bins=6,
     duplicate_suppression_score_ratio=0.82,
+    object_count_estimator_enabled=True,
+    object_count_max_objects=3,
+    object_count_min_separation_m=0.65,
+    object_count_min_doppler_bins=7,
+    object_count_min_score_ratio=0.05,
+    protect_multi_object_candidates=False,
+    limit_output_to_object_count=False,
+    enable_body_center_refinement=True,
+    enable_candidate_merge=True,
+    enable_dbscan=True,
     trace=None,
 ):
+    angle_source = str(
+        angle_source
+        or getattr(runtime_config, "angle_source", "collapsed_rai")
+        or "collapsed_rai"
+    ).strip().lower()
     trace_enabled = trace is not None
     if trace_enabled:
         trace.clear()
@@ -490,6 +592,12 @@ def detect_targets(
                     "lateral_limit_m": float(detection_region.lateral_limit_m),
                     "forward_limit_m": float(detection_region.forward_limit_m),
                     "min_forward_m": float(detection_region.min_forward_m),
+                },
+                "mode": {
+                    "angle_source": angle_source,
+                    "body_center_refinement": bool(enable_body_center_refinement),
+                    "candidate_merge": bool(enable_candidate_merge),
+                    "dbscan": bool(enable_dbscan),
                 },
                 "reject_reasons": {},
             }
@@ -581,7 +689,13 @@ def detect_targets(
                 _trace_reject(reject_reasons, "angle_roi_empty")
             continue
 
-        angle_profile = np.asarray(rai_map[range_bin], dtype=np.float64)
+        candidate_rai_map, resolved_angle_source = _candidate_angle_map(
+            rai_map,
+            rai_cube,
+            int(doppler_bin),
+            angle_source,
+        )
+        angle_profile = np.asarray(candidate_rai_map[range_bin], dtype=np.float64)
         masked_angle_profile = np.where(angle_mask, angle_profile, 0)
         peak_angle_bin = int(np.argmax(masked_angle_profile))
         rai_peak = float(masked_angle_profile[peak_angle_bin])
@@ -655,16 +769,18 @@ def detect_targets(
             "top_candidates": _trace_candidates(coarse_candidate_pool),
         }
         pre_merge_coarse = list(coarse_candidate_pool)
-    coarse_candidate_pool = _merge_candidate_pool(
-        coarse_candidate_pool,
-        runtime_config,
-        merge_bands=candidate_merge_bands,
-        default_merge_radius_m=max(min_cartesian_separation_m * 0.75, 0.25),
-        default_range_bin_radius=1,
-        default_doppler_bin_radius=max(2, int(runtime_config.doppler_guard_bins)),
-    )
+    if enable_candidate_merge:
+        coarse_candidate_pool = _merge_candidate_pool(
+            coarse_candidate_pool,
+            runtime_config,
+            merge_bands=candidate_merge_bands,
+            default_merge_radius_m=max(min_cartesian_separation_m * 0.75, 0.25),
+            default_range_bin_radius=1,
+            default_doppler_bin_radius=max(2, int(runtime_config.doppler_guard_bins)),
+        )
     if trace_enabled:
         trace["candidate_merge_coarse"] = {
+            "enabled": bool(enable_candidate_merge),
             "before_count": int(len(pre_merge_coarse)),
             "after_count": int(len(coarse_candidate_pool)),
             "before_top": _trace_candidates(pre_merge_coarse),
@@ -690,7 +806,13 @@ def detect_targets(
                 _trace_reject(reject_reasons, "refine_angle_roi_empty")
             continue
 
-        angle_profile = np.asarray(rai_map[range_bin], dtype=np.float64)
+        candidate_rai_map, _resolved_angle_source = _candidate_angle_map(
+            rai_map,
+            rai_cube,
+            int(coarse_candidate.doppler_bin),
+            angle_source,
+        )
+        angle_profile = np.asarray(candidate_rai_map[range_bin], dtype=np.float64)
         masked_angle_profile = np.where(angle_mask, angle_profile, 0.0)
         roi_angle_values = masked_angle_profile[angle_mask]
         if roi_angle_values.size == 0:
@@ -728,24 +850,32 @@ def detect_targets(
             default_angle_radius_bins=max(2, centroid_radius + 1),
             default_relative_floor=0.55,
         )
-        (
-            refined_range_bin,
-            refined_angle_bin,
-            refined_range_m,
-            refined_angle_rad,
-            refined_x_m,
-            refined_y_m,
-        ) = _refine_body_center_from_patch(
-            rai_map,
-            runtime_config,
-            range_bin,
-            angle_bin,
-            angle_mask,
-            angle_floor=angle_floor,
-            range_radius_bins=patch_range_radius,
-            angle_radius_bins=patch_angle_radius,
-            relative_floor=patch_relative_floor,
-        )
+        if enable_body_center_refinement:
+            (
+                refined_range_bin,
+                refined_angle_bin,
+                refined_range_m,
+                refined_angle_rad,
+                refined_x_m,
+                refined_y_m,
+            ) = _refine_body_center_from_patch(
+                candidate_rai_map,
+                runtime_config,
+                range_bin,
+                angle_bin,
+                angle_mask,
+                angle_floor=angle_floor,
+                range_radius_bins=patch_range_radius,
+                angle_radius_bins=patch_angle_radius,
+                relative_floor=patch_relative_floor,
+            )
+        else:
+            refined_range_bin = int(range_bin)
+            refined_angle_bin = int(angle_bin)
+            refined_range_m = float(range_m)
+            refined_angle_rad = float(angle_rad)
+            refined_x_m = float(range_m * np.sin(angle_rad))
+            refined_y_m = float(range_m * np.cos(angle_rad))
         refined_candidate = DetectionCandidate(
             range_bin=refined_range_bin,
             doppler_bin=int(coarse_candidate.doppler_bin),
@@ -771,27 +901,41 @@ def detect_targets(
     candidate_pool = refined_candidate_pool or coarse_candidate_pool
     if trace_enabled:
         trace["body_center_refinement"] = {
+            "enabled": bool(enable_body_center_refinement),
             "input_count": int(len(coarse_candidate_pool)),
             "refined_count": int(len(refined_candidate_pool)),
             "fallback_to_coarse": bool(not refined_candidate_pool),
             "pairs": body_center_pairs,
         }
         pre_merge_final = list(candidate_pool)
-    candidate_pool = _merge_candidate_pool(
-        candidate_pool,
-        runtime_config,
-        merge_bands=candidate_merge_bands,
-        default_merge_radius_m=max(min_cartesian_separation_m * 0.75, 0.25),
-        default_range_bin_radius=1,
-        default_doppler_bin_radius=max(2, int(runtime_config.doppler_guard_bins)),
-    )
+    if enable_candidate_merge:
+        candidate_pool = _merge_candidate_pool(
+            candidate_pool,
+            runtime_config,
+            merge_bands=candidate_merge_bands,
+            default_merge_radius_m=max(min_cartesian_separation_m * 0.75, 0.25),
+            default_range_bin_radius=1,
+            default_doppler_bin_radius=max(2, int(runtime_config.doppler_guard_bins)),
+        )
+    object_count_estimate = None
     if trace_enabled:
+        object_count_estimate = _estimate_object_count_from_candidates(
+            candidate_pool,
+            runtime_config,
+            enabled=object_count_estimator_enabled,
+            max_objects=object_count_max_objects,
+            min_separation_m=object_count_min_separation_m,
+            min_doppler_bins=object_count_min_doppler_bins,
+            min_score_ratio=object_count_min_score_ratio,
+        )
         trace["candidate_merge_final"] = {
+            "enabled": bool(enable_candidate_merge),
             "before_count": int(len(pre_merge_final)),
             "after_count": int(len(candidate_pool)),
             "before_top": _trace_candidates(pre_merge_final),
             "after_top": _trace_candidates(candidate_pool),
         }
+        trace["object_count_estimator"] = object_count_estimate
         trace["dbscan"] = {
             "input_count": int(len(candidate_pool)),
             "eps_base": float(min_cartesian_separation_m),
@@ -800,12 +944,30 @@ def detect_targets(
             "adaptive_eps_bands": detection_region.adaptive_eps_bands,
             "input_top": _trace_candidates(candidate_pool),
         }
-    clustered_detections = _cluster_detection_candidates(
-        candidate_pool,
-        runtime_config,
-        detection_region,
-        min_cartesian_separation_m,
-    )
+    if object_count_estimate is None:
+        object_count_estimate = _estimate_object_count_from_candidates(
+            candidate_pool,
+            runtime_config,
+            enabled=object_count_estimator_enabled,
+            max_objects=object_count_max_objects,
+            min_separation_m=object_count_min_separation_m,
+            min_doppler_bins=object_count_min_doppler_bins,
+            min_score_ratio=object_count_min_score_ratio,
+        )
+    estimated_object_count = int(object_count_estimate.get("estimated_count", 0) or 0)
+    protect_multi_object = bool(protect_multi_object_candidates and estimated_object_count >= 2)
+    if enable_dbscan and not protect_multi_object:
+        clustered_detections = _cluster_detection_candidates(
+            candidate_pool,
+            runtime_config,
+            detection_region,
+            min_cartesian_separation_m,
+        )
+    else:
+        clustered_detections = list(candidate_pool)
+        if trace_enabled:
+            trace["dbscan"]["enabled"] = False
+            trace["dbscan"]["skipped_for_multi_object_protection"] = bool(protect_multi_object)
     if not clustered_detections:
         if trace_enabled:
             trace["dbscan"]["output_count"] = 0
@@ -838,13 +1000,18 @@ def detect_targets(
         if trace_enabled:
             trace["early_exit"] = "duplicate_suppression_empty"
         return []
-    output = clustered_detections[:detection_region.max_targets]
+    output_limit = int(detection_region.max_targets)
+    if limit_output_to_object_count and estimated_object_count > 0:
+        output_limit = min(output_limit, estimated_object_count)
+    output = clustered_detections[:output_limit]
     if trace_enabled:
         trace["dbscan"]["output_count"] = int(len(clustered_detections))
         trace["dbscan"]["output_top"] = _trace_candidates(clustered_detections)
         trace["final_output"] = {
             "output_count": int(len(output)),
             "truncated_from": int(len(clustered_detections)),
+            "output_limit": int(output_limit),
+            "limit_output_to_object_count": bool(limit_output_to_object_count),
             "top_detections": _trace_candidates(output),
         }
     return output

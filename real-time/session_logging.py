@@ -133,6 +133,7 @@ class SessionLogger:
             'raw_capture': {
                 'data_file': self.raw_capture_data_path.name,
                 'index_file': self.raw_capture_index_path.name,
+                'radar_board': runtime_summary.get('radar_board'),
                 'frame_length_samples': runtime_summary.get('frame_length'),
                 'config_path': runtime_summary.get('cfg'),
                 'adc_sample': runtime_summary.get('adc_sample'),

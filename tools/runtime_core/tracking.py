@@ -58,6 +58,9 @@ class MultiTargetTracker:
         measurement_soft_gate_full_m=0.52,
         measurement_soft_gate_range_scale=0.05,
         measurement_soft_gate_speed_scale=0.06,
+        max_object_count=0,
+        expected_object_count=None,
+        crossing_hold_frames=0,
     ):
         if process_var <= 0:
             raise ValueError("process_var must be positive.")
@@ -123,6 +126,12 @@ class MultiTargetTracker:
             raise ValueError("measurement_soft_gate_full_m must be >= measurement_soft_gate_start_m.")
         if measurement_soft_gate_range_scale < 0 or measurement_soft_gate_speed_scale < 0:
             raise ValueError("measurement soft gate scales must be non-negative.")
+        if max_object_count < 0:
+            raise ValueError("max_object_count must be non-negative.")
+        if expected_object_count is not None and int(expected_object_count) < 1:
+            raise ValueError("expected_object_count must be positive or None.")
+        if crossing_hold_frames < 0:
+            raise ValueError("crossing_hold_frames must be non-negative.")
 
         kalman_filter, q_discrete_white_noise = _load_filterpy()
         self._KalmanFilter = kalman_filter
@@ -168,11 +177,59 @@ class MultiTargetTracker:
         self.measurement_soft_gate_full_m = float(measurement_soft_gate_full_m)
         self.measurement_soft_gate_range_scale = float(measurement_soft_gate_range_scale)
         self.measurement_soft_gate_speed_scale = float(measurement_soft_gate_speed_scale)
+        self.max_object_count = int(max_object_count)
+        self.expected_object_count = (
+            None if expected_object_count is None else int(expected_object_count)
+        )
+        self.crossing_hold_frames = int(crossing_hold_frames)
 
         self._tracks: List[_Track] = []
         self._next_track_id = 1
         self._last_frame_ts: Optional[float] = None
         self._primary_track_id: Optional[int] = None
+
+    def _active_track_limit(self) -> int:
+        if self.expected_object_count is not None:
+            return int(self.expected_object_count)
+        return int(self.max_object_count)
+
+    def _active_track_count(self) -> int:
+        return sum(
+            1
+            for track in self._tracks
+            if track.state != TrackState.TENTATIVE
+            or track.consecutive_hits >= self.min_confirmed_hits
+        )
+
+    def _track_keep_key(self, track: _Track) -> tuple:
+        is_primary = int(track.track_id) == int(self._primary_track_id or -1)
+        return (
+            1 if is_primary else 0,
+            self._track_state_rank(track),
+            -int(track.misses),
+            float(track.confidence),
+            float(track.score),
+            int(track.hits),
+            int(track.consecutive_hits),
+            int(track.age),
+        )
+
+    def _prune_excess_tracks_by_count(self) -> list[int]:
+        limit = self._active_track_limit()
+        if limit <= 0 or len(self._tracks) <= limit:
+            return []
+        ordered = sorted(self._tracks, key=self._track_keep_key, reverse=True)
+        keep_ids = {int(track.track_id) for track in ordered[:limit]}
+        deleted_ids = [
+            int(track.track_id)
+            for track in self._tracks
+            if int(track.track_id) not in keep_ids
+        ]
+        if deleted_ids:
+            self._tracks = [
+                track for track in self._tracks if int(track.track_id) in keep_ids
+            ]
+        return sorted(deleted_ids)
 
     def _measurement_covariance(
         self,
@@ -471,6 +528,10 @@ class MultiTargetTracker:
         return False
 
     def _should_suppress_birth(self, measurement: dict) -> bool:
+        limit = self._active_track_limit()
+        if limit > 0 and self._active_track_count() >= limit:
+            return True
+
         if self.birth_suppression_radius_m <= 0:
             return False
 
@@ -993,6 +1054,12 @@ class MultiTargetTracker:
                 {
                     "trace_version": 1,
                     "dt_s": round(float(dt), 4),
+                    "tracking_policy": {
+                        "max_object_count": int(self.max_object_count),
+                        "expected_object_count": self.expected_object_count,
+                        "crossing_hold_frames": int(self.crossing_hold_frames),
+                        "active_track_limit": int(self._active_track_limit()),
+                    },
                     "input_detection_count": len(detections),
                     "measurement_count": len(measurements),
                     "allow_track_birth": bool(allow_track_birth),
@@ -1192,13 +1259,14 @@ class MultiTargetTracker:
                 track for track in self._tracks
                 if int(track.track_id) not in duplicate_track_id_set
             ]
+        count_pruned_track_ids = self._prune_excess_tracks_by_count()
         self._tracks = [
             track for track in self._tracks
             if not (track.state == TrackState.TENTATIVE and track.misses > 1)
             and track.misses <= self.max_missed_frames
         ]
         after_prune_ids = {int(track.track_id) for track in self._tracks}
-        deleted_ids = sorted(before_prune_ids - after_prune_ids)
+        deleted_ids = sorted((before_prune_ids - after_prune_ids) | set(count_pruned_track_ids))
 
         self._update_primary_track_id()
 
@@ -1220,6 +1288,7 @@ class MultiTargetTracker:
                 "suppressed_births": suppressed_births[:12],
                 "duplicate_confirmed_deleted_ids": duplicate_confirmed_ids,
                 "duplicate_tentative_deleted_ids": duplicate_tentative_ids,
+                "count_pruned_track_ids": count_pruned_track_ids,
                 "deleted_track_ids": deleted_ids,
                 "primary_track_id": self._primary_track_id,
                 "tracks_after_prune": [self._trace_track(track) for track in self._tracks[:12]],

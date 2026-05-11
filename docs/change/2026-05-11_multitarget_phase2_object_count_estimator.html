@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>2026-05-11 multitarget phase2 object count estimator</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; line-height: 1.55; color: #172033; }
+    code, pre { background: #f3f5f8; border-radius: 6px; }
+    code { padding: 1px 4px; }
+    pre { padding: 12px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>Multi-target Phase 2 Object Count Estimator 추가</h1>
+
+  <h2>목적</h2>
+  <p>
+    tracker가 현재 프레임의 예상 객체 수를 모르는 상태에서 birth/association을 수행하는 문제를 줄이기 위해,
+    detection 단계의 최종 merge 후보에서 독립 객체 수를 추정해 trace에 기록하도록 했다.
+  </p>
+
+  <h2>수정 파일</h2>
+  <ul>
+    <li><code>tools/runtime_core/detection.py</code></li>
+    <li><code>tools/diagnostics/multitarget_stage_eval.py</code></li>
+  </ul>
+
+  <h2>변경 내용</h2>
+  <ul>
+    <li><code>_estimate_object_count_from_candidates</code>를 추가해 후보 간 xy 거리와 Doppler bin 차이를 기준으로 독립 객체 수를 추정한다.</li>
+    <li>detection trace에 <code>object_count_estimator</code> 블록을 추가한다.</li>
+    <li>기준 세션에서 3명 과대 추정을 줄이기 위해 기본 Doppler 분리 기준을 <code>7 bins</code>로 조정했다.</li>
+    <li>진단 리포트에 <code>object_count_estimate</code> 분포를 추가했다.</li>
+  </ul>
+
+  <h2>검증 명령 또는 확인 방법</h2>
+  <pre><code>python -c "from pathlib import Path; compile(Path('tools/runtime_core/detection.py').read_text(encoding='utf-8'), 'tools/runtime_core/detection.py', 'exec'); compile(Path('tools/diagnostics/multitarget_stage_eval.py').read_text(encoding='utf-8'), 'tools/diagnostics/multitarget_stage_eval.py', 'exec'); print('syntax ok')"
+python -B -m tools.lab.stage_cache --session 20260508_193458 --mode baseline --force
+python -B -m tools.diagnostics.multitarget_stage_eval --session 20260508_193458 --mode baseline --expected-max 2 --min-separation-m 0.65 --min-doppler-bins 7 --min-score-ratio 0.05 --jump-threshold-m 0.85</code></pre>
+
+  <h2>결과</h2>
+  <ul>
+    <li>보고서: <code>logs/diagnostics/multitarget_stage_eval_20260511_041249_20260508_193458/report.html</code></li>
+    <li><code>object_count_estimate</code> 분포: 1명 92프레임, 2명 155프레임, 3명 3프레임</li>
+    <li><code>display_two_or_more_rate</code>: 0.236</li>
+    <li><code>dbscan_collapse_rate_on_multi_evidence</code>: 0.7215</li>
+    <li><code>tracker_collapse_rate_after_dbscan_multi</code>: 0.631</li>
+  </ul>
+
+  <h2>남은 위험 또는 다음 후보</h2>
+  <ul>
+    <li>이번 단계는 객체 수 관측값을 trace에 남기는 변경이며, 아직 DBSCAN/tracker 동작을 직접 바꾸지는 않는다.</li>
+    <li>기준 세션에서 DBSCAN이 object count estimate 2인 프레임을 1개로 접는 비율이 높으므로, 다음 단계에서는 RDA 후보 유지와 DBSCAN/merge 정책을 object count와 연동해야 한다.</li>
+  </ul>
+</body>
+</html>

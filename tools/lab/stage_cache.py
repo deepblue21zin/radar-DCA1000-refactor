@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from datetime import datetime
+import inspect
 import json
 import math
 from pathlib import Path
@@ -9,21 +11,74 @@ from pathlib import Path
 import numpy as np
 
 from tools.lab import registry
-from tools.runtime_core.detection import DetectionRegion
+from tools.runtime_core.detection import DetectionRegion, detect_targets as _RuntimeDetectTargets
 from tools.runtime_core.radar_runtime import parse_runtime_config, radial_bin_limit
 from tools.runtime_core.real_time_process import (
     _serialize_detection,
     _serialize_track,
     iter_raw_capture_frame_packets,
     load_raw_capture,
-    process_frame_packet,
+    process_frame_packet as _runtime_process_frame_packet,
 )
 from tools.runtime_core.runtime_settings import load_runtime_settings
-from tools.runtime_core.tracking import MultiTargetTracker
+from tools.runtime_core.tracking import MultiTargetTracker as _RuntimeMultiTargetTracker
 
 
-STAGE_CACHE_SCHEMA_VERSION = 3
+STAGE_CACHE_SCHEMA_VERSION = 4
 STAGE_FEATURE_SCHEMA_VERSION = 1
+
+
+def _filter_tracker_kwargs_for_loaded_signature(kwargs: dict) -> dict:
+    parameters = inspect.signature(_RuntimeMultiTargetTracker.__init__).parameters
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return kwargs
+    supported = set(parameters) - {"self"}
+    return {key: value for key, value in kwargs.items() if key in supported}
+
+
+def MultiTargetTracker(*args, **kwargs):
+    if args:
+        return _RuntimeMultiTargetTracker(*args, **kwargs)
+    return _RuntimeMultiTargetTracker(**_filter_tracker_kwargs_for_loaded_signature(kwargs))
+
+
+class _NoOpTracker:
+    def update(self, *args, **kwargs):
+        return [], []
+
+
+def _filter_process_frame_kwargs_for_loaded_signature(kwargs: dict) -> dict:
+    parameters = inspect.signature(_runtime_process_frame_packet).parameters
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return kwargs
+    supported = set(parameters) - {"raw_frame"}
+    return {key: value for key, value in kwargs.items() if key in supported}
+
+
+def process_frame_packet(raw_frame, **kwargs):
+    parameters = inspect.signature(_runtime_process_frame_packet).parameters
+    tracker_enabled = bool(kwargs.get("tracker_enabled", True))
+    if "tracker_enabled" not in parameters and not tracker_enabled:
+        kwargs["tracker"] = _NoOpTracker()
+    return _runtime_process_frame_packet(
+        raw_frame,
+        **_filter_process_frame_kwargs_for_loaded_signature(kwargs),
+    )
+
+
+def _filter_detection_params_for_loaded_signature(params: dict) -> dict:
+    parameters = inspect.signature(_RuntimeDetectTargets).parameters
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return params
+    supported = set(parameters) - {
+        "rdi_map",
+        "rai_map",
+        "runtime_config",
+        "min_range_bin",
+        "max_range_bin",
+        "detection_region",
+    }
+    return {key: value for key, value in params.items() if key in supported}
 
 
 def _now() -> str:
@@ -83,26 +138,58 @@ def _as_path(project_root: Path, value: str | Path | None) -> Path | None:
     return (project_root / path).resolve()
 
 
+def _source_capture_candidates(project_root: Path, value: str | Path | None) -> list[Path]:
+    direct = _as_path(project_root, value)
+    candidates = []
+    if direct is not None:
+        candidates.append(direct)
+    if not value:
+        return candidates
+
+    session_id = Path(str(value)).name
+    for live_session_dir in (
+        project_root / "logs" / "live_motion_viewer" / str(value),
+        project_root / "logs" / "live_motion_viewer" / session_id,
+    ):
+        summary_path = live_session_dir / "summary.json"
+        if not summary_path.exists():
+            continue
+        summary = _load_json(summary_path)
+        source_capture = (
+            _nested_get(summary, "session_meta", "source_capture")
+            or summary.get("source_capture")
+            or _nested_get(summary, "runtime_config", "log_source_capture")
+        )
+        nested = _as_path(project_root, source_capture)
+        if nested is not None:
+            candidates.append(nested)
+    return candidates
+
+
 def _resolve_capture_dir(project_root: Path, run_detail: dict) -> Path:
     capture_candidates = []
     if run_detail.get("capture_id"):
-        capture_candidates.append(project_root / "logs" / "raw" / str(run_detail["capture_id"]))
+        capture_candidates.extend(
+            _source_capture_candidates(project_root, project_root / "logs" / "raw" / str(run_detail["capture_id"]))
+        )
 
     session_meta = run_detail.get("session_meta") or {}
     runtime_summary = run_detail.get("runtime_config") or {}
     summary = run_detail.get("summary") or {}
 
     capture_candidates.extend(
-        candidate
-        for candidate in [
+        value
+        for value in [
             _as_path(project_root, session_meta.get("raw_capture_dir")),
-            _as_path(project_root, session_meta.get("source_capture")),
+            *(_source_capture_candidates(project_root, session_meta.get("source_capture"))),
             _as_path(project_root, runtime_summary.get("raw_capture_dir")),
-            _as_path(project_root, runtime_summary.get("log_source_capture")),
+            *(_source_capture_candidates(project_root, runtime_summary.get("log_source_capture"))),
             _as_path(project_root, _nested_get(summary, "session_meta", "raw_capture_dir")),
+            *(_source_capture_candidates(project_root, _nested_get(summary, "session_meta", "source_capture"))),
             _as_path(project_root, _nested_get(summary, "runtime_config", "raw_capture_dir")),
+            *(_source_capture_candidates(project_root, _nested_get(summary, "runtime_config", "log_source_capture"))),
         ]
-        if candidate is not None
+        if value is not None
     )
 
     for candidate in capture_candidates:
@@ -179,7 +266,43 @@ def _logged_lateral_axis_sign(runtime_summary: dict) -> tuple[float, str]:
     return (-1.0 if _bool_from_config(invert) else 1.0), "logged_tuning"
 
 
-def _build_runtime_components(project_root: Path, runtime_summary: dict):
+def _current_runtime_settings(project_root: Path) -> dict:
+    try:
+        return load_runtime_settings(project_root)
+    except Exception:
+        return {}
+
+
+def _normalize_ablation_mode(mode: str | None) -> str:
+    mode = str(mode or "baseline").strip().lower()
+    allowed = {
+        "baseline",
+        "doppler_slice_angle",
+        "rda_candidates",
+        "person_aware_merge",
+        "multi_tracker_relaxed",
+        "no_body_center",
+        "no_duplicate_suppression",
+        "no_merge",
+        "no_dbscan",
+        "tracker_off",
+    }
+    if mode not in allowed:
+        raise ValueError(f"Unsupported stage cache ablation mode: {mode}")
+    return mode
+
+
+def _tracking_value(runtime_summary: dict, key: str, default=None):
+    return runtime_summary.get(
+        f"track_{key}",
+        _nested_get(runtime_summary, "tuning_snapshot", "tracking", key, default=default),
+    )
+
+
+def _build_runtime_components(project_root: Path, runtime_summary: dict, *, ablation_mode: str = "baseline"):
+    ablation_mode = _normalize_ablation_mode(ablation_mode)
+    current_settings = _current_runtime_settings(project_root)
+    current_processing = _nested_get(current_settings, "tuning", "processing", default={}) or {}
     cfg_path = _resolve_cfg_path(project_root, runtime_summary)
     remove_static = bool(
         runtime_summary.get(
@@ -188,11 +311,71 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict):
         )
     )
     doppler_guard_bins = int(
-        _nested_get(runtime_summary, "tuning_snapshot", "processing", "doppler_guard_bins", default=1)
+        runtime_summary.get(
+            "doppler_guard_bins",
+            _nested_get(runtime_summary, "tuning_snapshot", "processing", "doppler_guard_bins", default=1),
+        )
     )
-    lateral_axis_sign, lateral_axis_sign_source = _current_lateral_axis_sign(project_root)
+    angle_projection = runtime_summary.get(
+        "angle_projection",
+        _nested_get(runtime_summary, "tuning_snapshot", "processing", "angle_projection", default="fft1d"),
+    )
+    current_angle_phase_sign = current_processing.get("angle_phase_sign")
+    if current_angle_phase_sign is not None:
+        angle_phase_sign = current_angle_phase_sign
+        angle_phase_sign_source = "current_tuning"
+    else:
+        angle_phase_sign = runtime_summary.get(
+            "angle_phase_sign",
+            _nested_get(runtime_summary, "tuning_snapshot", "processing", "angle_phase_sign", default=-1.0),
+        )
+        angle_phase_sign_source = "logged_summary"
+    angle_source = runtime_summary.get(
+        "angle_source",
+        _nested_get(
+            runtime_summary,
+            "tuning_snapshot",
+            "processing",
+            "angle_source",
+            default=current_processing.get("angle_source", "collapsed_rai"),
+        ),
+    )
+    channel_calibration = _nested_get(
+        runtime_summary,
+        "tuning_snapshot",
+        "processing",
+        "channel_calibration",
+        default=current_processing.get("channel_calibration", {}),
+    ) or {}
+    channel_calibration_enabled = runtime_summary.get(
+        "channel_calibration_enabled",
+        channel_calibration.get("enabled", False),
+    )
+    channel_calibration_coefficients = channel_calibration.get("coefficients", [])
+    angle_elevation_min_deg = _nested_get(
+        runtime_summary,
+        "tuning_snapshot",
+        "processing",
+        "angle_elevation_min_deg",
+        default=-40.0,
+    )
+    angle_elevation_max_deg = _nested_get(
+        runtime_summary,
+        "tuning_snapshot",
+        "processing",
+        "angle_elevation_max_deg",
+        default=40.0,
+    )
+    angle_elevation_step_deg = _nested_get(
+        runtime_summary,
+        "tuning_snapshot",
+        "processing",
+        "angle_elevation_step_deg",
+        default=4.0,
+    )
+    lateral_axis_sign, lateral_axis_sign_source = _logged_lateral_axis_sign(runtime_summary)
     if lateral_axis_sign is None:
-        lateral_axis_sign, lateral_axis_sign_source = _logged_lateral_axis_sign(runtime_summary)
+        lateral_axis_sign, lateral_axis_sign_source = _current_lateral_axis_sign(project_root)
 
     runtime_config = parse_runtime_config(
         cfg_path,
@@ -200,6 +383,29 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict):
         doppler_guard_bins=doppler_guard_bins,
         lateral_axis_sign=float(lateral_axis_sign),
     )
+    runtime_config_updates = {}
+    if hasattr(runtime_config, "angle_projection"):
+        runtime_config_updates["angle_projection"] = str(angle_projection or "fft1d").strip().lower()
+    if hasattr(runtime_config, "angle_elevation_min_deg"):
+        runtime_config_updates["angle_elevation_min_deg"] = float(angle_elevation_min_deg)
+    if hasattr(runtime_config, "angle_elevation_max_deg"):
+        runtime_config_updates["angle_elevation_max_deg"] = float(angle_elevation_max_deg)
+    if hasattr(runtime_config, "angle_elevation_step_deg"):
+        runtime_config_updates["angle_elevation_step_deg"] = float(angle_elevation_step_deg)
+    if hasattr(runtime_config, "angle_phase_sign"):
+        runtime_config_updates["angle_phase_sign"] = float(angle_phase_sign)
+    if hasattr(runtime_config, "angle_source"):
+        runtime_config_updates["angle_source"] = str(angle_source or "collapsed_rai").strip().lower()
+    if hasattr(runtime_config, "channel_calibration_enabled"):
+        runtime_config_updates["channel_calibration_enabled"] = bool(channel_calibration_enabled)
+    if hasattr(runtime_config, "channel_calibration_coefficients"):
+        from tools.runtime_core.radar_runtime import _parse_complex_coefficients
+
+        runtime_config_updates["channel_calibration_coefficients"] = _parse_complex_coefficients(
+            channel_calibration_coefficients
+        )
+    if runtime_config_updates:
+        runtime_config = replace(runtime_config, **runtime_config_updates)
 
     roi_lateral_m = float(
         runtime_summary.get(
@@ -276,6 +482,45 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict):
         detection_params["cfar_training_cells"] = tuple(detection_params["cfar_training_cells"])
     if "cfar_guard_cells" in detection_params:
         detection_params["cfar_guard_cells"] = tuple(detection_params["cfar_guard_cells"])
+    resolved_angle_source = str(
+        getattr(runtime_config, "angle_source", angle_source or "collapsed_rai") or "collapsed_rai"
+    ).strip().lower()
+    detection_params["angle_source"] = resolved_angle_source
+
+    tracker_enabled = True
+    tracker_overrides = {}
+    if ablation_mode == "doppler_slice_angle":
+        detection_params["angle_source"] = "doppler_slice_rai"
+    elif ablation_mode == "rda_candidates":
+        detection_params["angle_source"] = "doppler_slice_rai"
+        detection_params["enable_dbscan"] = False
+    elif ablation_mode == "person_aware_merge":
+        detection_params["angle_source"] = "doppler_slice_rai"
+        detection_params["protect_multi_object_candidates"] = True
+    elif ablation_mode == "multi_tracker_relaxed":
+        detection_params["angle_source"] = "doppler_slice_rai"
+        detection_params["protect_multi_object_candidates"] = True
+        detection_params["limit_output_to_object_count"] = True
+        tracker_overrides = {
+            "track_confirm_hits": 2,
+            "track_birth_suppression_radius_m": 0.35,
+            "track_primary_track_birth_scale": 1.0,
+            "track_birth_suppression_weak_radius_scale": 1.0,
+            "track_birth_suppression_score_ratio": 0.0,
+            "track_birth_suppression_confidence_ratio": 0.0,
+            "track_tentative_gate_factor": 1.0,
+        }
+    elif ablation_mode == "no_body_center":
+        detection_params["enable_body_center_refinement"] = False
+    elif ablation_mode == "no_duplicate_suppression":
+        detection_params["duplicate_suppression_enabled"] = False
+    elif ablation_mode == "no_merge":
+        detection_params["enable_candidate_merge"] = False
+    elif ablation_mode == "no_dbscan":
+        detection_params["enable_dbscan"] = False
+    elif ablation_mode == "tracker_off":
+        tracker_enabled = False
+    detection_params = _filter_detection_params_for_loaded_signature(detection_params)
 
     angle_resolution_deg = runtime_summary.get("track_angle_resolution_deg")
     if angle_resolution_deg is not None:
@@ -294,21 +539,36 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict):
         doppler_zero_guard_bins=int(runtime_summary.get("track_doppler_zero_guard_bins", 2)),
         doppler_gate_bins=int(runtime_summary.get("track_doppler_gate_bins", 0)),
         doppler_cost_weight=float(runtime_summary.get("track_doppler_cost_weight", 0.0)),
-        min_confirmed_hits=int(runtime_summary.get("track_confirm_hits", 2)),
+        min_confirmed_hits=int(tracker_overrides.get("track_confirm_hits", runtime_summary.get("track_confirm_hits", 2))),
         max_missed_frames=int(runtime_summary.get("track_max_misses", 8)),
         report_miss_tolerance=int(runtime_summary.get("track_report_miss_tolerance", 2)),
         lost_gate_factor=float(runtime_summary.get("track_lost_gate_factor", 1.2)),
-        tentative_gate_factor=float(runtime_summary.get("track_tentative_gate_factor", 0.5)),
-        birth_suppression_radius_m=float(runtime_summary.get("track_birth_suppression_radius_m", 0.0)),
-        primary_track_birth_scale=float(runtime_summary.get("track_primary_track_birth_scale", 1.0)),
+        tentative_gate_factor=float(
+            tracker_overrides.get("track_tentative_gate_factor", runtime_summary.get("track_tentative_gate_factor", 0.5))
+        ),
+        birth_suppression_radius_m=float(
+            tracker_overrides.get("track_birth_suppression_radius_m", runtime_summary.get("track_birth_suppression_radius_m", 0.0))
+        ),
+        primary_track_birth_scale=float(
+            tracker_overrides.get("track_primary_track_birth_scale", runtime_summary.get("track_primary_track_birth_scale", 1.0))
+        ),
         birth_suppression_weak_radius_scale=float(
-            runtime_summary.get("track_birth_suppression_weak_radius_scale", 1.0)
+            tracker_overrides.get(
+                "track_birth_suppression_weak_radius_scale",
+                runtime_summary.get("track_birth_suppression_weak_radius_scale", 1.0),
+            )
         ),
         birth_suppression_score_ratio=float(
-            runtime_summary.get("track_birth_suppression_score_ratio", 0.0)
+            tracker_overrides.get(
+                "track_birth_suppression_score_ratio",
+                runtime_summary.get("track_birth_suppression_score_ratio", 0.0),
+            )
         ),
         birth_suppression_confidence_ratio=float(
-            runtime_summary.get("track_birth_suppression_confidence_ratio", 0.0)
+            tracker_overrides.get(
+                "track_birth_suppression_confidence_ratio",
+                runtime_summary.get("track_birth_suppression_confidence_ratio", 0.0),
+            )
         ),
         birth_suppression_doppler_bins=int(
             runtime_summary.get("track_birth_suppression_doppler_bins", 0)
@@ -344,6 +604,9 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict):
         measurement_soft_gate_speed_scale=float(
             runtime_summary.get("track_measurement_soft_gate_speed_scale", 0.06)
         ),
+        max_object_count=int(_tracking_value(runtime_summary, "max_object_count", 3) or 0),
+        expected_object_count=_tracking_value(runtime_summary, "expected_object_count", None),
+        crossing_hold_frames=int(_tracking_value(runtime_summary, "crossing_hold_frames", 8) or 0),
     )
 
     min_range_bin = (
@@ -369,6 +632,9 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict):
         "roi_forward_m": roi_forward_m,
         "roi_min_forward_m": roi_min_forward_m,
         "lateral_axis_sign_source": lateral_axis_sign_source,
+        "angle_phase_sign_source": angle_phase_sign_source,
+        "ablation_mode": ablation_mode,
+        "tracker_enabled": tracker_enabled,
     }
 
 
@@ -376,12 +642,19 @@ def stage_cache_root(project_root: Path) -> Path:
     return Path(project_root).resolve() / "lab_data" / "stage_cache"
 
 
-def stage_cache_dir(project_root: Path, session_id: str) -> Path:
-    return stage_cache_root(project_root) / str(session_id)
+def _stage_cache_key(session_id: str, ablation_mode: str | None = "baseline") -> str:
+    mode = _normalize_ablation_mode(ablation_mode)
+    if mode == "baseline":
+        return str(session_id)
+    return f"{session_id}__{mode}"
 
 
-def stage_cache_paths(project_root: Path, session_id: str) -> dict[str, Path]:
-    cache_dir = stage_cache_dir(project_root, session_id)
+def stage_cache_dir(project_root: Path, session_id: str, ablation_mode: str | None = "baseline") -> Path:
+    return stage_cache_root(project_root) / _stage_cache_key(session_id, ablation_mode)
+
+
+def stage_cache_paths(project_root: Path, session_id: str, ablation_mode: str | None = "baseline") -> dict[str, Path]:
+    cache_dir = stage_cache_dir(project_root, session_id, ablation_mode)
     return {
         "cache_dir": cache_dir,
         "manifest_path": cache_dir / "manifest.json",
@@ -394,45 +667,45 @@ def stage_cache_paths(project_root: Path, session_id: str) -> dict[str, Path]:
     }
 
 
-def load_stage_cache_manifest(project_root: Path, session_id: str) -> dict | None:
-    manifest_path = stage_cache_paths(project_root, session_id)["manifest_path"]
+def load_stage_cache_manifest(project_root: Path, session_id: str, ablation_mode: str | None = "baseline") -> dict | None:
+    manifest_path = stage_cache_paths(project_root, session_id, ablation_mode)["manifest_path"]
     if not manifest_path.exists():
         return None
     return _load_json(manifest_path)
 
 
-def load_stage_cache_frames(project_root: Path, session_id: str) -> list[dict]:
-    frames_path = stage_cache_paths(project_root, session_id)["frames_path"]
+def load_stage_cache_frames(project_root: Path, session_id: str, ablation_mode: str | None = "baseline") -> list[dict]:
+    frames_path = stage_cache_paths(project_root, session_id, ablation_mode)["frames_path"]
     return _load_jsonl(frames_path)
 
 
-def load_stage_features(project_root: Path, session_id: str) -> list[dict]:
-    features_path = stage_cache_paths(project_root, session_id)["features_path"]
+def load_stage_features(project_root: Path, session_id: str, ablation_mode: str | None = "baseline") -> list[dict]:
+    features_path = stage_cache_paths(project_root, session_id, ablation_mode)["features_path"]
     return _load_jsonl(features_path)
 
 
-def load_stage_feature_summary(project_root: Path, session_id: str) -> dict | None:
-    summary_path = stage_cache_paths(project_root, session_id)["feature_summary_path"]
+def load_stage_feature_summary(project_root: Path, session_id: str, ablation_mode: str | None = "baseline") -> dict | None:
+    summary_path = stage_cache_paths(project_root, session_id, ablation_mode)["feature_summary_path"]
     if not summary_path.exists():
         return None
     return _load_json(summary_path)
 
 
-def load_stage_traces(project_root: Path, session_id: str) -> list[dict]:
-    trace_path = stage_cache_paths(project_root, session_id)["trace_path"]
+def load_stage_traces(project_root: Path, session_id: str, ablation_mode: str | None = "baseline") -> list[dict]:
+    trace_path = stage_cache_paths(project_root, session_id, ablation_mode)["trace_path"]
     return _load_jsonl(trace_path)
 
 
-def load_stage_trace_summary(project_root: Path, session_id: str) -> dict | None:
-    summary_path = stage_cache_paths(project_root, session_id)["trace_summary_path"]
+def load_stage_trace_summary(project_root: Path, session_id: str, ablation_mode: str | None = "baseline") -> dict | None:
+    summary_path = stage_cache_paths(project_root, session_id, ablation_mode)["trace_summary_path"]
     if not summary_path.exists():
         return None
     return _load_json(summary_path)
 
 
-def load_stage_cache_frame(project_root: Path, session_id: str, ordinal: int) -> tuple[dict, dict[str, np.ndarray]]:
-    cache_dir = stage_cache_dir(project_root, session_id)
-    frames = load_stage_cache_frames(project_root, session_id)
+def load_stage_cache_frame(project_root: Path, session_id: str, ordinal: int, ablation_mode: str | None = "baseline") -> tuple[dict, dict[str, np.ndarray]]:
+    cache_dir = stage_cache_dir(project_root, session_id, ablation_mode)
+    frames = load_stage_cache_frames(project_root, session_id, ablation_mode)
     for record in frames:
         if int(record.get("ordinal", -1)) != int(ordinal):
             continue
@@ -855,6 +1128,9 @@ def _build_trace_summary(traces: list[dict]) -> dict:
                 "births": len(_nested_get(tracker, "track_lifecycle", "births", default=[]) or []),
                 "deleted": len(_nested_get(tracker, "track_lifecycle", "deleted_track_ids", default=[]) or []),
                 "display_confirmed": int(_nested_get(trace, "display_output", "confirmed_count", default=0) or 0),
+                "rai_collapse_suspicious": int(
+                    _nested_get(trace, "rai_collapse_diagnostics", "suspicious_count", default=0) or 0
+                ),
             }
         )
 
@@ -871,6 +1147,7 @@ def _build_trace_summary(traces: list[dict]) -> dict:
         "births",
         "deleted",
         "display_confirmed",
+        "rai_collapse_suspicious",
     ]:
         metrics[key] = _numeric_summary(stage_counts, key)
 
@@ -890,8 +1167,10 @@ def build_stage_cache(
     *,
     frame_limit: int | None = None,
     force: bool = False,
+    ablation_mode: str = "baseline",
 ) -> dict:
     project_root = Path(project_root).resolve()
+    ablation_mode = _normalize_ablation_mode(ablation_mode)
     run_detail = registry.fetch_run_detail(project_root, session_id)
     if run_detail is None:
         registry.refresh_registry(project_root)
@@ -902,12 +1181,12 @@ def build_stage_cache(
     capture_dir = _resolve_capture_dir(project_root, run_detail)
     capture_manifest, _, _ = load_raw_capture(capture_dir)
     runtime_summary = _merge_runtime_summary(run_detail, capture_manifest)
-    components = _build_runtime_components(project_root, runtime_summary)
+    components = _build_runtime_components(project_root, runtime_summary, ablation_mode=ablation_mode)
 
-    paths = stage_cache_paths(project_root, session_id)
+    paths = stage_cache_paths(project_root, session_id, ablation_mode)
     requested_limit = int(frame_limit) if frame_limit not in (None, 0) else None
     if not force and paths["manifest_path"].exists() and paths["frames_path"].exists():
-        existing_manifest = load_stage_cache_manifest(project_root, session_id) or {}
+        existing_manifest = load_stage_cache_manifest(project_root, session_id, ablation_mode) or {}
         feature_files_ready = (
             paths["features_path"].exists()
             and paths["feature_summary_path"].exists()
@@ -942,6 +1221,7 @@ def build_stage_cache(
             capture_stage_timing=True,
             return_artifacts=True,
             capture_trace=True,
+            tracker_enabled=components["tracker_enabled"],
         )
         artifact_file = paths["artifacts_dir"] / f"frame_{ordinal:06d}.npz"
         np.savez_compressed(
@@ -1012,6 +1292,8 @@ def build_stage_cache(
     manifest = {
         "schema_version": STAGE_CACHE_SCHEMA_VERSION,
         "session_id": str(session_id),
+        "cache_key": _stage_cache_key(session_id, ablation_mode),
+        "ablation_mode": ablation_mode,
         "source_session_dir": run_detail.get("session_dir"),
         "capture_id": run_detail.get("capture_id"),
         "capture_dir": str(capture_dir),
@@ -1037,6 +1319,7 @@ def build_stage_cache(
             "shared_fft",
             "rdi",
             "rai",
+            "rai_collapse_diagnostics",
             "detection.cfar",
             "detection.angle_validation",
             "detection.body_center_refinement",
@@ -1066,6 +1349,22 @@ def build_stage_cache(
             "angle_fft_size": int(components["runtime_config"].angle_fft_size),
             "lateral_axis_sign": float(components["runtime_config"].lateral_axis_sign),
             "lateral_axis_sign_source": components["lateral_axis_sign_source"],
+            "angle_projection": str(getattr(components["runtime_config"], "angle_projection", "fft1d")),
+            "angle_phase_sign": float(getattr(components["runtime_config"], "angle_phase_sign", -1.0)),
+            "angle_phase_sign_source": components["angle_phase_sign_source"],
+            "angle_source": str(
+                getattr(
+                    components["runtime_config"],
+                    "angle_source",
+                    components["detection_params"].get("angle_source", "collapsed_rai"),
+                )
+            ),
+            "channel_calibration_enabled": bool(
+                getattr(components["runtime_config"], "channel_calibration_enabled", False)
+            ),
+            "channel_calibration_count": int(
+                len(getattr(components["runtime_config"], "channel_calibration_coefficients", ()) or ())
+            ),
         },
         "roi": {
             "lateral_m": round(float(components["roi_lateral_m"]), 4),
@@ -1085,6 +1384,23 @@ def main() -> None:
     parser.add_argument("--session", required=True, help="Run session id to build the stage cache for.")
     parser.add_argument("--limit", type=int, default=0, help="Optional frame limit. 0 means all frames.")
     parser.add_argument("--force", action="store_true", help="Rebuild cache even if it already exists.")
+    parser.add_argument(
+        "--mode",
+        default="baseline",
+        choices=[
+            "baseline",
+            "doppler_slice_angle",
+            "rda_candidates",
+            "person_aware_merge",
+            "multi_tracker_relaxed",
+            "no_body_center",
+            "no_duplicate_suppression",
+            "no_merge",
+            "no_dbscan",
+            "tracker_off",
+        ],
+        help="Optional ablation mode for Stage Debug replay.",
+    )
     args = parser.parse_args()
 
     manifest = build_stage_cache(
@@ -1092,6 +1408,7 @@ def main() -> None:
         args.session,
         frame_limit=(args.limit or None),
         force=bool(args.force),
+        ablation_mode=args.mode,
     )
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
 

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Multi-target Phase 6 Streamlit Ablation KPI</title>
+</head>
+<body>
+  <h1>Multi-target Phase 6 Streamlit 평가 지표 추가</h1>
+  <h2>목적</h2>
+  <p>
+    2인 교차 세션 <code>20260508_193458</code>에서 단계별 replay 모드의 성능을
+    Streamlit Stage Debug 화면에서 한 번에 비교할 수 있게 한다.
+  </p>
+  <h2>수정 파일</h2>
+  <ul>
+    <li><code>tools/lab/app.py</code></li>
+  </ul>
+  <h2>변경 내용</h2>
+  <ul>
+    <li>Stage Debug ablation mode 목록에 <code>rda_candidates</code>, <code>person_aware_merge</code>, <code>multi_tracker_relaxed</code>, <code>no_duplicate_suppression</code>을 추가했다.</li>
+    <li>모드별 cache 존재 여부와 multi-target 핵심 KPI를 비교하는 <code>Ablation KPI Comparison</code> 표를 추가했다.</li>
+    <li>KPI는 multi-object evidence, DBSCAN collapse, tracker collapse, 최종 2명 이상 표시율, 3명 이상 과검출률, RAI suspicious frame 수를 표시한다.</li>
+  </ul>
+  <h2>검증 명령 또는 확인 방법</h2>
+  <pre><code>python -B -c "from pathlib import Path; files=['tools/lab/app.py','real-time/live_motion_viewer.py','tools/runtime_core/runtime_settings.py','tools/runtime_core/detection.py','tools/lab/stage_cache.py','tools/diagnostics/multitarget_stage_eval.py']; [compile(Path(f).read_text(encoding='utf-8'), f, 'exec') for f in files]; print('syntax ok')"</code></pre>
+  <h2>결과</h2>
+  <p>pyc 파일을 만들지 않는 방식으로 syntax 검증을 통과했다. Streamlit 실행 화면은 사용자가 열어 둔 Radar Lab에서 새로고침 후 확인하면 된다.</p>
+  <h2>남은 위험 또는 다음 후보</h2>
+  <p>
+    KPI 표는 이미 생성된 Stage Cache를 비교한다. 새 모드를 처음 보는 세션은 해당 모드로 cache를 한 번 생성해야 수치가 채워진다.
+  </p>
+</body>
+</html>

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Stage Cache 좌우 부호 기준을 세션 로그 우선으로 수정</title>
+  <style>
+    body { font-family: "Malgun Gothic", Arial, sans-serif; margin: 32px; line-height: 1.6; color: #1f2937; }
+    h1 { font-size: 24px; }
+    h2 { font-size: 18px; margin-top: 24px; }
+    code { background: #f3f4f6; padding: 2px 5px; border-radius: 4px; }
+    pre { background: #f8fafc; padding: 12px; border: 1px solid #e5e7eb; border-radius: 6px; overflow-x: auto; }
+    ul { padding-left: 22px; }
+  </style>
+</head>
+<body>
+  <h1>Stage Cache 좌우 부호 기준을 세션 로그 우선으로 수정</h1>
+
+  <h2>목적</h2>
+  <p>
+    Streamlit Stage Cache가 과거 세션을 재계산할 때 현재 <code>config/live_motion_tuning_isk.json</code>의
+    <code>invert_lateral_axis</code> 값을 먼저 사용하면, live/replay 당시 저장된 좌표 부호와 Streamlit 재계산 좌표가
+    서로 다르게 보일 수 있다. 과거 로그 해석의 일관성을 위해 세션에 저장된 좌우 부호를 우선 사용하도록 수정했다.
+  </p>
+
+  <h2>수정 파일</h2>
+  <ul>
+    <li><code>tools/lab/stage_cache.py</code></li>
+  </ul>
+
+  <h2>변경 내용</h2>
+  <ul>
+    <li>Stage Cache runtime component 생성 시 현재 tuning 파일보다 세션 로그의 <code>lateral_axis_sign</code> / <code>invert_lateral_axis</code> 값을 우선 사용한다.</li>
+    <li>현재 tuning 값은 세션 로그에서 좌우 부호를 찾을 수 없는 경우에만 fallback으로 사용한다.</li>
+    <li>manifest의 <code>lateral_axis_sign_source</code>로 어떤 기준을 썼는지 계속 남긴다.</li>
+  </ul>
+
+  <h2>검증 명령 또는 확인 방법</h2>
+  <pre><code>python -B -c "import ast, pathlib; ast.parse(pathlib.Path('tools/lab/stage_cache.py').read_text(encoding='utf-8')); print('stage_cache.py AST PASS')"
+python -B -c "from tools.lab import registry, stage_cache; from pathlib import Path; root=Path('.').resolve(); run=registry.fetch_run_detail(root,'20260509_005846'); cap=stage_cache._resolve_capture_dir(root,run); from tools.runtime_core.real_time_process import load_raw_capture; manifest,_,_=load_raw_capture(cap); rs=stage_cache._merge_runtime_summary(run, manifest); comp=stage_cache._build_runtime_components(root, rs); print(comp['runtime_config'].lateral_axis_sign, comp['lateral_axis_sign_source'])"
+python -B -m tools.lab.stage_cache --session 20260509_005846 --force</code></pre>
+
+  <h2>결과</h2>
+  <ul>
+    <li>문법 검사 통과.</li>
+    <li><code>20260509_005846</code> 기준 <code>lateral_axis_sign=-1.0</code>, <code>lateral_axis_sign_source=logged_summary</code> 확인.</li>
+    <li>전체 250프레임 Stage Cache rebuild 성공.</li>
+  </ul>
+
+  <h2>남은 위험 또는 다음 후보</h2>
+  <ul>
+    <li>이 수정은 Streamlit 재계산과 저장 당시 replay 좌표계의 불일치를 줄이는 변경이며, 물리적 왼쪽/오른쪽 정의 자체를 새로 정한 것은 아니다.</li>
+    <li>실제 좌우 물리 기준 확정은 왼쪽/오른쪽 코너 리플렉터 raw capture를 같은 도구로 비교해 <code>+x</code>가 어느 물리 방향인지 명시해야 한다.</li>
+  </ul>
+</body>
+</html>

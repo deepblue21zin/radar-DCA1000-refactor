@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>2026-05-11 multitarget phase0 stage eval</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; line-height: 1.55; color: #172033; }
+    code, pre { background: #f3f5f8; border-radius: 6px; }
+    code { padding: 1px 4px; }
+    pre { padding: 12px; overflow-x: auto; }
+    li { margin: 4px 0; }
+  </style>
+</head>
+<body>
+  <h1>Multi-target Phase 0 관측/검증 리포트 도구 추가</h1>
+
+  <h2>목적</h2>
+  <p>
+    기준 세션 <code>20260508_193458</code>에서 2명 교차/왕복 상황의 실패 위치를 감으로 보지 않고,
+    후보 검출, DBSCAN, tracker, display 단계별 count collapse로 분리하기 위해 진단 도구를 추가했다.
+  </p>
+
+  <h2>수정 파일</h2>
+  <ul>
+    <li><code>tools/diagnostics/multitarget_stage_eval.py</code></li>
+  </ul>
+
+  <h2>변경 내용</h2>
+  <ul>
+    <li>Stage Cache의 <code>frame_trace.jsonl</code>, <code>frames.jsonl</code>을 읽어 multi-target 후보가 어느 단계에서 1개로 접히는지 집계한다.</li>
+    <li><code>multi_evidence_count</code>, <code>dbscan_collapse</code>, <code>tracker_collapse</code>, <code>display_collapse</code>, <code>track_jump</code> 지표를 산출한다.</li>
+    <li>CSV, JSON, HTML 보고서를 <code>logs/diagnostics/</code> 아래에 저장한다.</li>
+    <li>Phase 1 ablation 캐시 검증을 위해 <code>--mode</code> 인자를 추가했다.</li>
+  </ul>
+
+  <h2>검증 명령 또는 확인 방법</h2>
+  <pre><code>python -c "from pathlib import Path; compile(Path('tools/diagnostics/multitarget_stage_eval.py').read_text(encoding='utf-8'), 'tools/diagnostics/multitarget_stage_eval.py', 'exec'); print('syntax ok')"
+python -B -m tools.diagnostics.multitarget_stage_eval --session 20260508_193458 --mode baseline --expected-max 2 --min-separation-m 0.65 --min-doppler-bins 5 --min-score-ratio 0.05 --jump-threshold-m 0.85</code></pre>
+
+  <h2>결과</h2>
+  <ul>
+    <li>보고서: <code>logs/diagnostics/multitarget_stage_eval_20260511_040436_20260508_193458/report.html</code></li>
+    <li><code>multi_evidence_rate</code>: 0.76</li>
+    <li><code>dbscan_collapse_rate_on_multi_evidence</code>: 0.6474</li>
+    <li><code>tracker_collapse_rate_after_dbscan_multi</code>: 0.631</li>
+    <li><code>display_two_or_more_rate</code>: 0.236</li>
+    <li>주요 reason count: <code>dbscan_collapse=123</code>, <code>tracker_collapse=53</code>, <code>rai_suspicious=49</code></li>
+  </ul>
+
+  <h2>남은 위험 또는 다음 후보</h2>
+  <ul>
+    <li><code>multi_evidence_count</code>는 ground truth 라벨이 아니라 range/angle/doppler 분리 기반 휴리스틱이다.</li>
+    <li>다음 단계에서는 같은 raw 세션을 ablation mode별로 재처리해 DBSCAN, duplicate suppression, tracker 중 어느 단계가 가장 큰 병목인지 비교해야 한다.</li>
+  </ul>
+</body>
+</html>

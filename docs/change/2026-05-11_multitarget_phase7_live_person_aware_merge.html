@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Multi-target Phase 7 Live Person-aware Merge</title>
+</head>
+<body>
+  <h1>Multi-target Phase 7 Live 적용</h1>
+  <h2>목적</h2>
+  <p>
+    replay에서 가장 안전한 후보였던 <code>person_aware_merge</code> 계열 설정을
+    실제 <code>live_motion_viewer.py</code> 측정에도 적용한다.
+  </p>
+  <h2>수정 파일</h2>
+  <ul>
+    <li><code>config/live_motion_tuning_isk.json</code></li>
+    <li><code>real-time/live_motion_viewer.py</code></li>
+    <li><code>tools/runtime_core/runtime_settings.py</code></li>
+  </ul>
+  <h2>변경 내용</h2>
+  <ul>
+    <li>live tuning에 object count estimator 파라미터를 추가했다.</li>
+    <li><code>protect_multi_object_candidates=true</code>로 설정해 2명 근거가 있을 때 DBSCAN이 사람 후보를 1개로 접지 않도록 했다.</li>
+    <li><code>limit_output_to_object_count=false</code>로 두어 replay 검증상 가장 안정적이었던 <code>person_aware_merge</code> 동작을 live 기본 후보로 반영했다.</li>
+    <li><code>live_motion_viewer.py</code>가 새 detection 파라미터를 실제 처리 함수에 전달하도록 연결했다.</li>
+  </ul>
+  <h2>검증 명령 또는 확인 방법</h2>
+  <pre><code>python -B -c "import json; json.load(open('config/live_motion_tuning_isk.json', encoding='utf-8')); print('json ok')"
+python -B -m tools.diagnostics.multitarget_stage_eval --session 20260508_193458 --mode person_aware_merge --expected-max 2 --min-separation-m 0.65 --min-doppler-bins 7 --min-score-ratio 0.05 --jump-threshold-m 0.85</code></pre>
+  <h2>결과</h2>
+  <p>
+    JSON 검증 통과. <code>20260508_193458</code> 기준 <code>person_aware_merge</code>는
+    DBSCAN collapse 0.0%, 최종 2명 이상 표시율 77.6%, 3명 이상 과검출률 0.0%, track jump 0.0%로 확인됐다.
+  </p>
+  <h2>남은 위험 또는 다음 후보</h2>
+  <p>
+    live 환경에서는 실제 사람 수와 동선에 따라 false split이 달라질 수 있다. 다음 측정 후 새 live session을 Stage Debug로 cache 생성해 같은 KPI를 확인해야 한다.
+  </p>
+</body>
+</html>

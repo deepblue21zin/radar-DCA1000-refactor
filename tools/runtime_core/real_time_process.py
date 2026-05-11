@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+import inspect
 import json
 from pathlib import Path
 from queue import Empty, Full, Queue
@@ -10,7 +11,7 @@ import time
 import numpy as np
 
 from . import DSP
-from .detection import detect_targets
+from .detection import detect_targets as _runtime_detect_targets
 from .radar_runtime import (
     collapse_motion_rai,
     frame_to_radar_cube,
@@ -18,9 +19,31 @@ from .radar_runtime import (
     remove_static_clutter,
 )
 from .tracking import MultiTargetTracker
+from .virtual_array import (
+    cached_iwr6843isk_virtual_array,
+    geometry_range_angle_from_fft as _runtime_geometry_range_angle_from_fft,
+)
 
 
 DCA1000_HEADER_BYTES = 10
+
+
+def _filter_kwargs_for_loaded_signature(callable_obj, kwargs):
+    parameters = inspect.signature(callable_obj).parameters
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return kwargs
+    return {key: value for key, value in kwargs.items() if key in parameters}
+
+
+def detect_targets(*args, **kwargs):
+    return _runtime_detect_targets(*args, **_filter_kwargs_for_loaded_signature(_runtime_detect_targets, kwargs))
+
+
+def geometry_range_angle_from_fft(*args, **kwargs):
+    return _runtime_geometry_range_angle_from_fft(
+        *args,
+        **_filter_kwargs_for_loaded_signature(_runtime_geometry_range_angle_from_fft, kwargs),
+    )
 
 
 @dataclass(frozen=True)
@@ -162,6 +185,182 @@ def select_tracker_input_for_frame(
     return tracker_detections, allow_track_birth, policy_name
 
 
+def project_range_angle_cube(range_doppler_fft, runtime_config):
+    projection = str(getattr(runtime_config, "angle_projection", "fft1d") or "fft1d").strip().lower()
+    if projection in ("iwr6843isk_geometry_2d", "isk_geometry_2d", "geometry_2d"):
+        model = cached_iwr6843isk_virtual_array(
+            str(runtime_config.config_path),
+            int(runtime_config.rx_num),
+            int(runtime_config.tx_num),
+        )
+        rai_cube = geometry_range_angle_from_fft(
+            range_doppler_fft,
+            raw_order=model.raw_order,
+            x_lambda=model.x_lambda,
+            z_lambda=model.z_lambda,
+            azimuth_axis_rad=runtime_config.angle_axis_rad,
+            elevation_axis_deg=runtime_config.angle_elevation_axis_deg,
+            phase_sign=runtime_config.angle_phase_sign,
+            channel_coefficients=(
+                getattr(runtime_config, "channel_calibration_coefficients", ())
+                if getattr(runtime_config, "channel_calibration_enabled", False)
+                else None
+            ),
+        )
+        return np.fft.fftshift(rai_cube, axes=0)
+
+    if projection not in ("fft1d", "angle_fft", "legacy_fft"):
+        raise ValueError(f"Unsupported angle_projection: {projection}")
+
+    rai_cube = DSP.range_angle_from_fft(
+        range_doppler_fft,
+        mode=1,
+        angle_fft_size=runtime_config.angle_fft_size,
+    )
+    return np.fft.fftshift(rai_cube, axes=0)
+
+
+def _sign_label(value, deadband=0.05):
+    if value is None:
+        return "none"
+    value = float(value)
+    if value > deadband:
+        return "right"
+    if value < -deadband:
+        return "left"
+    return "center"
+
+
+def _wrap_angle_delta_deg(left, right):
+    if left is None or right is None:
+        return None
+    return float((float(left) - float(right) + 180.0) % 360.0 - 180.0)
+
+
+def _angle_roi_mask_for_range(runtime_config, range_m, detection_region):
+    angle_axis = np.asarray(runtime_config.angle_axis_rad, dtype=np.float64)
+    x_axis = float(range_m) * np.sin(angle_axis)
+    y_axis = float(range_m) * np.cos(angle_axis)
+    return (
+        (np.abs(x_axis) <= float(detection_region.lateral_limit_m))
+        & (y_axis >= float(detection_region.min_forward_m))
+        & (y_axis <= float(detection_region.forward_limit_m))
+    )
+
+
+def _peak_from_angle_profile(profile, runtime_config, range_m, angle_mask):
+    values = np.asarray(profile, dtype=np.float64)
+    if values.size == 0:
+        return None
+    mask = np.asarray(angle_mask, dtype=bool)
+    if mask.shape != values.shape or not np.any(mask):
+        mask = np.ones(values.shape, dtype=bool)
+    masked = np.where(mask, values, 0.0)
+    peak_bin = int(np.argmax(masked))
+    peak_power = float(masked[peak_bin])
+    angle_rad = float(np.asarray(runtime_config.angle_axis_rad, dtype=np.float64)[peak_bin])
+    x_m = float(range_m) * float(np.sin(angle_rad))
+    y_m = float(range_m) * float(np.cos(angle_rad))
+    return {
+        "angle_bin": peak_bin,
+        "angle_deg": float(np.degrees(angle_rad)),
+        "power": peak_power,
+        "x_m": x_m,
+        "y_m": y_m,
+        "side": _sign_label(x_m),
+    }
+
+
+def _round_optional(value, digits=4):
+    if value is None:
+        return None
+    value = float(value)
+    if not np.isfinite(value):
+        return None
+    return round(value, digits)
+
+
+def _build_rai_collapse_diagnostics(
+    *,
+    detection_trace,
+    rai_cube,
+    rai_map,
+    runtime_config,
+    detection_region,
+    max_rows=12,
+    angle_delta_threshold_deg=15.0,
+    x_delta_threshold_m=0.35,
+):
+    cfar_candidates = (
+        ((detection_trace or {}).get("cfar") or {}).get("top_candidates") or []
+    )
+    rows = []
+    for rank, candidate in enumerate(cfar_candidates[: int(max_rows)], start=1):
+        try:
+            range_bin = int(candidate.get("range_bin"))
+            doppler_bin = int(candidate.get("doppler_bin"))
+        except (TypeError, ValueError):
+            continue
+        if range_bin < 0 or range_bin >= np.asarray(rai_map).shape[0]:
+            continue
+        if np.asarray(rai_cube).ndim != 3 or doppler_bin < 0 or doppler_bin >= np.asarray(rai_cube).shape[0]:
+            continue
+        range_m = float(candidate.get("range_m", runtime_config.range_axis_m[range_bin]))
+        angle_mask = _angle_roi_mask_for_range(runtime_config, range_m, detection_region)
+        slice_peak = _peak_from_angle_profile(
+            np.asarray(rai_cube)[doppler_bin, range_bin, :],
+            runtime_config,
+            range_m,
+            angle_mask,
+        )
+        collapsed_peak = _peak_from_angle_profile(
+            np.asarray(rai_map)[range_bin, :],
+            runtime_config,
+            range_m,
+            angle_mask,
+        )
+        if not slice_peak or not collapsed_peak:
+            continue
+        angle_delta = _wrap_angle_delta_deg(collapsed_peak["angle_deg"], slice_peak["angle_deg"])
+        x_delta = float(collapsed_peak["x_m"] - slice_peak["x_m"])
+        sign_changed = slice_peak["side"] != "center" and collapsed_peak["side"] not in {
+            "center",
+            slice_peak["side"],
+        }
+        suspicious = (
+            abs(float(angle_delta)) >= float(angle_delta_threshold_deg)
+            or abs(float(x_delta)) >= float(x_delta_threshold_m)
+            or bool(sign_changed)
+        )
+        rows.append(
+            {
+                "candidate_rank": int(rank),
+                "range_bin": range_bin,
+                "range_m": _round_optional(range_m),
+                "doppler_bin": doppler_bin,
+                "rdi_power": _round_optional(candidate.get("power")),
+                "slice_angle_deg": _round_optional(slice_peak["angle_deg"], 3),
+                "slice_x_m": _round_optional(slice_peak["x_m"]),
+                "slice_side": slice_peak["side"],
+                "collapsed_angle_deg": _round_optional(collapsed_peak["angle_deg"], 3),
+                "collapsed_x_m": _round_optional(collapsed_peak["x_m"]),
+                "collapsed_side": collapsed_peak["side"],
+                "angle_delta_deg": _round_optional(angle_delta, 3),
+                "x_delta_m": _round_optional(x_delta),
+                "x_sign_changed": bool(sign_changed),
+                "suspicious": bool(suspicious),
+            }
+        )
+    suspicious_count = sum(1 for row in rows if row.get("suspicious"))
+    return {
+        "rows": rows,
+        "row_count": int(len(rows)),
+        "suspicious_count": int(suspicious_count),
+        "angle_delta_threshold_deg": float(angle_delta_threshold_deg),
+        "x_delta_threshold_m": float(x_delta_threshold_m),
+    }
+
+
 def process_frame_packet(
     raw_frame,
     *,
@@ -176,6 +375,7 @@ def process_frame_packet(
     capture_stage_timing=True,
     return_artifacts=False,
     capture_trace=False,
+    tracker_enabled=True,
 ):
     loop_started = time.perf_counter()
     stage_timings_ms = {}
@@ -253,14 +453,19 @@ def process_frame_packet(
         }
 
     stage_started = time.perf_counter()
-    rai_cube = DSP.range_angle_from_fft(
+    rai_cube = project_range_angle_cube(
         shared_range_doppler_fft,
-        mode=1,
-        angle_fft_size=runtime_config.angle_fft_size,
+        runtime_config,
     )
     stage_timings_ms["range_angle_project_ms"] = (time.perf_counter() - stage_started) * 1000.0
     if frame_trace is not None:
         frame_trace["rai_cube"] = {
+            "angle_projection": getattr(runtime_config, "angle_projection", "fft1d"),
+            "doppler_axis": "fftshifted",
+            "angle_source": getattr(runtime_config, "angle_source", "collapsed_rai"),
+            "channel_calibration_enabled": bool(
+                getattr(runtime_config, "channel_calibration_enabled", False)
+            ),
             "shape": [int(dim) for dim in np.asarray(rai_cube).shape],
         }
 
@@ -296,12 +501,20 @@ def process_frame_packet(
         min_range_bin,
         max_range_bin,
         detection_region,
+        rai_cube=rai_cube,
         trace=detection_trace,
         **dict(detection_params or {}),
     )
     stage_timings_ms["detect_ms"] = (time.perf_counter() - stage_started) * 1000.0
     if frame_trace is not None:
         frame_trace["detection"] = detection_trace or {}
+        frame_trace["rai_collapse_diagnostics"] = _build_rai_collapse_diagnostics(
+            detection_trace=detection_trace or {},
+            rai_cube=rai_cube,
+            rai_map=rai,
+            runtime_config=runtime_config,
+            detection_region=detection_region,
+        )
 
     stage_started = time.perf_counter()
     tracker_detections, allow_track_birth, tracker_policy = select_tracker_input_for_frame(
@@ -322,14 +535,27 @@ def process_frame_packet(
 
     stage_started = time.perf_counter()
     tracker_trace = {} if frame_trace is not None else None
-    confirmed_tracks, tentative_tracks = tracker.update(
-        tracker_detections,
-        frame_ts=raw_frame.capture_ts,
-        allow_track_birth=allow_track_birth,
-        rai_map=rai,
-        runtime_config=runtime_config,
-        trace=tracker_trace,
-    )
+    if tracker_enabled:
+        confirmed_tracks, tentative_tracks = tracker.update(
+            tracker_detections,
+            frame_ts=raw_frame.capture_ts,
+            allow_track_birth=allow_track_birth,
+            rai_map=rai,
+            runtime_config=runtime_config,
+            trace=tracker_trace,
+        )
+    else:
+        confirmed_tracks, tentative_tracks = [], []
+        if tracker_trace is not None:
+            tracker_trace.update(
+                {
+                    "trace_version": 1,
+                    "disabled": True,
+                    "input_detection_count": len(detections),
+                    "measurement_count": len(tracker_detections),
+                    "measurements": [_serialize_detection(item) for item in tracker_detections[:12]],
+                }
+            )
     stage_timings_ms["track_ms"] = (time.perf_counter() - stage_started) * 1000.0
     if frame_trace is not None:
         frame_trace["tracker"] = tracker_trace or {}
@@ -848,6 +1074,7 @@ class DataProcessor(th.Thread):
         write_processed_frames=True,
         include_payloads=True,
         capture_stage_timing=True,
+        tracker_enabled=True,
     ):
         """
         :param name: str
@@ -881,6 +1108,7 @@ class DataProcessor(th.Thread):
         self.write_processed_frames = bool(write_processed_frames)
         self.include_payloads = bool(include_payloads)
         self.capture_stage_timing = bool(capture_stage_timing)
+        self.tracker_enabled = bool(tracker_enabled)
 
     def close(self):
         _put_latest(self.raw_frame_queue, None)
@@ -972,6 +1200,7 @@ class DataProcessor(th.Thread):
                 detection_params=self.detection_params,
                 capture_stage_timing=self.capture_stage_timing,
                 return_artifacts=False,
+                tracker_enabled=self.tracker_enabled,
             )
 
             if frame_count == 1:

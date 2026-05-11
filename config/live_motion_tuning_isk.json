@@ -2,16 +2,26 @@
   "processing": {
     "remove_static": true,
     "doppler_guard_bins": 2,
-    "invert_lateral_axis": false
+    "invert_lateral_axis": true,
+    "angle_projection": "iwr6843isk_geometry_2d",
+    "angle_elevation_min_deg": -40.0,
+    "angle_elevation_max_deg": 40.0,
+    "angle_elevation_step_deg": 8.0,
+    "angle_phase_sign": 1.0,
+    "angle_source": "doppler_slice_rai",
+    "channel_calibration": {
+      "enabled": false,
+      "coefficients": []
+    }
   },
   "roi": {
     "lateral_m": 1.5,
     "forward_m": 4.0,
-    "min_forward_m": 0.7
+    "min_forward_m": 0.9
   },
   "detection": {
     "allow_strongest_fallback": false,
-    "max_targets": 3,
+    "max_targets": 4,
     "display_min_confidence": 0.26,
     "cluster_min_samples": 2,
     "cluster_velocity_weight": 0.0,
@@ -22,7 +32,7 @@
       "global_quantile": 0.985,
       "angle_quantile": 0.75,
       "angle_contrast_scale": 1.35,
-      "min_cartesian_separation_m": 0.78,
+      "min_cartesian_separation_m": 0.42,
       "angle_centroid_radius_bands": [
         {"r_min": 0.0, "r_max": 1.5, "radius": 1},
         {"r_min": 1.5, "r_max": 3.0, "radius": 2},
@@ -55,54 +65,61 @@
         {
           "r_min": 0.0,
           "r_max": 1.5,
-          "merge_radius_m": 0.45,
+          "merge_radius_m": 0.38,
           "range_bin_radius": 1,
           "doppler_bin_radius": 2
         },
         {
           "r_min": 1.5,
           "r_max": 3.0,
-          "merge_radius_m": 0.64,
+          "merge_radius_m": 0.46,
           "range_bin_radius": 2,
           "doppler_bin_radius": 3
         },
         {
           "r_min": 3.0,
           "r_max": null,
-          "merge_radius_m": 0.8,
+          "merge_radius_m": 0.58,
           "range_bin_radius": 3,
           "doppler_bin_radius": 4
         }
       ],
       "duplicate_suppression_enabled": true,
-      "duplicate_suppression_radius_m": 0.7,
+      "duplicate_suppression_radius_m": 0.38,
       "duplicate_suppression_range_scale": 0.04,
       "duplicate_suppression_doppler_bins": 8,
-      "duplicate_suppression_score_ratio": 0.95
+      "duplicate_suppression_score_ratio": 0.95,
+      "object_count_estimator_enabled": true,
+      "object_count_max_objects": 3,
+      "object_count_min_separation_m": 0.65,
+      "object_count_min_doppler_bins": 7,
+      "object_count_min_score_ratio": 0.05,
+      "protect_multi_object_candidates": true,
+      "limit_output_to_object_count": false
     },
     "dbscan_adaptive_eps_bands": [
-      {"r_min": 0.25, "r_max": 1.0, "eps": 0.45, "min_samples": 2},
-      {"r_min": 1.0, "r_max": 2.0, "eps": 0.58, "min_samples": 2},
-      {"r_min": 2.0, "r_max": 3.5, "eps": 0.72, "min_samples": 2}
+      {"r_min": 0.25, "r_max": 1.0, "eps": 0.38, "min_samples": 2},
+      {"r_min": 1.0, "r_max": 2.0, "eps": 0.44, "min_samples": 2},
+      {"r_min": 2.0, "r_max": 3.5, "eps": 0.58, "min_samples": 2}
     ]
   },
   "tracking": {
-    "confirm_hits": 4,
-    "max_misses": 10,
+    "confirm_hits": 3,
+    "max_misses": 14,
     "process_var": 1.0,
     "measurement_var": 0.43,
     "range_measurement_scale": 0.5,
     "confidence_measurement_scale": 0.35,
-    "association_gate": 4.5,
+    "association_gate": 3.8,
     "doppler_zero_guard_bins": 3,
     "doppler_gate_bins": 18,
     "doppler_cost_weight": 0.65,
     "report_miss_tolerance": 5,
-    "lost_gate_factor": 1.6,
-    "tentative_gate_factor": 0.7,
-    "birth_suppression_radius_m": 0.75,
-    "primary_track_birth_scale": 1.8,
-    "birth_suppression_weak_radius_scale": 1.65,
+    "lost_gate_factor": 1.35,
+    "tentative_gate_factor": 0.9,
+    "birth_suppression_radius_m": 0.5,
+    "primary_track_birth_scale": 1.2,
+    "birth_suppression_weak_radius_scale": 1.15,
     "birth_suppression_score_ratio": 0.95,
     "birth_suppression_confidence_ratio": 0.95,
     "birth_suppression_doppler_bins": 8,
@@ -110,9 +127,9 @@
     "primary_track_hold_frames": 6,
     "lateral_deadband_m": 0.08,
     "lateral_deadband_range_scale": 0.04,
-    "lateral_smoothing_alpha": 0.32,
-    "lateral_velocity_damping": 0.45,
-    "local_remeasurement_enabled": true,
+    "lateral_smoothing_alpha": 0.58,
+    "lateral_velocity_damping": 0.65,
+    "local_remeasurement_enabled": false,
     "local_remeasurement_blend": 0.25,
     "local_remeasurement_max_shift_m": 0.16,
     "local_remeasurement_track_bias": 0.35,
@@ -122,6 +139,9 @@
     "measurement_soft_gate_full_m": 0.48,
     "measurement_soft_gate_range_scale": 0.05,
     "measurement_soft_gate_speed_scale": 0.06,
+    "max_object_count": 3,
+    "expected_object_count": null,
+    "crossing_hold_frames": 8,
     "local_remeasurement_patch_bands": [
       {
         "r_min": 0.0,
@@ -159,9 +179,9 @@
     }
   },
   "visualization": {
-    "show_tentative_tracks": false,
-    "tentative_min_confidence": 0.35,
-    "tentative_min_hits": 3,
+    "show_tentative_tracks": true,
+    "tentative_min_confidence": 0.25,
+    "tentative_min_hits": 2,
     "display_hysteresis_frames": 8,
     "display_hysteresis_confidence_floor": 0.12,
     "display_primary_bonus_frames": 5

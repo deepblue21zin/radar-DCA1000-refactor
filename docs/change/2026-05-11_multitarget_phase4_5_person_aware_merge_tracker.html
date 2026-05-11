@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>2026-05-11 multitarget phase4 5 person-aware merge tracker</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; line-height: 1.55; color: #172033; }
+    code, pre { background: #f3f5f8; border-radius: 6px; }
+    code { padding: 1px 4px; }
+    pre { padding: 12px; overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+    th, td { border: 1px solid #d7dde8; padding: 6px 8px; text-align: left; }
+    th { background: #eef3f8; }
+  </style>
+</head>
+<body>
+  <h1>Multi-target Phase 4-5 Person-aware Merge 및 Tracker 완화 검증</h1>
+
+  <h2>목적</h2>
+  <p>
+    기준 세션 <code>20260508_193458</code>에서 DBSCAN이 실제 두 사람 후보를 1명으로 합치는 문제를 줄이고,
+    tracker birth/association 완화가 효과적인지 단계적으로 검증했다.
+  </p>
+
+  <h2>수정 파일</h2>
+  <ul>
+    <li><code>tools/runtime_core/detection.py</code></li>
+    <li><code>tools/lab/stage_cache.py</code></li>
+  </ul>
+
+  <h2>변경 내용</h2>
+  <ul>
+    <li>detection에 <code>protect_multi_object_candidates</code> 옵션을 추가했다. object count estimate가 2 이상이면 DBSCAN이 후보를 1개로 접지 않고 RDA 후보를 유지한다.</li>
+    <li>detection에 <code>limit_output_to_object_count</code> 옵션을 추가했다. 필요 시 tracker 입력을 object count estimate로 제한할 수 있다.</li>
+    <li>Stage Cache에 <code>person_aware_merge</code> 모드를 추가했다. 이 모드는 multi-object 후보 보호만 켜고 tracker는 기존 설정을 사용한다.</li>
+    <li>Stage Cache에 <code>multi_tracker_relaxed</code> 모드를 추가했다. 이 모드는 person-aware 후보 보호, object count cap, 낮은 confirm hit 기준을 함께 검증한다.</li>
+  </ul>
+
+  <h2>검증 명령 또는 확인 방법</h2>
+  <pre><code>python -c "from pathlib import Path; compile(Path('tools/runtime_core/detection.py').read_text(encoding='utf-8'), 'tools/runtime_core/detection.py', 'exec'); compile(Path('tools/lab/stage_cache.py').read_text(encoding='utf-8'), 'tools/lab/stage_cache.py', 'exec'); print('syntax ok')"
+python -B -m tools.lab.stage_cache --session 20260508_193458 --mode person_aware_merge --force
+python -B -m tools.diagnostics.multitarget_stage_eval --session 20260508_193458 --mode person_aware_merge --expected-max 2 --min-separation-m 0.65 --min-doppler-bins 7 --min-score-ratio 0.05 --jump-threshold-m 0.85
+python -B -m tools.lab.stage_cache --session 20260508_193458 --mode multi_tracker_relaxed --force
+python -B -m tools.diagnostics.multitarget_stage_eval --session 20260508_193458 --mode multi_tracker_relaxed --expected-max 2 --min-separation-m 0.65 --min-doppler-bins 7 --min-score-ratio 0.05 --jump-threshold-m 0.85</code></pre>
+
+  <h2>결과</h2>
+  <table>
+    <thead>
+      <tr><th>mode</th><th>display_two_or_more_rate</th><th>DBSCAN collapse</th><th>tracker collapse</th><th>over expected max</th><th>판단</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>baseline</td><td>0.236</td><td>0.6474</td><td>0.631</td><td>0.0</td><td>기준 실패 상태</td></tr>
+      <tr><td>rda_candidates</td><td>0.780</td><td>0.0</td><td>0.2218</td><td>0.02</td><td>분리력 좋음, 약간 과분리</td></tr>
+      <tr><td>person_aware_merge</td><td>0.776</td><td>0.0</td><td>0.1717</td><td>0.0</td><td>현재 최우선 채택 후보</td></tr>
+      <tr><td>multi_tracker_relaxed</td><td>0.764</td><td>0.0</td><td>0.1414</td><td>0.0</td><td>안정적이나 person-aware보다 낮음</td></tr>
+    </tbody>
+  </table>
+  <p>
+    중간 실험으로 confirm 2/3회 기준을 cap 없이 적용했을 때 2명 표시율은 높아졌지만 3개 이상 과분리가 크게 늘었다.
+    따라서 이번 기준 세션에서는 tracker를 크게 완화하는 것보다 <code>person_aware_merge</code>가 가장 균형이 좋다.
+  </p>
+
+  <h2>남은 위험 또는 다음 후보</h2>
+  <ul>
+    <li><code>person_aware_merge</code>는 Stage Cache 검증 모드이며 아직 live 기본 설정으로 적용하지 않았다.</li>
+    <li>실제 3명 세션에서는 <code>over_expected_max</code> 기준을 3으로 두고 별도 검증해야 한다.</li>
+    <li>다음 단계는 Streamlit에서 ablation mode별 KPI를 한 화면에서 비교하고, 선택한 모드를 live 설정으로 옮기는 것이다.</li>
+  </ul>
+</body>
+</html>

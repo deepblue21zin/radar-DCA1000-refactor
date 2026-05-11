@@ -29,8 +29,9 @@ DEFAULT_STATIC_SETTINGS = {
 }
 
 DEFAULT_RUNTIME_SETTINGS = {
-    "config_path": "config/profile_3d.cfg",
-    "tuning_path": "config/live_motion_tuning.json",
+    "radar_board": "IWR6843ISK",
+    "config_path": "config/profile_isk_3d_100ms_txorder.cfg",
+    "tuning_path": "config/live_motion_tuning_isk.json",
     "cli_port": "COM11",
     "logging": {
         "enabled": True,
@@ -57,7 +58,17 @@ DEFAULT_TUNING_SETTINGS = {
     "processing": {
         "remove_static": True,
         "doppler_guard_bins": 2,
-        "invert_lateral_axis": True,
+        "invert_lateral_axis": False,
+        "angle_projection": "fft1d",
+        "angle_elevation_min_deg": -40.0,
+        "angle_elevation_max_deg": 40.0,
+        "angle_elevation_step_deg": 4.0,
+        "angle_phase_sign": -1.0,
+        "angle_source": "collapsed_rai",
+        "channel_calibration": {
+            "enabled": False,
+            "coefficients": [],
+        },
     },
     "roi": {
         "lateral_m": 1.5,
@@ -134,6 +145,13 @@ DEFAULT_TUNING_SETTINGS = {
             "duplicate_suppression_range_scale": 0.03,
             "duplicate_suppression_doppler_bins": 6,
             "duplicate_suppression_score_ratio": 0.82,
+            "object_count_estimator_enabled": True,
+            "object_count_max_objects": 3,
+            "object_count_min_separation_m": 0.65,
+            "object_count_min_doppler_bins": 7,
+            "object_count_min_score_ratio": 0.05,
+            "protect_multi_object_candidates": False,
+            "limit_output_to_object_count": False,
         },
         "dbscan_adaptive_eps_bands": [
             {"r_min": 0.25, "r_max": 1.0, "eps": 0.34, "min_samples": 2},
@@ -200,6 +218,9 @@ DEFAULT_TUNING_SETTINGS = {
         "measurement_soft_gate_full_m": 0.52,
         "measurement_soft_gate_range_scale": 0.05,
         "measurement_soft_gate_speed_scale": 0.06,
+        "max_object_count": 3,
+        "expected_object_count": None,
+        "crossing_hold_frames": 8,
     },
     "pipeline": {
         "queue_size": 4,
@@ -231,6 +252,7 @@ STATIC_SECTION_KEYS = (
 )
 
 RUNTIME_SECTION_KEYS = (
+    "radar_board",
     "config_path",
     "tuning_path",
     "cli_port",
@@ -307,6 +329,8 @@ def load_runtime_settings(
         static_settings_path,
         "config/live_motion_static_settings.json",
     )
+    if runtime_settings_path is None:
+        runtime_settings_path = os.environ.get("RADAR_RUNTIME_SETTINGS_PATH")
     resolved_runtime_settings_path = _resolve_config_path(
         project_root,
         runtime_settings_path,

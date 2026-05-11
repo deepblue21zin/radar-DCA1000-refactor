@@ -1,7 +1,8 @@
 {
-  "config_path": "config/profile_3d_150ms.cfg",
-  "tuning_path": "config/live_motion_tuning.json",
-  "cli_port": "COM11",
+  "radar_board": "IWR6843ISK",
+  "config_path": "config/profile_isk_3d_100ms_txorder.cfg",
+  "tuning_path": "config/live_motion_tuning_isk.json",
+  "cli_port": "COM13",
   "logging": {
     "enabled": true,
     "variant": "baseline",

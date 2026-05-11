@@ -775,6 +775,122 @@ def _nested_get(payload: dict | None, *keys: str, default=None):
     return current
 
 
+def _stage_cache_mode_options() -> dict[str, str]:
+    return {
+        "baseline": "baseline",
+        "doppler_slice_angle": "doppler_slice_angle",
+        "rda_candidates": "rda_candidates",
+        "person_aware_merge": "person_aware_merge",
+        "multi_tracker_relaxed": "multi_tracker_relaxed",
+        "no_body_center": "no_body_center",
+        "no_duplicate_suppression": "no_duplicate_suppression",
+        "no_merge": "no_merge",
+        "no_dbscan": "no_dbscan",
+        "tracker_off": "tracker_off",
+    }
+
+
+def _trace_count(trace: dict, *keys: str) -> int:
+    value = _nested_get(trace, *keys, default=0)
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
+
+
+def _stage_multitarget_kpis(trace_rows: list[dict], *, expected_max: int = 2) -> dict:
+    frame_count = len(trace_rows or [])
+    if frame_count <= 0:
+        return {
+            "frames": 0,
+            "multi_evidence_rate": 0.0,
+            "dbscan_collapse_rate": 0.0,
+            "tracker_collapse_rate": 0.0,
+            "display_2plus_rate": 0.0,
+            "over_expected_rate": 0.0,
+            "rai_suspicious_frames": 0,
+        }
+
+    multi_evidence = 0
+    dbscan_collapse = 0
+    tracker_collapse = 0
+    display_two_or_more = 0
+    over_expected = 0
+    rai_suspicious = 0
+    for trace in trace_rows:
+        object_count = _trace_count(trace, "detection", "object_count_estimator", "estimated_count")
+        if object_count <= 0:
+            object_count = _trace_count(trace, "detection", "candidate_merge_final", "after_count")
+        dbscan_count = _trace_count(trace, "detection", "dbscan", "output_count")
+        display_count = _trace_count(trace, "display_output", "confirmed_count")
+
+        if object_count >= 2:
+            multi_evidence += 1
+            if dbscan_count < 2:
+                dbscan_collapse += 1
+        if dbscan_count >= 2 and display_count < 2:
+            tracker_collapse += 1
+        if display_count >= 2:
+            display_two_or_more += 1
+        if display_count > int(expected_max):
+            over_expected += 1
+        if _trace_count(trace, "rai_collapse_diagnostics", "suspicious_count") > 0:
+            rai_suspicious += 1
+
+    return {
+        "frames": frame_count,
+        "multi_evidence_rate": multi_evidence / frame_count,
+        "dbscan_collapse_rate": dbscan_collapse / max(multi_evidence, 1),
+        "tracker_collapse_rate": tracker_collapse / frame_count,
+        "display_2plus_rate": display_two_or_more / frame_count,
+        "over_expected_rate": over_expected / frame_count,
+        "rai_suspicious_frames": rai_suspicious,
+    }
+
+
+def _render_stage_ablation_comparison(session_id: str, mode_options: dict[str, str]) -> None:
+    rows = []
+    for label, mode in mode_options.items():
+        manifest = stage_cache.load_stage_cache_manifest(PROJECT_ROOT, session_id, mode)
+        if not manifest:
+            rows.append(
+                {
+                    "mode": label,
+                    "status": "not cached",
+                    "frames": 0,
+                    "multi_evidence_%": "",
+                    "dbscan_collapse_%": "",
+                    "tracker_collapse_%": "",
+                    "display_2plus_%": "",
+                    "over_expected_%": "",
+                    "rai_suspicious_frames": "",
+                }
+            )
+            continue
+        trace_rows = stage_cache.load_stage_traces(PROJECT_ROOT, session_id, mode)
+        kpi = _stage_multitarget_kpis(trace_rows)
+        rows.append(
+            {
+                "mode": label,
+                "status": "cached",
+                "frames": kpi["frames"],
+                "multi_evidence_%": f"{kpi['multi_evidence_rate'] * 100:.1f}",
+                "dbscan_collapse_%": f"{kpi['dbscan_collapse_rate'] * 100:.1f}",
+                "tracker_collapse_%": f"{kpi['tracker_collapse_rate'] * 100:.1f}",
+                "display_2plus_%": f"{kpi['display_2plus_rate'] * 100:.1f}",
+                "over_expected_%": f"{kpi['over_expected_rate'] * 100:.1f}",
+                "rai_suspicious_frames": kpi["rai_suspicious_frames"],
+            }
+        )
+    st.markdown("### Ablation KPI Comparison")
+    st.caption(
+        "같은 raw session을 모드별로 다시 처리한 결과입니다. "
+        "`display_2plus_%`는 2명 이상이 최종 표시된 프레임 비율이고, "
+        "`over_expected_%`는 이번 2인 교차 실험에서 3명 이상으로 과검출된 비율입니다."
+    )
+    _render_table(rows, key=f"stage-ablation-kpi-{session_id}", height=360)
+
+
 def _stage_card(label: str, value: str, hint: str, tone: str = "neutral") -> str:
     colors = {
         "good": ("#eaf8f0", "#237a55"),
@@ -918,6 +1034,85 @@ def _collect_stage_trajectory(trace_rows: list[dict], stage: str) -> list[dict]:
             }
         )
     return trajectory
+
+
+_TRACK_TRAJECTORY_COLORS = [
+    "#0e8a7e",
+    "#c05d9f",
+    "#5176b8",
+    "#d47a28",
+    "#6155b8",
+    "#1b7a4c",
+    "#b74040",
+    "#24425d",
+]
+
+
+def _track_id_from_point(point: dict):
+    for key in ("track_id", "id", "trackId"):
+        value = point.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _collect_stage_track_trajectories(
+    trace_rows: list[dict],
+    stage: str,
+) -> dict[str, list[dict]]:
+    trajectories: dict[str, list[dict]] = {}
+    for index, trace in enumerate(trace_rows):
+        for point in _trace_stage_points(trace, stage):
+            if not isinstance(point, dict):
+                continue
+            track_id = _track_id_from_point(point)
+            if track_id is None:
+                continue
+            x_m = _as_float(point.get("x_m"))
+            y_m = _as_float(point.get("y_m"))
+            if x_m is None or y_m is None:
+                continue
+            key = str(track_id)
+            trajectories.setdefault(key, []).append(
+                {
+                    "index": index,
+                    "frame_id": trace.get("frame_id", index),
+                    "x_m": x_m,
+                    "y_m": y_m,
+                    "state": point.get("state", ""),
+                    "confidence": _as_float(point.get("confidence")),
+                    "score": _as_float(point.get("score")),
+                    "is_primary": bool(point.get("is_primary")),
+                }
+            )
+    return trajectories
+
+
+def _track_trajectory_stats(rows: list[dict], total_frames: int) -> dict:
+    if not rows:
+        return {
+            "frames": 0,
+            "coverage": "0.0%",
+            "frame_span": "",
+            "x_range_m": "",
+            "y_range_m": "",
+            "mean_confidence": "",
+        }
+    xs = np.asarray([row["x_m"] for row in rows], dtype=float)
+    ys = np.asarray([row["y_m"] for row in rows], dtype=float)
+    confidences = [
+        row["confidence"]
+        for row in rows
+        if isinstance(row.get("confidence"), (int, float))
+    ]
+    return {
+        "frames": len(rows),
+        "coverage": f"{(len(rows) / max(total_frames, 1)) * 100:.1f}%",
+        "frame_span": f"{rows[0]['frame_id']}..{rows[-1]['frame_id']}",
+        "x_range_m": f"{float(np.min(xs)):.2f}..{float(np.max(xs)):.2f}",
+        "y_range_m": f"{float(np.min(ys)):.2f}..{float(np.max(ys)):.2f}",
+        "mean_confidence": f"{float(np.mean(confidences)):.3f}" if confidences else "",
+    }
 
 
 def _render_sequence_trajectory_overlay_svg_legacy(trace_rows: list[dict], selected_stages: list[tuple[str, str, str]]) -> None:
@@ -1083,6 +1278,7 @@ def _render_stage_sequence_overview(trace_rows: list[dict]) -> None:
     )
     selected_stages = [label_to_stage[label] for label in selected_labels] or [label_to_stage["DBSCAN output"]]
 
+    _render_multi_track_trajectory_overlay(trace_rows)
     _render_sequence_trajectory_overlay(trace_rows, selected_stages)
     _render_sequence_count_timeline(trace_rows, selected_stages)
 
@@ -1340,6 +1536,34 @@ def _render_trace_flow(trace: dict) -> None:
         {"stage": "display output", "input": "tracks", "output": display_confirmed, "meaning": "화면/리포트에 남는 confirmed track"},
     ]
     _render_table(flow_rows, key=f"trace-flow-{trace.get('frame_id', 'unknown')}", height=280)
+
+
+def _render_rai_collapse_diagnostics(trace: dict) -> None:
+    diagnostic = trace.get("rai_collapse_diagnostics") or {}
+    rows = diagnostic.get("rows") or []
+    if not rows:
+        st.caption("이 frame에는 RAI collapse 비교 row가 없습니다.")
+        return
+    suspicious_count = int(diagnostic.get("suspicious_count") or 0)
+    st.markdown("#### RAI Collapse vs Doppler-Slice Angle")
+    st.caption(
+        "slice는 RDI 후보의 Doppler bin에서 직접 본 angle이고, collapsed는 검출용 2D RAI에서 고른 angle입니다. "
+        "둘의 부호나 각도가 달라지는 frame이 좌표 튐 후보입니다."
+    )
+    tone = "bad" if suspicious_count else "good"
+    _render_html(
+        _stage_card(
+            "suspicious",
+            suspicious_count,
+            f"rows={diagnostic.get('row_count', len(rows))}",
+            tone=tone,
+        )
+    )
+    _render_table(
+        rows[:24],
+        key=f"rai-collapse-diagnostic-{trace.get('frame_id', 'unknown')}",
+        height=260,
+    )
 
 
 def _render_metric_timeline(title: str, rows: list[dict], metric: str, *, threshold=None, lower_is_better=True) -> None:
@@ -1601,7 +1825,14 @@ def _render_sequence_trajectory_overlay(trace_rows: list[dict], selected_stages:
     rows_count = int(np.ceil(len(trajectories) / columns))
     fig, plt = _make_figure(width=4.2 * columns, height=3.7 * rows_count)
     axes = fig.subplots(rows_count, columns, squeeze=False)
-    fig.suptitle("Raw Replay Stage Output Trajectory Comparison", x=0.01, ha="left", fontsize=13, fontweight="bold", color="#163044")
+    fig.suptitle(
+        "Representative Stage Trajectory (single point per frame)",
+        x=0.01,
+        ha="left",
+        fontsize=13,
+        fontweight="bold",
+        color="#163044",
+    )
 
     for index, (_, label, color, trajectory) in enumerate(trajectories):
         ax = axes[index // columns][index % columns]
@@ -1626,8 +1857,98 @@ def _render_sequence_trajectory_overlay(trace_rows: list[dict], selected_stages:
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     _render_matplotlib_figure(
         fig,
-        caption="각 패널은 같은 x/y 축으로 전체 raw replay를 처리한 stage별 대표 궤적입니다. 시작점은 작은 원, 마지막점은 테두리 있는 원입니다.",
+        caption=(
+            "각 패널은 stage별 후보 중 score/confidence가 가장 큰 대표점 1개만 연결합니다. "
+            "2명 교차 분리 판단은 위의 Multi-object Track Trajectory를 기준으로 보세요."
+        ),
     )
+
+
+def _render_multi_track_trajectory_overlay(trace_rows: list[dict]) -> None:
+    stage_specs = [
+        ("tracks", "Tracker state by track_id"),
+        ("display", "Display output by track_id"),
+    ]
+    panels = []
+    for stage, label in stage_specs:
+        trajectories = _collect_stage_track_trajectories(trace_rows, stage)
+        trajectories = {
+            track_id: rows
+            for track_id, rows in sorted(
+                trajectories.items(),
+                key=lambda item: (-len(item[1]), item[0]),
+            )
+            if rows
+        }
+        if trajectories:
+            panels.append((stage, label, trajectories))
+
+    if not panels:
+        st.caption("track_id가 있는 multi-object trajectory 데이터가 없습니다.")
+        return
+
+    all_points = [
+        point
+        for _, _, trajectories in panels
+        for rows in trajectories.values()
+        for point in rows
+    ]
+    xs = np.asarray([point["x_m"] for point in all_points], dtype=float)
+    ys = np.asarray([point["y_m"] for point in all_points], dtype=float)
+    x_abs = max(float(np.max(np.abs(xs))) + 0.15, 0.6)
+    y_max = max(float(np.max(ys)) + 0.25, 3.0)
+    columns = len(panels)
+    fig, plt = _make_figure(width=5.4 * columns, height=4.4)
+    axes = fig.subplots(1, columns, squeeze=False)
+    fig.suptitle(
+        "Multi-object Track Trajectory",
+        x=0.01,
+        ha="left",
+        fontsize=13,
+        fontweight="bold",
+        color="#163044",
+    )
+
+    stat_rows = []
+    for panel_index, (_, label, trajectories) in enumerate(panels):
+        ax = axes[0][panel_index]
+        for color_index, (track_id, rows) in enumerate(list(trajectories.items())[:8]):
+            color = _TRACK_TRAJECTORY_COLORS[color_index % len(_TRACK_TRAJECTORY_COLORS)]
+            tx = [point["x_m"] for point in rows]
+            ty = [point["y_m"] for point in rows]
+            ax.plot(tx, ty, color=color, linewidth=2.0, marker="o", markersize=2.2, label=f"id {track_id}")
+            ax.scatter([tx[0]], [ty[0]], s=42, color=color, edgecolors="white", linewidth=0.8, zorder=5)
+            ax.scatter([tx[-1]], [ty[-1]], s=54, color=color, edgecolors="#172232", linewidth=1.0, zorder=5)
+            ax.text(tx[-1], ty[-1], f" {track_id}", color=color, fontsize=8, va="center")
+            stats = _track_trajectory_stats(rows, len(trace_rows))
+            stat_rows.append(
+                {
+                    "stage": label.replace(" by track_id", ""),
+                    "track_id": track_id,
+                    **stats,
+                }
+            )
+
+        ax.scatter([0.0], [0.0], s=52, color="#172232", marker="s", zorder=6)
+        ax.set_title(label, fontsize=10, color="#20384d")
+        ax.set_xlim(-x_abs * 1.08, x_abs * 1.08)
+        ax.set_ylim(0.0, y_max * 1.06)
+        ax.set_xlabel("x (m)")
+        ax.set_ylabel("y (m)")
+        ax.grid(True, color="#e5edf2", linewidth=0.8)
+        ax.set_facecolor("#fbfdfe")
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.legend(loc="best", frameon=False, fontsize=8)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.9])
+    _render_matplotlib_figure(
+        fig,
+        caption=(
+            "기존 stage 궤적은 프레임별 대표점 1개를 그립니다. "
+            "이 그래프는 confirmed/tentative track을 track_id별로 분리해 2명 교차 시 ID 유지 여부를 봅니다."
+        ),
+    )
+    _render_table(stat_rows, key="multi-track-trajectory-stats", height=220)
 
 
 def _render_sequence_count_timeline(trace_rows: list[dict], selected_stages: list[tuple[str, str, str]]) -> None:
@@ -3546,9 +3867,27 @@ def _stage_page() -> None:
             }
         )
 
-    manifest = stage_cache.load_stage_cache_manifest(PROJECT_ROOT, selected_session)
-    cache_paths = stage_cache.stage_cache_paths(PROJECT_ROOT, selected_session)
+    mode_options = _stage_cache_mode_options()
     st.markdown("### Stage Cache")
+    selected_ablation_label = st.selectbox(
+        "Ablation Mode",
+        list(mode_options.keys()),
+        index=0,
+        help=(
+            "같은 raw를 어떤 처리 조건으로 다시 돌릴지 고릅니다. "
+            "person_aware_merge는 2명 근거가 있을 때 DBSCAN 병합을 막는 후보 모드이고, "
+            "multi_tracker_relaxed는 tracker birth/association까지 완화한 후보 모드입니다."
+        ),
+    )
+    selected_ablation_mode = mode_options[selected_ablation_label]
+    st.caption(
+        "`baseline`: 현재 기본 처리 | `rda_candidates`: Doppler slice 후보 + DBSCAN 끔 | "
+        "`person_aware_merge`: multi-object 근거 보호 | "
+        "`multi_tracker_relaxed`: 후보 보호 + tracker 완화 | "
+        "`no_*`: 단계별 끄기 실험"
+    )
+    manifest = stage_cache.load_stage_cache_manifest(PROJECT_ROOT, selected_session, selected_ablation_mode)
+    cache_paths = stage_cache.stage_cache_paths(PROJECT_ROOT, selected_session, selected_ablation_mode)
     stage_cache_enabled = bool(detail.get("capture_id"))
     if not stage_cache_enabled:
         st.info(
@@ -3584,6 +3923,7 @@ def _stage_page() -> None:
                     selected_session,
                     frame_limit=(int(frame_limit) or None),
                     force=bool(force_rebuild),
+                    ablation_mode=selected_ablation_mode,
                 )
             st.success(
                 f"stage cache ready: frames={manifest.get('frame_count', 0)} | "
@@ -3593,13 +3933,14 @@ def _stage_page() -> None:
         except Exception as error:
             st.error(f"stage cache 생성 중 오류가 발생했습니다: {error}")
 
-    manifest = stage_cache.load_stage_cache_manifest(PROJECT_ROOT, selected_session)
+    manifest = stage_cache.load_stage_cache_manifest(PROJECT_ROOT, selected_session, selected_ablation_mode)
     if manifest:
-        m1, m2, m3, m4 = st.columns(4)
+        m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Cached Frames", manifest.get("frame_count", 0))
         m2.metric("Capture", manifest.get("capture_id") or detail.get("capture_id") or "n/a")
         m3.metric("Range FFT", (manifest.get("runtime") or {}).get("range_fft_size") or "n/a")
         m4.metric("Angle FFT", (manifest.get("runtime") or {}).get("angle_fft_size") or "n/a")
+        m5.metric("Mode", manifest.get("ablation_mode") or selected_ablation_mode)
         st.caption(
             f"generated_at={manifest.get('generated_at') or 'n/a'} | "
             f"cache_dir=`{cache_paths['cache_dir']}`"
@@ -3608,15 +3949,17 @@ def _stage_page() -> None:
             _render_file_links(
                 {
                     "stage cache manifest": cache_paths["manifest_path"],
-                "stage cache frames": cache_paths["frames_path"],
-                "frame features": cache_paths["features_path"],
-                "feature summary": cache_paths["feature_summary_path"],
-                "frame trace": cache_paths["trace_path"],
-                "trace summary": cache_paths["trace_summary_path"],
-            }
+                    "stage cache frames": cache_paths["frames_path"],
+                    "frame features": cache_paths["features_path"],
+                    "feature summary": cache_paths["feature_summary_path"],
+                    "frame trace": cache_paths["trace_path"],
+                    "trace summary": cache_paths["trace_summary_path"],
+                }
         )
     else:
         st.info("아직 stage cache가 없습니다. 위 버튼으로 raw replay cache를 생성해 주세요.")
+
+    _render_stage_ablation_comparison(selected_session, mode_options)
 
     stage_data = (detail.get("summary") or {}).get("diagnostics", {}).get("preferred_stage_timings_ms", {})
     timings = stage_data.get("timings", {})
@@ -3649,12 +3992,12 @@ def _stage_page() -> None:
     if not manifest:
         return
 
-    frames = stage_cache.load_stage_cache_frames(PROJECT_ROOT, selected_session)
+    frames = stage_cache.load_stage_cache_frames(PROJECT_ROOT, selected_session, selected_ablation_mode)
     if not frames:
         st.warning("stage cache manifest는 있지만 frame record가 비어 있습니다. 다시 생성해 보는 편이 좋습니다.")
         return
 
-    trace_rows = stage_cache.load_stage_traces(PROJECT_ROOT, selected_session)
+    trace_rows = stage_cache.load_stage_traces(PROJECT_ROOT, selected_session, selected_ablation_mode)
     st.markdown("### Whole Sequence Stage View")
     st.caption(
         "raw를 다시 처리한 뒤 stage별 출력 궤적을 전체 이동 기준으로 비교합니다. "
@@ -3663,8 +4006,13 @@ def _stage_page() -> None:
     _render_stage_sequence_overview(trace_rows)
 
     selected_ordinal = st.slider("Cached Frame Index", 0, len(frames) - 1, 0)
-    frame_record, arrays = stage_cache.load_stage_cache_frame(PROJECT_ROOT, selected_session, selected_ordinal)
-    feature_rows = stage_cache.load_stage_features(PROJECT_ROOT, selected_session)
+    frame_record, arrays = stage_cache.load_stage_cache_frame(
+        PROJECT_ROOT,
+        selected_session,
+        selected_ordinal,
+        selected_ablation_mode,
+    )
+    feature_rows = stage_cache.load_stage_features(PROJECT_ROOT, selected_session, selected_ablation_mode)
     feature_record = next(
         (row for row in feature_rows if int(row.get("ordinal", -1)) == int(selected_ordinal)),
         {},
@@ -3720,6 +4068,7 @@ def _stage_page() -> None:
         "따라서 실시간 측정 성능에는 영향을 주지 않습니다."
     )
     _render_trace_flow(trace_record)
+    _render_rai_collapse_diagnostics(trace_record)
 
     st.markdown("### Processing Loop Outputs")
     frame_timings = frame_record.get("stage_timings_ms") or {}

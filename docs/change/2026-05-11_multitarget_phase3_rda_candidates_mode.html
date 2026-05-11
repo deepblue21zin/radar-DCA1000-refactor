@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>2026-05-11 multitarget phase3 rda candidates mode</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; line-height: 1.55; color: #172033; }
+    code, pre { background: #f3f5f8; border-radius: 6px; }
+    code { padding: 1px 4px; }
+    pre { padding: 12px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>Multi-target Phase 3 RDA 후보 검출 모드 추가</h1>
+
+  <h2>목적</h2>
+  <p>
+    range-Doppler-angle 후보를 DBSCAN에서 바로 1개로 접지 않고 tracker 입력까지 유지하는 replay 모드를 만들어,
+    multi-target 분리 가능성을 검증했다.
+  </p>
+
+  <h2>수정 파일</h2>
+  <ul>
+    <li><code>tools/lab/stage_cache.py</code></li>
+  </ul>
+
+  <h2>변경 내용</h2>
+  <ul>
+    <li>Stage Cache ablation mode에 <code>rda_candidates</code>를 추가했다.</li>
+    <li><code>rda_candidates</code> 모드에서는 <code>angle_source=doppler_slice_rai</code>로 두고 <code>enable_dbscan=false</code>로 재처리한다.</li>
+    <li>이 모드는 live 기본 동작을 바꾸지 않고, 같은 raw에 대한 검증 모드로만 동작한다.</li>
+  </ul>
+
+  <h2>검증 명령 또는 확인 방법</h2>
+  <pre><code>python -c "from pathlib import Path; compile(Path('tools/lab/stage_cache.py').read_text(encoding='utf-8'), 'tools/lab/stage_cache.py', 'exec'); print('syntax ok')"
+python -B -m tools.lab.stage_cache --session 20260508_193458 --mode rda_candidates --force
+python -B -m tools.diagnostics.multitarget_stage_eval --session 20260508_193458 --mode rda_candidates --expected-max 2 --min-separation-m 0.65 --min-doppler-bins 7 --min-score-ratio 0.05 --jump-threshold-m 0.85</code></pre>
+
+  <h2>결과</h2>
+  <ul>
+    <li>보고서: <code>logs/diagnostics/multitarget_stage_eval_20260511_041433_20260508_193458__rda_candidates/report.html</code></li>
+    <li><code>display_two_or_more_rate</code>: 0.78</li>
+    <li><code>dbscan_collapse_rate_on_multi_evidence</code>: 0.0</li>
+    <li><code>tracker_collapse_rate_after_dbscan_multi</code>: 0.2218</li>
+    <li><code>over_expected_max_rate</code>: 0.02</li>
+  </ul>
+
+  <h2>남은 위험 또는 다음 후보</h2>
+  <ul>
+    <li>DBSCAN collapse는 사라졌지만, 5프레임에서 3개로 과분리되었다.</li>
+    <li>다음 단계에서는 RDA 후보를 유지하되 object count estimate를 이용해 같은 사람 내부 산란점만 정리하는 merge/DBSCAN 정책이 필요하다.</li>
+  </ul>
+</body>
+</html>

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Streamlit RAI Collapse Metric Card Fix</title>
+</head>
+<body>
+  <h1>Streamlit RAI Collapse 진단 카드 오류 수정</h1>
+  <h2>목적</h2>
+  <p>
+    Stage Debug의 <code>RAI Collapse vs Doppler-Slice Angle</code> 섹션에서
+    정의되지 않은 <code>_mini_metric_card</code> 호출로 Streamlit 페이지가 중단되는 문제를 수정한다.
+  </p>
+  <h2>수정 파일</h2>
+  <ul>
+    <li><code>tools/lab/app.py</code></li>
+  </ul>
+  <h2>변경 내용</h2>
+  <ul>
+    <li>존재하지 않는 <code>_mini_metric_card</code> 호출을 기존 공용 카드 함수 <code>_stage_card</code> 호출로 교체했다.</li>
+  </ul>
+  <h2>검증 명령 또는 확인 방법</h2>
+  <pre><code>python -B -c "from pathlib import Path; compile(Path('tools/lab/app.py').read_text(encoding='utf-8'), 'tools/lab/app.py', 'exec'); print('syntax ok')"
+rg -n "_mini_metric_card" tools/lab/app.py</code></pre>
+  <h2>결과</h2>
+  <p>syntax 검증을 통과했고, <code>_mini_metric_card</code> 잔여 호출이 없는 것을 확인했다.</p>
+  <h2>남은 위험 또는 다음 후보</h2>
+  <p>Streamlit 화면에서 브라우저 새로고침 후 해당 섹션이 정상 표시되는지 확인하면 된다.</p>
+</body>
+</html>

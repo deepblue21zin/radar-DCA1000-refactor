@@ -1,6 +1,9 @@
 import os
+import argparse
 from dataclasses import replace
 from datetime import datetime
+import inspect
+import json
 from pathlib import Path
 from queue import Empty, Queue
 import sys
@@ -36,7 +39,21 @@ from tools.runtime_core.real_time_process import (
 from tools.runtime_core.runtime_settings import load_runtime_settings, resolve_project_path
 from session_logging import SessionLogger
 from spatial_view import SpatialViewController, build_heatmap_lookup_table
-from tools.runtime_core.tracking import MultiTargetTracker
+from tools.runtime_core.tracking import MultiTargetTracker as _RuntimeMultiTargetTracker
+
+
+def _filter_tracker_kwargs_for_loaded_signature(kwargs):
+    parameters = inspect.signature(_RuntimeMultiTargetTracker.__init__).parameters
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return kwargs
+    supported = set(parameters) - {'self'}
+    return {key: value for key, value in kwargs.items() if key in supported}
+
+
+def MultiTargetTracker(*args, **kwargs):
+    if args:
+        return _RuntimeMultiTargetTracker(*args, **kwargs)
+    return _RuntimeMultiTargetTracker(**_filter_tracker_kwargs_for_loaded_signature(kwargs))
 
 
 SETTINGS = load_runtime_settings(PROJECT_ROOT)
@@ -47,6 +64,7 @@ CONFIG_PATH = Path(SETTINGS['_config_path_resolved'])
 STATIC = SETTINGS['static']
 RUNTIME = SETTINGS['runtime']
 TUNING = SETTINGS['tuning']
+RADAR_BOARD = str(RUNTIME.get('radar_board') or 'unknown').strip() or 'unknown'
 CLI_PORT = RUNTIME['cli_port']
 CLI_BAUDRATE = int(STATIC['cli_baudrate'])
 HOST_IP = STATIC['network']['host_ip']
@@ -58,6 +76,15 @@ BUFFER_SIZE = int(STATIC['network']['buffer_size'])
 REMOVE_STATIC = bool(TUNING['processing']['remove_static'])
 DOPPLER_GUARD_BINS = int(TUNING['processing']['doppler_guard_bins'])
 INVERT_LATERAL_AXIS = bool(TUNING['processing'].get('invert_lateral_axis', False))
+ANGLE_PROJECTION = str(TUNING['processing'].get('angle_projection', 'fft1d')).strip().lower()
+ANGLE_ELEVATION_MIN_DEG = float(TUNING['processing'].get('angle_elevation_min_deg', -40.0))
+ANGLE_ELEVATION_MAX_DEG = float(TUNING['processing'].get('angle_elevation_max_deg', 40.0))
+ANGLE_ELEVATION_STEP_DEG = float(TUNING['processing'].get('angle_elevation_step_deg', 4.0))
+ANGLE_PHASE_SIGN = float(TUNING['processing'].get('angle_phase_sign', -1.0))
+ANGLE_SOURCE = str(TUNING['processing'].get('angle_source', 'collapsed_rai')).strip().lower()
+CHANNEL_CALIBRATION = TUNING['processing'].get('channel_calibration', {}) or {}
+CHANNEL_CALIBRATION_ENABLED = bool(CHANNEL_CALIBRATION.get('enabled', False))
+CHANNEL_CALIBRATION_COEFFICIENTS = list(CHANNEL_CALIBRATION.get('coefficients', []))
 ROI_LATERAL_M = float(TUNING['roi']['lateral_m'])
 ROI_FORWARD_M = float(TUNING['roi']['forward_m'])
 ROI_MIN_FORWARD_M = float(TUNING['roi']['min_forward_m'])
@@ -98,6 +125,9 @@ TRACK_MEASUREMENT_SOFT_GATE_START_M = float(TUNING['tracking'].get('measurement_
 TRACK_MEASUREMENT_SOFT_GATE_FULL_M = float(TUNING['tracking'].get('measurement_soft_gate_full_m', 0.52))
 TRACK_MEASUREMENT_SOFT_GATE_RANGE_SCALE = float(TUNING['tracking'].get('measurement_soft_gate_range_scale', 0.05))
 TRACK_MEASUREMENT_SOFT_GATE_SPEED_SCALE = float(TUNING['tracking'].get('measurement_soft_gate_speed_scale', 0.06))
+TRACK_MAX_OBJECT_COUNT = int(TUNING['tracking'].get('max_object_count', 3))
+TRACK_EXPECTED_OBJECT_COUNT = TUNING['tracking'].get('expected_object_count')
+TRACK_CROSSING_HOLD_FRAMES = int(TUNING['tracking'].get('crossing_hold_frames', 8))
 DISPLAY_MIN_CONFIDENCE = float(TUNING['detection']['display_min_confidence'])
 PIPELINE_QUEUE_SIZE = int(TUNING['pipeline']['queue_size'])
 BLOCK_TRACK_BIRTH_ON_INVALID = bool(TUNING['pipeline']['block_track_birth_on_invalid'])
@@ -127,6 +157,13 @@ DETECTION_TUNING = {
     'duplicate_suppression_range_scale': float(DETECTION_ALGORITHM.get('duplicate_suppression_range_scale', 0.03)),
     'duplicate_suppression_doppler_bins': int(DETECTION_ALGORITHM.get('duplicate_suppression_doppler_bins', 6)),
     'duplicate_suppression_score_ratio': float(DETECTION_ALGORITHM.get('duplicate_suppression_score_ratio', 0.82)),
+    'object_count_estimator_enabled': bool(DETECTION_ALGORITHM.get('object_count_estimator_enabled', True)),
+    'object_count_max_objects': int(DETECTION_ALGORITHM.get('object_count_max_objects', 3)),
+    'object_count_min_separation_m': float(DETECTION_ALGORITHM.get('object_count_min_separation_m', 0.65)),
+    'object_count_min_doppler_bins': int(DETECTION_ALGORITHM.get('object_count_min_doppler_bins', 7)),
+    'object_count_min_score_ratio': float(DETECTION_ALGORITHM.get('object_count_min_score_ratio', 0.05)),
+    'protect_multi_object_candidates': bool(DETECTION_ALGORITHM.get('protect_multi_object_candidates', False)),
+    'limit_output_to_object_count': bool(DETECTION_ALGORITHM.get('limit_output_to_object_count', False)),
 }
 LOG_ROOT = PROJECT_ROOT / 'logs' / 'live_motion_viewer'
 SPATIAL_VIEW_HEIGHT = int(STATIC['spatial_view']['height'])
@@ -203,6 +240,14 @@ class MotionViewer:
             remove_static=REMOVE_STATIC,
             doppler_guard_bins=DOPPLER_GUARD_BINS,
             lateral_axis_sign=(-1.0 if INVERT_LATERAL_AXIS else 1.0),
+            angle_projection=ANGLE_PROJECTION,
+            angle_elevation_min_deg=ANGLE_ELEVATION_MIN_DEG,
+            angle_elevation_max_deg=ANGLE_ELEVATION_MAX_DEG,
+            angle_elevation_step_deg=ANGLE_ELEVATION_STEP_DEG,
+            angle_phase_sign=ANGLE_PHASE_SIGN,
+            angle_source=ANGLE_SOURCE,
+            channel_calibration_enabled=CHANNEL_CALIBRATION_ENABLED,
+            channel_calibration_coefficients=CHANNEL_CALIBRATION_COEFFICIENTS,
         )
         self.track_angle_resolution_rad = self.estimate_track_angle_resolution_rad()
         self.raw_frame_queue = Queue(maxsize=PIPELINE_QUEUE_SIZE)
@@ -295,6 +340,7 @@ class MotionViewer:
             'static_snapshot': STATIC,
             'runtime_snapshot': RUNTIME,
             'tuning_snapshot': TUNING,
+            'radar_board': RADAR_BOARD,
             'cfg': str(CONFIG_PATH),
             'adc_sample': self.runtime_config.adc_sample,
             'chirp_loops': self.runtime_config.chirp_loops,
@@ -305,6 +351,18 @@ class MotionViewer:
             'remove_static': self.runtime_config.remove_static,
             'invert_lateral_axis': INVERT_LATERAL_AXIS,
             'lateral_axis_sign': self.runtime_config.lateral_axis_sign,
+            'angle_projection': self.runtime_config.angle_projection,
+            'angle_source': getattr(self.runtime_config, 'angle_source', ANGLE_SOURCE),
+            'angle_elevation_axis_deg': [round(float(v), 3) for v in self.runtime_config.angle_elevation_axis_deg.tolist()],
+            'angle_phase_sign': self.runtime_config.angle_phase_sign,
+            'channel_calibration_enabled': getattr(
+                self.runtime_config,
+                'channel_calibration_enabled',
+                CHANNEL_CALIBRATION_ENABLED,
+            ),
+            'channel_calibration_count': len(
+                getattr(self.runtime_config, 'channel_calibration_coefficients', ()) or ()
+            ),
             'range_resolution_m': round(self.runtime_config.range_resolution_m, 4),
             'max_range_m': round(self.runtime_config.max_range_m, 2),
             'roi_lateral_m': ROI_LATERAL_M,
@@ -347,6 +405,9 @@ class MotionViewer:
             'track_measurement_soft_gate_full_m': TRACK_MEASUREMENT_SOFT_GATE_FULL_M,
             'track_measurement_soft_gate_range_scale': TRACK_MEASUREMENT_SOFT_GATE_RANGE_SCALE,
             'track_measurement_soft_gate_speed_scale': TRACK_MEASUREMENT_SOFT_GATE_SPEED_SCALE,
+            'track_max_object_count': TRACK_MAX_OBJECT_COUNT,
+            'track_expected_object_count': TRACK_EXPECTED_OBJECT_COUNT,
+            'track_crossing_hold_frames': TRACK_CROSSING_HOLD_FRAMES,
             'pipeline_queue_size': PIPELINE_QUEUE_SIZE,
             'block_track_birth_on_invalid': BLOCK_TRACK_BIRTH_ON_INVALID,
             'invalid_policy': dict(INVALID_POLICY),
@@ -432,6 +493,9 @@ class MotionViewer:
             measurement_soft_gate_full_m=TRACK_MEASUREMENT_SOFT_GATE_FULL_M,
             measurement_soft_gate_range_scale=TRACK_MEASUREMENT_SOFT_GATE_RANGE_SCALE,
             measurement_soft_gate_speed_scale=TRACK_MEASUREMENT_SOFT_GATE_SPEED_SCALE,
+            max_object_count=TRACK_MAX_OBJECT_COUNT,
+            expected_object_count=TRACK_EXPECTED_OBJECT_COUNT,
+            crossing_hold_frames=TRACK_CROSSING_HOLD_FRAMES,
         )
 
     def resolve_source_capture_path(self):
@@ -443,6 +507,31 @@ class MotionViewer:
         shorthand_candidate = PROJECT_ROOT / 'logs' / 'raw' / self.source_capture
         if shorthand_candidate.exists():
             return shorthand_candidate
+        session_id_candidate = Path(str(self.source_capture)).name
+        for live_session_candidate in (
+            PROJECT_ROOT / 'logs' / 'live_motion_viewer' / str(self.source_capture),
+            PROJECT_ROOT / 'logs' / 'live_motion_viewer' / session_id_candidate,
+        ):
+            summary_path = live_session_candidate / 'summary.json'
+            if not summary_path.exists():
+                continue
+            try:
+                summary = json.loads(summary_path.read_text(encoding='utf-8'))
+            except Exception:
+                continue
+            source_capture = (
+                ((summary.get('session_meta') or {}).get('source_capture'))
+                or (summary.get('source_capture'))
+                or ((summary.get('runtime_config') or {}).get('log_source_capture'))
+            )
+            if not source_capture:
+                continue
+            resolved_source = resolve_project_path(PROJECT_ROOT, source_capture)
+            if resolved_source.exists():
+                print(
+                    f"Resolved replay session {session_id_candidate} to source capture: {resolved_source}"
+                )
+                return resolved_source
         raise FileNotFoundError(f"Replay capture directory not found: {candidate}")
 
     @staticmethod
@@ -1350,5 +1439,46 @@ class MotionViewer:
             self.shutdown()
 
 
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Run the live motion viewer in hardware live mode or raw-capture replay mode."
+    )
+    parser.add_argument(
+        "--input-mode",
+        choices=("live", "replay"),
+        default=None,
+        help="Override the runtime input mode. Use replay to process an existing logs/raw capture.",
+    )
+    parser.add_argument(
+        "--source-capture",
+        default=None,
+        help="Replay source capture path or logs/raw session id, for example logs/raw/20260509_005846.",
+    )
+    parser.add_argument(
+        "--replay-speed",
+        type=float,
+        default=1.0,
+        help="Replay playback speed multiplier.",
+    )
+    parser.add_argument(
+        "--replay-loop",
+        action="store_true",
+        help="Loop the replay source instead of stopping at the end.",
+    )
+    parser.add_argument(
+        "--auto-start",
+        action="store_true",
+        help="Automatically start replay processing after the UI opens.",
+    )
+    return parser.parse_args(argv)
+
+
 if __name__ == '__main__':
-    MotionViewer().run()
+    args = parse_args()
+    MotionViewer(
+        input_mode=args.input_mode,
+        source_capture=args.source_capture,
+        replay_speed=args.replay_speed,
+        replay_loop=args.replay_loop,
+        auto_start=args.auto_start,
+    ).run()

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Live Motion Viewer Replay CLI</title>
+</head>
+<body>
+  <h1>live_motion_viewer replay CLI 인자 적용</h1>
+  <h2>목적</h2>
+  <p>
+    사용자가 <code>python real-time/live_motion_viewer.py --input-mode replay --source-capture ...</code>
+    명령을 실행했을 때 실제로 replay 모드로 들어가지 않고 live 하드웨어 경로를 타는 문제를 수정한다.
+  </p>
+  <h2>수정 파일</h2>
+  <ul>
+    <li><code>real-time/live_motion_viewer.py</code></li>
+  </ul>
+  <h2>변경 내용</h2>
+  <ul>
+    <li><code>argparse</code> 기반 CLI 인자 파서를 추가했다.</li>
+    <li><code>--input-mode</code>, <code>--source-capture</code>, <code>--replay-speed</code>, <code>--replay-loop</code>, <code>--auto-start</code>를 <code>MotionViewer</code> 생성자에 전달하도록 했다.</li>
+    <li>이제 replay 명령이 DCA1000 configure 경로로 들어가지 않는다.</li>
+    <li><code>--source-capture</code>에 live/replay session ID가 잘못 들어와도 해당 session의 <code>summary.json</code>에서 실제 원본 raw capture를 찾아가도록 보강했다.</li>
+  </ul>
+  <h2>검증 명령 또는 확인 방법</h2>
+  <pre><code>python -B -c "from pathlib import Path; compile(Path('real-time/live_motion_viewer.py').read_text(encoding='utf-8'), 'real-time/live_motion_viewer.py', 'exec'); print('syntax ok')"
+python real-time/live_motion_viewer.py --help
+python -B -c "import sys; sys.path.insert(0, 'real-time'); from importlib.machinery import SourceFileLoader; m=SourceFileLoader('viewer','real-time/live_motion_viewer.py').load_module(); v=m.MotionViewer(input_mode='replay', source_capture='logs/raw/20260509_005846'); print(v.resolve_source_capture_path())"</code></pre>
+  <h2>결과</h2>
+  <p>
+    syntax 검증과 help 출력 확인을 통과했다.
+    <code>logs/raw/20260509_005846</code>처럼 replay session ID가 잘못 들어온 경우에도
+    <code>logs/raw/20260508_193128</code> 원본 raw capture로 정상 해석되는 것을 확인했다.
+  </p>
+  <h2>남은 위험 또는 다음 후보</h2>
+  <p>
+    실제 replay UI 실행은 사용자의 그래픽 환경에서 확인해야 한다. 실행 후 로그의 <code>log_input_mode</code>가
+    <code>replay</code>로 표시되는지 확인하면 된다.
+  </p>
+</body>
+</html>

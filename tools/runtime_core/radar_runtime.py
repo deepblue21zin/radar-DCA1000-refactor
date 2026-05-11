@@ -13,6 +13,25 @@ def _next_power_of_two(value, floor):
     return 1 << (size - 1).bit_length()
 
 
+def _parse_complex_coefficients(coefficients):
+    if not coefficients:
+        return ()
+
+    parsed = []
+    for item in coefficients:
+        if isinstance(item, dict):
+            real = float(item.get("real", 1.0))
+            imag = float(item.get("imag", 0.0))
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            real = float(item[0])
+            imag = float(item[1])
+        else:
+            real = float(item)
+            imag = 0.0
+        parsed.append(complex(real, imag))
+    return tuple(parsed)
+
+
 @dataclass(frozen=True)
 class RadarRuntimeConfig:
     config_path: str
@@ -30,6 +49,14 @@ class RadarRuntimeConfig:
     remove_static: bool = True
     doppler_guard_bins: int = 1
     lateral_axis_sign: float = 1.0
+    angle_projection: str = "fft1d"
+    angle_elevation_min_deg: float = -40.0
+    angle_elevation_max_deg: float = 40.0
+    angle_elevation_step_deg: float = 4.0
+    angle_phase_sign: float = -1.0
+    angle_source: str = "collapsed_rai"
+    channel_calibration_enabled: bool = False
+    channel_calibration_coefficients: tuple = ()
 
     @property
     def virtual_antennas(self):
@@ -61,12 +88,29 @@ class RadarRuntimeConfig:
         spatial_frequency = np.clip(spatial_frequency, -1.0, 1.0)
         return self.lateral_axis_sign * np.arcsin(spatial_frequency)
 
+    @property
+    def angle_elevation_axis_deg(self):
+        step = max(abs(float(self.angle_elevation_step_deg)), 1.0)
+        low = float(self.angle_elevation_min_deg)
+        high = float(self.angle_elevation_max_deg)
+        if high < low:
+            low, high = high, low
+        return np.arange(low, high + (0.5 * step), step, dtype=np.float64)
+
 
 def parse_runtime_config(
     config_path,
     remove_static=True,
     doppler_guard_bins=1,
     lateral_axis_sign=1.0,
+    angle_projection="fft1d",
+    angle_elevation_min_deg=-40.0,
+    angle_elevation_max_deg=40.0,
+    angle_elevation_step_deg=4.0,
+    angle_phase_sign=-1.0,
+    angle_source="collapsed_rai",
+    channel_calibration_enabled=False,
+    channel_calibration_coefficients=None,
 ):
     config_path = Path(config_path)
     channel_cfg = None
@@ -131,6 +175,14 @@ def parse_runtime_config(
         remove_static=remove_static,
         doppler_guard_bins=doppler_guard_bins,
         lateral_axis_sign=float(-1.0 if float(lateral_axis_sign) < 0.0 else 1.0),
+        angle_projection=str(angle_projection or "fft1d").strip().lower(),
+        angle_elevation_min_deg=float(angle_elevation_min_deg),
+        angle_elevation_max_deg=float(angle_elevation_max_deg),
+        angle_elevation_step_deg=float(angle_elevation_step_deg),
+        angle_phase_sign=float(angle_phase_sign),
+        angle_source=str(angle_source or "collapsed_rai").strip().lower(),
+        channel_calibration_enabled=bool(channel_calibration_enabled),
+        channel_calibration_coefficients=_parse_complex_coefficients(channel_calibration_coefficients),
     )
 
 

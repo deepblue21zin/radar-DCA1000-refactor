@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Stage Cache Nested Replay Source Resolution</title>
+</head>
+<body>
+  <h1>Stage Cache 중첩 replay 원본 raw 해석 보강</h1>
+  <h2>목적</h2>
+  <p>
+    replay session이 또 다른 replay session ID를 source로 기록한 경우에도 Stage Cache가
+    최종 원본 raw capture를 찾아가도록 보강한다.
+  </p>
+  <h2>수정 파일</h2>
+  <ul>
+    <li><code>tools/lab/stage_cache.py</code></li>
+  </ul>
+  <h2>변경 내용</h2>
+  <ul>
+    <li><code>summary.session_meta.source_capture</code>와 <code>summary.runtime_config.log_source_capture</code>를 raw 후보로 추가했다.</li>
+    <li>source가 live/replay session ID처럼 보이면 해당 session의 <code>summary.json</code>을 읽어 실제 원본 raw capture를 추가 후보로 사용한다.</li>
+  </ul>
+  <h2>검증 명령 또는 확인 방법</h2>
+  <pre><code>python -B -c "from pathlib import Path; compile(Path('tools/lab/stage_cache.py').read_text(encoding='utf-8'), 'tools/lab/stage_cache.py', 'exec'); print('syntax ok')"
+python -B -m tools.lab.stage_cache --session 20260511_054011 --force
+python -B -m tools.diagnostics.multitarget_stage_eval --session 20260511_054011 --mode baseline --expected-max 2 --min-separation-m 0.65 --min-doppler-bins 7 --min-score-ratio 0.05 --jump-threshold-m 0.85</code></pre>
+  <h2>결과</h2>
+  <p>
+    <code>20260511_054011</code> Stage Cache가 원본
+    <code>logs/raw/20260508_193458</code>로 정상 연결됐다.
+    진단 결과는 display 2명 이상 83.6%, DBSCAN collapse 0.0%, tracker collapse 7.73%,
+    3명 이상 과검출 21.2%로 확인됐다.
+  </p>
+  <h2>남은 위험 또는 다음 후보</h2>
+  <p>
+    DBSCAN collapse는 해결됐지만, 현재 live 설정은 2인 교차에서 3명 이상 과검출이 커졌다.
+    다음 단계는 object count limit 또는 tracker max object count를 2인 시나리오 기준으로 제한하는 실험이다.
+  </p>
+</body>
+</html>
