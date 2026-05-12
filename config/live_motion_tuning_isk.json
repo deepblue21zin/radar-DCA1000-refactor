@@ -118,7 +118,7 @@
         {"r_min": 3.0, "r_max": null, "radius_m": 0.90}
       ],
       "blob_center_doppler_radius_bins": 10,
-      "blob_center_method": "weighted_mean",
+      "blob_center_method": "weighted_median_trimmed",
       "blob_center_trim_radius_m": 0.85,
       "blob_center_floor_quantile": 0.65,
       "blob_center_peak_blend": 0.0,
@@ -127,7 +127,12 @@
       "blob_center_single_side_deadband_m": 0.15,
       "blob_center_cube_range_radius_m": 0.45,
       "blob_center_cube_angle_radius_deg": 18.0,
-      "blob_center_cube_relative_floor": 0.32
+      "blob_center_cube_relative_floor": 0.32,
+      "blob_center_dense_enabled": true,
+      "blob_center_dense_quantile": 0.995,
+      "blob_center_dense_min_normalized_power": 0.08,
+      "blob_center_dense_max_points": 2400,
+      "blob_center_dense_min_points": 6
     },
     "dbscan_adaptive_eps_bands": [
       {"r_min": 0.25, "r_max": 1.0, "eps": 0.38, "min_samples": 2},

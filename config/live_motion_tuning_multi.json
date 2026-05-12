@@ -2,7 +2,7 @@
   "processing": {
     "remove_static": true,
     "doppler_guard_bins": 2,
-    "invert_lateral_axis": true
+    "invert_lateral_axis": false
   },
   "roi": {
     "lateral_m": 1.25,
@@ -87,13 +87,13 @@
     ]
   },
   "tracking": {
-    "confirm_hits": 4,
+    "confirm_hits": 3,
     "max_misses": 10,
     "process_var": 1.0,
     "measurement_var": 0.43,
     "range_measurement_scale": 0.5,
     "confidence_measurement_scale": 0.35,
-    "association_gate": 4.5,
+    "association_gate": 7.5,
     "doppler_zero_guard_bins": 3,
     "doppler_gate_bins": 18,
     "doppler_cost_weight": 0.65,
@@ -107,10 +107,10 @@
     "birth_suppression_confidence_ratio": 0.0,
     "birth_suppression_doppler_bins": 0,
     "birth_suppression_miss_tolerance": 3,
-    "primary_track_hold_frames": 4,
+    "primary_track_hold_frames": 1,
     "lateral_deadband_m": 0.05,
     "lateral_deadband_range_scale": 0.03,
-    "lateral_smoothing_alpha": 0.45,
+    "lateral_smoothing_alpha": 0.35,
     "lateral_velocity_damping": 0.55,
     "local_remeasurement_enabled": true,
     "local_remeasurement_blend": 0.35,
@@ -147,7 +147,7 @@
     ]
   },
   "pipeline": {
-    "queue_size": 4,
+    "queue_size": 32,
     "block_track_birth_on_invalid": true,
     "invalid_policy": {
       "birth_block_gap_threshold": 16,
@@ -161,7 +161,7 @@
   "visualization": {
     "show_tentative_tracks": true,
     "tentative_min_confidence": 0.3,
-    "tentative_min_hits": 2,
+    "tentative_min_hits": 3,
     "display_hysteresis_frames": 5,
     "display_hysteresis_confidence_floor": 0.12,
     "display_primary_bonus_frames": 3

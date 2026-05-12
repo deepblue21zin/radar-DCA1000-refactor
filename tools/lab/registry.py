@@ -12,6 +12,7 @@ CLEAN = {"invalid": 0.01, "gap": 8, "ooo": 1, "mismatch": 1}
 NOISY = {"invalid": 0.05, "gap": 64, "ooo": 2, "mismatch": 2}
 
 PARAMETER_ALIASES = {
+    "radar_board": "runtime.radar_board",
     "remove_static": "processing.remove_static",
     "doppler_guard_bins": "processing.doppler_guard_bins",
     "roi_lateral_m": "roi.lateral_m",
@@ -67,6 +68,24 @@ def _nested_get(data: dict, dotted_key: str, default: Any = None) -> Any:
         if current is None:
             return default
     return current
+
+
+def _board_type_from_payloads(*payloads: dict) -> str | None:
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        for dotted_key in (
+            "radar_board",
+            "runtime.radar_board",
+            "runtime_snapshot.radar_board",
+            "runtime_config.radar_board",
+            "runtime_summary.radar_board",
+            "raw_capture.radar_board",
+        ):
+            value = _nested_get(payload, dotted_key)
+            if value:
+                return str(value).strip() or None
+    return None
 
 
 def _as_int(value: Any) -> int:
@@ -238,6 +257,7 @@ def _connect(project_root: Path) -> sqlite3.Connection:
             source_session_dir TEXT,
             variant TEXT,
             scenario_id TEXT,
+            board_type TEXT,
             frame_count INTEGER,
             invalid_rate REAL,
             max_udp_gap_count INTEGER,
@@ -258,6 +278,7 @@ def _connect(project_root: Path) -> sqlite3.Connection:
             input_mode TEXT,
             variant TEXT,
             scenario_id TEXT,
+            board_type TEXT,
             source_capture TEXT,
             capture_id TEXT,
             git_commit TEXT,
@@ -302,6 +323,7 @@ def _connect(project_root: Path) -> sqlite3.Connection:
             keep_flag INTEGER NOT NULL DEFAULT 0,
             people_count INTEGER,
             motion_pattern TEXT,
+            board_type TEXT,
             notes TEXT,
             updated_at TEXT NOT NULL,
             PRIMARY KEY (target_type, target_id)
@@ -312,8 +334,20 @@ def _connect(project_root: Path) -> sqlite3.Connection:
         );
         """
     )
+    _ensure_column(connection, "captures", "board_type", "TEXT")
+    _ensure_column(connection, "runs", "board_type", "TEXT")
+    _ensure_column(connection, "annotations", "board_type", "TEXT")
     connection.commit()
     return connection
+
+
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    existing = {
+        row["name"]
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in existing:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def _capture_id_from_path(path_value: Any, raw_root: Path) -> str | None:
@@ -347,6 +381,7 @@ def _build_capture_record(project_root: Path, capture_dir: Path) -> dict:
         "source_session_dir": source_session_dir,
         "variant": manifest.get("variant"),
         "scenario_id": manifest.get("scenario_id"),
+        "board_type": _board_type_from_payloads(manifest),
         "frame_count": stats["frame_count"],
         "invalid_rate": stats["invalid_rate"],
         "max_udp_gap_count": stats["max_udp_gap_count"],
@@ -388,6 +423,7 @@ def _build_run_record(project_root: Path, session_dir: Path) -> dict | None:
         "input_mode": meta.get("input_mode"),
         "variant": meta.get("variant"),
         "scenario_id": meta.get("scenario_id"),
+        "board_type": _board_type_from_payloads(runtime_config, summary),
         "source_capture": meta.get("source_capture"),
         "capture_id": capture_id,
         "git_commit": meta.get("git_commit"),
@@ -564,6 +600,7 @@ def fetch_runs(project_root: Path) -> list[dict]:
                    annotations.keep_flag AS annotation_keep_flag,
                    annotations.people_count AS annotation_people_count,
                    annotations.motion_pattern AS annotation_motion_pattern,
+                   annotations.board_type AS annotation_board_type,
                    annotations.notes AS annotation_notes
             FROM runs
             LEFT JOIN annotations
@@ -626,6 +663,7 @@ def fetch_captures(project_root: Path) -> list[dict]:
                    annotations.keep_flag AS annotation_keep_flag,
                    annotations.people_count AS annotation_people_count,
                    annotations.motion_pattern AS annotation_motion_pattern,
+                   annotations.board_type AS annotation_board_type,
                    annotations.notes AS annotation_notes
             FROM captures
             LEFT JOIN annotations
@@ -667,14 +705,16 @@ def save_annotation(
     keep_flag: bool,
     people_count: int | None,
     motion_pattern: str | None,
+    board_type: str | None,
     notes: str | None,
 ) -> None:
     label = (label or "").strip() or None
     motion_pattern = (motion_pattern or "").strip() or None
+    board_type = (board_type or "").strip() or None
     notes = (notes or "").strip() or None
     people_count = int(people_count) if people_count not in (None, 0) else None
     with _connect(project_root) as connection:
-        if not any([label, keep_flag, people_count, motion_pattern, notes]):
+        if not any([label, keep_flag, people_count, motion_pattern, board_type, notes]):
             connection.execute(
                 "DELETE FROM annotations WHERE target_type=? AND target_id=?",
                 (target_type, target_id),
@@ -684,17 +724,28 @@ def save_annotation(
                 """
                 INSERT INTO annotations (
                     target_type, target_id, label, keep_flag, people_count,
-                    motion_pattern, notes, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    motion_pattern, board_type, notes, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(target_type, target_id) DO UPDATE SET
                     label=excluded.label,
                     keep_flag=excluded.keep_flag,
                     people_count=excluded.people_count,
                     motion_pattern=excluded.motion_pattern,
+                    board_type=excluded.board_type,
                     notes=excluded.notes,
                     updated_at=excluded.updated_at
                 """,
-                (target_type, target_id, label, _as_int(keep_flag), people_count, motion_pattern, notes, _now()),
+                (
+                    target_type,
+                    target_id,
+                    label,
+                    _as_int(keep_flag),
+                    people_count,
+                    motion_pattern,
+                    board_type,
+                    notes,
+                    _now(),
+                ),
             )
         connection.commit()
 

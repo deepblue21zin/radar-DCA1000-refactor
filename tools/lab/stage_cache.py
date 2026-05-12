@@ -24,7 +24,7 @@ from tools.runtime_core.runtime_settings import load_runtime_settings
 from tools.runtime_core.tracking import MultiTargetTracker as _RuntimeMultiTargetTracker
 
 
-STAGE_CACHE_SCHEMA_VERSION = 4
+STAGE_CACHE_SCHEMA_VERSION = 6
 STAGE_FEATURE_SCHEMA_VERSION = 1
 
 
@@ -363,12 +363,27 @@ def _tracking_value(runtime_summary: dict, key: str, default=None):
     )
 
 
-def _build_runtime_components(project_root: Path, runtime_summary: dict, *, ablation_mode: str = "baseline"):
+def _build_runtime_components(
+    project_root: Path,
+    runtime_summary: dict,
+    *,
+    ablation_mode: str = "baseline",
+    cfg_path_override: str | Path | None = None,
+    angle_phase_sign_override: float | None = None,
+    lateral_axis_sign_override: float | None = None,
+):
     ablation_mode = _normalize_ablation_mode(ablation_mode)
     current_settings = _current_runtime_settings(project_root)
     runtime_summary = _overlay_current_tuning(runtime_summary, current_settings)
     current_processing = _nested_get(current_settings, "tuning", "processing", default={}) or {}
-    cfg_path = _resolve_cfg_path(project_root, runtime_summary)
+    if cfg_path_override is not None:
+        cfg_path = _as_path(project_root, cfg_path_override)
+        if cfg_path is None or not cfg_path.exists():
+            raise FileNotFoundError(f"Could not resolve override cfg path: {cfg_path_override}")
+        cfg_path_source = "override"
+    else:
+        cfg_path = _resolve_cfg_path(project_root, runtime_summary)
+        cfg_path_source = "runtime_summary"
     remove_static = bool(
         runtime_summary.get(
             "remove_static",
@@ -386,7 +401,10 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict, *, abla
         _nested_get(runtime_summary, "tuning_snapshot", "processing", "angle_projection", default="fft1d"),
     )
     current_angle_phase_sign = current_processing.get("angle_phase_sign")
-    if current_angle_phase_sign is not None:
+    if angle_phase_sign_override is not None:
+        angle_phase_sign = angle_phase_sign_override
+        angle_phase_sign_source = "override"
+    elif current_angle_phase_sign is not None:
         angle_phase_sign = current_angle_phase_sign
         angle_phase_sign_source = "current_tuning"
     else:
@@ -438,7 +456,11 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict, *, abla
         "angle_elevation_step_deg",
         default=4.0,
     )
-    lateral_axis_sign, lateral_axis_sign_source = _logged_lateral_axis_sign(runtime_summary)
+    if lateral_axis_sign_override is not None:
+        lateral_axis_sign = lateral_axis_sign_override
+        lateral_axis_sign_source = "override"
+    else:
+        lateral_axis_sign, lateral_axis_sign_source = _logged_lateral_axis_sign(runtime_summary)
     if lateral_axis_sign is None:
         lateral_axis_sign, lateral_axis_sign_source = _current_lateral_axis_sign(project_root)
 
@@ -583,7 +605,7 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict, *, abla
             {"r_min": 3.0, "r_max": None, "radius_m": 0.90},
         ]
         detection_params["blob_center_doppler_radius_bins"] = 10
-        detection_params["blob_center_method"] = "weighted_median"
+        detection_params["blob_center_method"] = "weighted_median_trimmed"
         detection_params["blob_center_trim_radius_m"] = 0.85
         detection_params["blob_center_floor_quantile"] = 0.65
         detection_params["blob_center_peak_blend"] = 0.0
@@ -593,6 +615,11 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict, *, abla
         detection_params["blob_center_cube_range_radius_m"] = 0.45
         detection_params["blob_center_cube_angle_radius_deg"] = 18.0
         detection_params["blob_center_cube_relative_floor"] = 0.32
+        detection_params["blob_center_dense_enabled"] = True
+        detection_params["blob_center_dense_quantile"] = 0.995
+        detection_params["blob_center_dense_min_normalized_power"] = 0.08
+        detection_params["blob_center_dense_max_points"] = 2400
+        detection_params["blob_center_dense_min_points"] = 6
         detection_params["min_output_score"] = max(float(detection_params.get("min_output_score", 0.0) or 0.0), 0.25)
     elif ablation_mode == "person_aware_merge":
         detection_params["angle_source"] = "doppler_slice_rai"
@@ -769,6 +796,7 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict, *, abla
     block_track_birth_on_invalid = bool(runtime_summary.get("block_track_birth_on_invalid", True))
     return {
         "cfg_path": cfg_path,
+        "cfg_path_source": cfg_path_source,
         "runtime_config": runtime_config,
         "detection_region": detection_region,
         "detection_params": detection_params,
@@ -791,19 +819,42 @@ def stage_cache_root(project_root: Path) -> Path:
     return Path(project_root).resolve() / "lab_data" / "stage_cache"
 
 
-def _stage_cache_key(session_id: str, ablation_mode: str | None = "baseline") -> str:
+def _variant_cache_suffix(variant_label: str | None) -> str:
+    if not variant_label:
+        return ""
+    label = str(variant_label).strip().lower()
+    safe = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in label)
+    safe = "_".join(part for part in safe.split("_") if part)
+    return safe[:80]
+
+
+def _stage_cache_key(
+    session_id: str,
+    ablation_mode: str | None = "baseline",
+    variant_label: str | None = None,
+) -> str:
     mode = _normalize_ablation_mode(ablation_mode)
-    if mode == "baseline":
-        return str(session_id)
-    return f"{session_id}__{mode}"
+    base = str(session_id) if mode == "baseline" else f"{session_id}__{mode}"
+    suffix = _variant_cache_suffix(variant_label)
+    return f"{base}__{suffix}" if suffix else base
 
 
-def stage_cache_dir(project_root: Path, session_id: str, ablation_mode: str | None = "baseline") -> Path:
-    return stage_cache_root(project_root) / _stage_cache_key(session_id, ablation_mode)
+def stage_cache_dir(
+    project_root: Path,
+    session_id: str,
+    ablation_mode: str | None = "baseline",
+    variant_label: str | None = None,
+) -> Path:
+    return stage_cache_root(project_root) / _stage_cache_key(session_id, ablation_mode, variant_label)
 
 
-def stage_cache_paths(project_root: Path, session_id: str, ablation_mode: str | None = "baseline") -> dict[str, Path]:
-    cache_dir = stage_cache_dir(project_root, session_id, ablation_mode)
+def stage_cache_paths(
+    project_root: Path,
+    session_id: str,
+    ablation_mode: str | None = "baseline",
+    variant_label: str | None = None,
+) -> dict[str, Path]:
+    cache_dir = stage_cache_dir(project_root, session_id, ablation_mode, variant_label)
     return {
         "cache_dir": cache_dir,
         "manifest_path": cache_dir / "manifest.json",
@@ -816,37 +867,67 @@ def stage_cache_paths(project_root: Path, session_id: str, ablation_mode: str | 
     }
 
 
-def load_stage_cache_manifest(project_root: Path, session_id: str, ablation_mode: str | None = "baseline") -> dict | None:
-    manifest_path = stage_cache_paths(project_root, session_id, ablation_mode)["manifest_path"]
+def load_stage_cache_manifest(
+    project_root: Path,
+    session_id: str,
+    ablation_mode: str | None = "baseline",
+    variant_label: str | None = None,
+) -> dict | None:
+    manifest_path = stage_cache_paths(project_root, session_id, ablation_mode, variant_label)["manifest_path"]
     if not manifest_path.exists():
         return None
     return _load_json(manifest_path)
 
 
-def load_stage_cache_frames(project_root: Path, session_id: str, ablation_mode: str | None = "baseline") -> list[dict]:
-    frames_path = stage_cache_paths(project_root, session_id, ablation_mode)["frames_path"]
+def load_stage_cache_frames(
+    project_root: Path,
+    session_id: str,
+    ablation_mode: str | None = "baseline",
+    variant_label: str | None = None,
+) -> list[dict]:
+    frames_path = stage_cache_paths(project_root, session_id, ablation_mode, variant_label)["frames_path"]
     return _load_jsonl(frames_path)
 
 
-def load_stage_features(project_root: Path, session_id: str, ablation_mode: str | None = "baseline") -> list[dict]:
-    features_path = stage_cache_paths(project_root, session_id, ablation_mode)["features_path"]
+def load_stage_features(
+    project_root: Path,
+    session_id: str,
+    ablation_mode: str | None = "baseline",
+    variant_label: str | None = None,
+) -> list[dict]:
+    features_path = stage_cache_paths(project_root, session_id, ablation_mode, variant_label)["features_path"]
     return _load_jsonl(features_path)
 
 
-def load_stage_feature_summary(project_root: Path, session_id: str, ablation_mode: str | None = "baseline") -> dict | None:
-    summary_path = stage_cache_paths(project_root, session_id, ablation_mode)["feature_summary_path"]
+def load_stage_feature_summary(
+    project_root: Path,
+    session_id: str,
+    ablation_mode: str | None = "baseline",
+    variant_label: str | None = None,
+) -> dict | None:
+    summary_path = stage_cache_paths(project_root, session_id, ablation_mode, variant_label)["feature_summary_path"]
     if not summary_path.exists():
         return None
     return _load_json(summary_path)
 
 
-def load_stage_traces(project_root: Path, session_id: str, ablation_mode: str | None = "baseline") -> list[dict]:
-    trace_path = stage_cache_paths(project_root, session_id, ablation_mode)["trace_path"]
+def load_stage_traces(
+    project_root: Path,
+    session_id: str,
+    ablation_mode: str | None = "baseline",
+    variant_label: str | None = None,
+) -> list[dict]:
+    trace_path = stage_cache_paths(project_root, session_id, ablation_mode, variant_label)["trace_path"]
     return _load_jsonl(trace_path)
 
 
-def load_stage_trace_summary(project_root: Path, session_id: str, ablation_mode: str | None = "baseline") -> dict | None:
-    summary_path = stage_cache_paths(project_root, session_id, ablation_mode)["trace_summary_path"]
+def load_stage_trace_summary(
+    project_root: Path,
+    session_id: str,
+    ablation_mode: str | None = "baseline",
+    variant_label: str | None = None,
+) -> dict | None:
+    summary_path = stage_cache_paths(project_root, session_id, ablation_mode, variant_label)["trace_summary_path"]
     if not summary_path.exists():
         return None
     return _load_json(summary_path)
@@ -1267,9 +1348,16 @@ def _build_trace_summary(traces: list[dict]) -> dict:
         stage_counts.append(
             {
                 "cfar_candidates": int(_nested_get(detection, "cfar", "candidate_count", default=0) or 0),
+                "rda_dense_points": int(_nested_get(detection, "rda_dense_points", "candidate_count", default=0) or 0),
+                "cfar_projected_seeds": int(_nested_get(detection, "cfar", "projected_seed_count", default=0) or 0),
                 "angle_passed": int(_nested_get(detection, "angle_validation", "passed_count", default=0) or 0),
                 "coarse_merge_after": int(_nested_get(detection, "candidate_merge_coarse", "after_count", default=0) or 0),
                 "body_refined": int(_nested_get(detection, "body_center_refinement", "refined_count", default=0) or 0),
+                "blob_group_points": sum(
+                    int((group.get("summary") or {}).get("component_point_count") or (group.get("summary") or {}).get("point_count") or 0)
+                    for group in (_nested_get(detection, "blob_center_refinement", "groups", default=[]) or [])
+                    if isinstance(group, dict)
+                ),
                 "blob_centered": int(_nested_get(detection, "blob_center_refinement", "output_count", default=0) or 0),
                 "final_merge_after": int(_nested_get(detection, "candidate_merge_final", "after_count", default=0) or 0),
                 "dbscan_output": int(_nested_get(detection, "dbscan", "output_count", default=0) or 0),
@@ -1287,9 +1375,12 @@ def _build_trace_summary(traces: list[dict]) -> dict:
     metrics = {}
     for key in [
         "cfar_candidates",
+        "rda_dense_points",
+        "cfar_projected_seeds",
         "angle_passed",
         "coarse_merge_after",
         "body_refined",
+        "blob_group_points",
         "blob_centered",
         "final_merge_after",
         "dbscan_output",
@@ -1319,6 +1410,10 @@ def build_stage_cache(
     frame_limit: int | None = None,
     force: bool = False,
     ablation_mode: str = "baseline",
+    variant_label: str | None = None,
+    cfg_path_override: str | Path | None = None,
+    angle_phase_sign_override: float | None = None,
+    lateral_axis_sign_override: float | None = None,
 ) -> dict:
     project_root = Path(project_root).resolve()
     ablation_mode = _normalize_ablation_mode(ablation_mode)
@@ -1332,12 +1427,19 @@ def build_stage_cache(
     capture_dir = _resolve_capture_dir(project_root, run_detail)
     capture_manifest, _, _ = load_raw_capture(capture_dir)
     runtime_summary = _merge_runtime_summary(run_detail, capture_manifest)
-    components = _build_runtime_components(project_root, runtime_summary, ablation_mode=ablation_mode)
+    components = _build_runtime_components(
+        project_root,
+        runtime_summary,
+        ablation_mode=ablation_mode,
+        cfg_path_override=cfg_path_override,
+        angle_phase_sign_override=angle_phase_sign_override,
+        lateral_axis_sign_override=lateral_axis_sign_override,
+    )
 
-    paths = stage_cache_paths(project_root, session_id, ablation_mode)
+    paths = stage_cache_paths(project_root, session_id, ablation_mode, variant_label)
     requested_limit = int(frame_limit) if frame_limit not in (None, 0) else None
     if not force and paths["manifest_path"].exists() and paths["frames_path"].exists():
-        existing_manifest = load_stage_cache_manifest(project_root, session_id, ablation_mode) or {}
+        existing_manifest = load_stage_cache_manifest(project_root, session_id, ablation_mode, variant_label) or {}
         feature_files_ready = (
             paths["features_path"].exists()
             and paths["feature_summary_path"].exists()
@@ -1443,8 +1545,9 @@ def build_stage_cache(
     manifest = {
         "schema_version": STAGE_CACHE_SCHEMA_VERSION,
         "session_id": str(session_id),
-        "cache_key": _stage_cache_key(session_id, ablation_mode),
+        "cache_key": _stage_cache_key(session_id, ablation_mode, variant_label),
         "ablation_mode": ablation_mode,
+        "variant_label": _variant_cache_suffix(variant_label) or None,
         "source_session_dir": run_detail.get("session_dir"),
         "capture_id": run_detail.get("capture_id"),
         "capture_dir": str(capture_dir),
@@ -1471,7 +1574,9 @@ def build_stage_cache(
             "rdi",
             "rai",
             "rai_collapse_diagnostics",
+            "detection.rda_dense_points",
             "detection.cfar",
+            "detection.cfar.projected_seeds",
             "detection.angle_validation",
             "detection.body_center_refinement",
             "detection.blob_center_refinement",
@@ -1492,6 +1597,7 @@ def build_stage_cache(
         "trace_summary": trace_summary,
         "runtime": {
             "cfg_path": str(components["cfg_path"]),
+            "cfg_path_source": components["cfg_path_source"],
             "remove_static": bool(components["runtime_config"].remove_static),
             "doppler_guard_bins": int(components["runtime_config"].doppler_guard_bins),
             "range_resolution_m": round(float(components["runtime_config"].range_resolution_m), 6),
@@ -1537,6 +1643,29 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=0, help="Optional frame limit. 0 means all frames.")
     parser.add_argument("--force", action="store_true", help="Rebuild cache even if it already exists.")
     parser.add_argument(
+        "--variant-label",
+        default=None,
+        help="Optional cache suffix for diagnostic comparisons so variants do not overwrite each other.",
+    )
+    parser.add_argument(
+        "--cfg-path-override",
+        default=None,
+        help="Optional cfg path override for replay diagnostics.",
+    )
+    parser.add_argument(
+        "--angle-phase-sign",
+        type=float,
+        default=None,
+        help="Optional angle_phase_sign override for replay diagnostics.",
+    )
+    parser.add_argument(
+        "--lateral-axis-sign",
+        type=float,
+        default=None,
+        choices=[-1.0, 1.0],
+        help="Optional lateral axis sign override. Use -1 for invert_lateral_axis=true and 1 for false.",
+    )
+    parser.add_argument(
         "--mode",
         default="baseline",
         choices=[
@@ -1563,6 +1692,10 @@ def main() -> None:
         frame_limit=(args.limit or None),
         force=bool(args.force),
         ablation_mode=args.mode,
+        variant_label=args.variant_label,
+        cfg_path_override=args.cfg_path_override,
+        angle_phase_sign_override=args.angle_phase_sign,
+        lateral_axis_sign_override=args.lateral_axis_sign,
     )
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
 

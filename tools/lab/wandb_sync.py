@@ -248,6 +248,7 @@ def build_run_contract(
     )
     phase_value = str(phase or _recommended_phase(detail)).strip().lower() or "debug"
     label = str(detail.get("annotation_label") or "").strip() or "unlabeled"
+    board_type = str(detail.get("annotation_board_type") or detail.get("board_type") or "").strip()
     people_count = detail.get("annotation_people_count")
     motion_pattern = str(detail.get("annotation_motion_pattern") or "").strip()
     parameters = registry.fetch_run_parameters(project_root, session_id)
@@ -259,6 +260,8 @@ def build_run_contract(
     ]
     if motion_pattern:
         tags.append(f"motion:{motion_pattern}")
+    if board_type:
+        tags.append(f"board:{board_type}")
     if people_count not in (None, ""):
         tags.append(f"people:{people_count}")
 
@@ -300,6 +303,7 @@ def build_run_contract(
                 "input_mode": detail.get("input_mode"),
                 "variant": detail.get("variant"),
                 "scenario_id": detail.get("scenario_id"),
+                "radar_board": board_type or None,
             },
             "capture": {
                 "capture_id": capture_id,
@@ -309,6 +313,7 @@ def build_run_contract(
             "annotation": {
                 "label": None if label == "unlabeled" else label,
                 "keep_flag": bool(detail.get("annotation_keep_flag")),
+                "board_type": detail.get("annotation_board_type") or None,
                 "people_count": people_count,
                 "motion_pattern": motion_pattern or None,
                 "notes": detail.get("annotation_notes") or None,

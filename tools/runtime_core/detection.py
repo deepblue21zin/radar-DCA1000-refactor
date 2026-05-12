@@ -592,8 +592,11 @@ def _cube_blob_center_for_members(
             value = float(patch[int(depth_index), int(row_index), int(col_index)])
             weight = float(np.sqrt(max(value - component_floor, value * 0.10, 1e-9)))
             previous = point_map.get(global_key)
-            if previous is None or weight > previous:
-                point_map[global_key] = weight
+            if previous is None or weight > float(previous.get("weight", 0.0)):
+                point_map[global_key] = {
+                    "weight": weight,
+                    "power": value,
+                }
 
     if len(point_map) < min_points:
         return None
@@ -602,13 +605,30 @@ def _cube_blob_center_for_members(
     x_values = []
     y_values = []
     weights = []
-    for (doppler_bin, range_bin, angle_bin), weight in point_map.items():
+    component_points = []
+    for (doppler_bin, range_bin, angle_bin), point_record in sorted(
+        point_map.items(),
+        key=lambda item: float(item[1].get("weight", 0.0)),
+        reverse=True,
+    ):
+        weight = float(point_record.get("weight", 0.0))
         range_m = float(runtime_config.range_axis_m[int(range_bin)])
         angle_rad = float(runtime_config.angle_axis_rad[int(angle_bin)])
         doppler_indices.append(float(doppler_bin))
         x_values.append(float(range_m * np.sin(angle_rad)))
         y_values.append(float(range_m * np.cos(angle_rad)))
         weights.append(float(weight))
+        if len(component_points) < 96:
+            component_points.append(
+                _trace_rda_cube_point(
+                    runtime_config,
+                    doppler_bin=doppler_bin,
+                    range_bin=range_bin,
+                    angle_bin=angle_bin,
+                    power=float(point_record.get("power", 0.0)),
+                    weight=weight,
+                )
+            )
 
     x_values = np.asarray(x_values, dtype=np.float64)
     y_values = np.asarray(y_values, dtype=np.float64)
@@ -666,6 +686,8 @@ def _cube_blob_center_for_members(
             "source": "rai_cube_patch_union",
             "member_count": int(len(member_list)),
             "point_count": int(len(point_map)),
+            "component_point_count": int(len(point_map)),
+            "component_points": component_points,
             "weight_sum": round(weight_sum, 4),
             "candidate_center": _trace_candidate(candidate_center) if candidate_center is not None else None,
             "candidate_summary": candidate_summary,
@@ -674,6 +696,354 @@ def _cube_blob_center_for_members(
             "cube_relative_floor": None if cube_relative_floor is None else round(float(cube_relative_floor), 4),
         },
     )
+
+
+def _component_center_from_rda_cells(
+    cells,
+    cube_roi,
+    runtime_config,
+    range_lower,
+    *,
+    threshold,
+    max_power,
+    center_method="weighted_median",
+):
+    if not cells:
+        return None
+
+    x_values = []
+    y_values = []
+    doppler_values = []
+    range_bins = []
+    angle_bins = []
+    weights = []
+    component_points = []
+    power_sum = 0.0
+    power_max = 0.0
+
+    for doppler_bin, range_rel, angle_bin in cells:
+        doppler_bin = int(doppler_bin)
+        range_rel = int(range_rel)
+        angle_bin = int(angle_bin)
+        range_bin = int(range_rel + range_lower)
+        power = float(cube_roi[doppler_bin, range_rel, angle_bin])
+        power_sum += power
+        power_max = max(power_max, power)
+        weight = float(np.sqrt(max(power - float(threshold), power * 0.08, 1e-9)))
+
+        range_m = float(runtime_config.range_axis_m[range_bin])
+        angle_rad = float(runtime_config.angle_axis_rad[angle_bin])
+        x_values.append(float(range_m * np.sin(angle_rad)))
+        y_values.append(float(range_m * np.cos(angle_rad)))
+        doppler_values.append(float(doppler_bin))
+        range_bins.append(float(range_bin))
+        angle_bins.append(float(angle_bin))
+        weights.append(weight)
+        if len(component_points) < 120:
+            component_points.append(
+                _trace_rda_cube_point(
+                    runtime_config,
+                    doppler_bin=doppler_bin,
+                    range_bin=range_bin,
+                    angle_bin=angle_bin,
+                    power=power,
+                    weight=weight,
+                    power_max=max_power,
+                )
+            )
+
+    weights = np.asarray(weights, dtype=np.float64)
+    weight_sum = float(np.sum(weights))
+    if weight_sum <= 1e-9:
+        return None
+
+    x_values = np.asarray(x_values, dtype=np.float64)
+    y_values = np.asarray(y_values, dtype=np.float64)
+    doppler_values = np.asarray(doppler_values, dtype=np.float64)
+    range_bins = np.asarray(range_bins, dtype=np.float64)
+    angle_bins = np.asarray(angle_bins, dtype=np.float64)
+    method = str(center_method or "weighted_median").strip().lower()
+
+    x_median = _weighted_quantile(x_values, weights, 0.5)
+    y_median = _weighted_quantile(y_values, weights, 0.5)
+    if x_median is None or y_median is None:
+        x_median = float(np.sum(x_values * weights) / weight_sum)
+        y_median = float(np.sum(y_values * weights) / weight_sum)
+
+    if method in {"trimmed_mean", "weighted_trimmed_mean", "weighted_median_trimmed", "robust_trimmed"}:
+        base_range = float(hypot(float(x_median), float(y_median)))
+        trim_radius_m = 0.30 + 0.07 * max(base_range, 0.0)
+        distances = np.hypot(x_values - float(x_median), y_values - float(y_median))
+        keep = distances <= trim_radius_m
+        if np.count_nonzero(keep) >= max(3, int(len(x_values) * 0.35)):
+            trim_weights = weights[keep]
+            trim_sum = float(np.sum(trim_weights))
+            if trim_sum > 1e-9:
+                x_center = float(np.sum(x_values[keep] * trim_weights) / trim_sum)
+                y_center = float(np.sum(y_values[keep] * trim_weights) / trim_sum)
+                center_method_used = "weighted_median_trimmed"
+            else:
+                x_center = float(x_median)
+                y_center = float(y_median)
+                center_method_used = "weighted_median"
+        else:
+            x_center = float(x_median)
+            y_center = float(y_median)
+            center_method_used = "weighted_median"
+    elif method in {"mean", "weighted_mean"}:
+        x_center = float(np.sum(x_values * weights) / weight_sum)
+        y_center = float(np.sum(y_values * weights) / weight_sum)
+        center_method_used = "weighted_mean"
+    else:
+        x_center = float(x_median)
+        y_center = float(y_median)
+        center_method_used = "weighted_median"
+
+    range_m = float(hypot(x_center, y_center))
+    angle_rad = float(atan2(x_center, max(y_center, 1e-6)))
+    doppler_center = _weighted_quantile(doppler_values, weights, 0.5)
+    if doppler_center is None:
+        doppler_center = float(np.sum(doppler_values * weights) / weight_sum)
+    score = max(float(power_max) / max(float(max_power), 1e-9), 1e-6)
+    support_score = min(1.0, float(len(cells)) / 32.0) * 0.30
+    candidate = DetectionCandidate(
+        range_bin=_nearest_axis_bin(runtime_config.range_axis_m, range_m),
+        doppler_bin=int(np.clip(round(float(doppler_center)), 0, runtime_config.doppler_fft_size - 1)),
+        angle_bin=_nearest_axis_bin(runtime_config.angle_axis_rad, angle_rad),
+        range_m=range_m,
+        angle_deg=float(np.degrees(angle_rad)),
+        x_m=float(x_center),
+        y_m=float(y_center),
+        rdi_peak=float(power_max),
+        rai_peak=float(power_max),
+        score=float(score + support_score),
+    )
+    summary = {
+        "source": "rda_dense_connected_component",
+        "method": center_method_used,
+        "point_count": int(len(cells)),
+        "component_point_count": int(len(cells)),
+        "component_points": component_points,
+        "power_sum": round(float(power_sum), 4),
+        "power_max": round(float(power_max), 4),
+        "weight_sum": round(float(weight_sum), 4),
+        "range_bin_bounds": [int(np.min(range_bins)), int(np.max(range_bins))],
+        "angle_bin_bounds": [int(np.min(angle_bins)), int(np.max(angle_bins))],
+        "doppler_bin_bounds": [int(np.min(doppler_values)), int(np.max(doppler_values))],
+        "threshold": round(float(threshold), 4),
+    }
+    return candidate, summary
+
+
+def _dense_blob_centers_from_rda_cube(
+    rai_cube,
+    runtime_config,
+    detection_region,
+    min_range_bin,
+    max_range_bin,
+    *,
+    anchor_candidates=None,
+    doppler_guard_bins=0,
+    quantile=0.995,
+    min_normalized_power=0.08,
+    max_points=2400,
+    min_points=6,
+    max_blobs=3,
+    center_method="weighted_median_trimmed",
+    anchor_range_bins=8,
+    anchor_doppler_bins=10,
+):
+    if rai_cube is None:
+        return [], {"enabled": False, "reason": "missing_rai_cube"}
+
+    cube = np.asarray(rai_cube, dtype=np.float64)
+    if cube.ndim != 3 or cube.size == 0:
+        return [], {"enabled": False, "reason": "invalid_rai_cube"}
+
+    doppler_count, range_count, angle_count = cube.shape
+    range_lower = max(0, int(min_range_bin))
+    range_upper = min(int(max_range_bin), range_count)
+    if range_upper <= range_lower:
+        return [], {"enabled": True, "reason": "empty_range_roi"}
+
+    cube_roi = np.maximum(cube[:, range_lower:range_upper, :], 0.0)
+    if cube_roi.size == 0 or float(np.max(cube_roi)) <= 0.0:
+        return [], {"enabled": True, "reason": "zero_power_roi"}
+
+    range_axis = np.asarray(runtime_config.range_axis_m[range_lower:range_upper], dtype=np.float64)
+    angle_axis = np.asarray(runtime_config.angle_axis_rad, dtype=np.float64)
+    range_grid = range_axis[:, np.newaxis]
+    angle_grid = angle_axis[np.newaxis, :]
+    x_grid = range_grid * np.sin(angle_grid)
+    y_grid = range_grid * np.cos(angle_grid)
+    spatial_mask_2d = (
+        (np.abs(x_grid) <= float(detection_region.lateral_limit_m))
+        & (y_grid >= float(detection_region.min_forward_m))
+        & (y_grid <= float(detection_region.forward_limit_m))
+    )
+    valid_mask = np.broadcast_to(spatial_mask_2d[np.newaxis, :, :], cube_roi.shape).copy()
+
+    center_bin = int(getattr(runtime_config, "doppler_fft_size", doppler_count)) // 2
+    guard_bins = max(0, int(doppler_guard_bins))
+    if guard_bins > 0:
+        lower = max(center_bin - guard_bins, 0)
+        upper = min(center_bin + guard_bins + 1, doppler_count)
+        valid_mask[lower:upper, :, :] = False
+
+    valid_values = cube_roi[valid_mask]
+    valid_values = valid_values[np.isfinite(valid_values) & (valid_values > 0.0)]
+    if valid_values.size == 0:
+        return [], {"enabled": True, "reason": "empty_valid_values"}
+
+    quantile = float(np.clip(quantile, 0.0, 0.9999))
+    min_normalized_power = float(np.clip(min_normalized_power, 0.0, 1.0))
+    max_power = float(np.max(valid_values))
+    threshold = max(float(np.quantile(valid_values, quantile)), max_power * min_normalized_power)
+    candidate_mask = valid_mask & (cube_roi >= threshold)
+    candidate_indices = np.argwhere(candidate_mask)
+    max_points = max(1, int(max_points))
+    if candidate_indices.shape[0] > max_points:
+        candidate_values = cube_roi[candidate_mask]
+        threshold = max(threshold, float(np.partition(candidate_values, -max_points)[-max_points]))
+        candidate_mask = valid_mask & (cube_roi >= threshold)
+        candidate_indices = np.argwhere(candidate_mask)
+
+    if candidate_indices.size == 0:
+        return [], {
+            "enabled": True,
+            "reason": "empty_candidate_mask",
+            "quantile": round(float(quantile), 4),
+            "threshold": round(float(threshold), 4),
+        }
+
+    cells = [tuple(int(value) for value in row) for row in candidate_indices]
+    ordered_cells = sorted(cells, key=lambda idx: float(cube_roi[idx]), reverse=True)
+    remaining = set(cells)
+    components = []
+    for seed in ordered_cells:
+        if seed not in remaining:
+            continue
+        stack = [seed]
+        remaining.remove(seed)
+        component = []
+        while stack:
+            doppler_bin, range_rel, angle_bin = stack.pop()
+            component.append((doppler_bin, range_rel, angle_bin))
+            for doppler_offset in (-1, 0, 1):
+                for range_offset in (-1, 0, 1):
+                    for angle_offset in (-1, 0, 1):
+                        if doppler_offset == 0 and range_offset == 0 and angle_offset == 0:
+                            continue
+                        neighbor = (
+                            doppler_bin + doppler_offset,
+                            range_rel + range_offset,
+                            angle_bin + angle_offset,
+                        )
+                        if neighbor not in remaining:
+                            continue
+                        remaining.remove(neighbor)
+                        stack.append(neighbor)
+        if len(component) >= int(min_points):
+            components.append(component)
+
+    if not components:
+        return [], {
+            "enabled": True,
+            "reason": "no_component_above_min_points",
+            "candidate_count": int(candidate_indices.shape[0]),
+            "min_points": int(min_points),
+            "threshold": round(float(threshold), 4),
+        }
+
+    anchors = list(anchor_candidates or [])
+    anchor_range_bins = max(0, int(anchor_range_bins))
+    anchor_doppler_bins = max(0, int(anchor_doppler_bins))
+
+    def _component_is_anchored(component):
+        if not anchors:
+            return True
+        ranges = [int(row + range_lower) for _, row, _ in component]
+        dopplers = [int(depth) for depth, _, _ in component]
+        range_min = min(ranges) - anchor_range_bins
+        range_max = max(ranges) + anchor_range_bins
+        for anchor in anchors:
+            anchor_range = int(getattr(anchor, "range_bin", -9999))
+            if not (range_min <= anchor_range <= range_max):
+                continue
+            anchor_doppler = int(getattr(anchor, "doppler_bin", -9999))
+            for doppler_bin in dopplers:
+                if _doppler_bin_distance(anchor_doppler, doppler_bin, runtime_config.doppler_fft_size) <= anchor_doppler_bins:
+                    return True
+        return False
+
+    blob_candidates = []
+    for component in components:
+        if not _component_is_anchored(component):
+            continue
+        center_result = _component_center_from_rda_cells(
+            component,
+            cube_roi,
+            runtime_config,
+            range_lower,
+            threshold=threshold,
+            max_power=max_power,
+            center_method=center_method,
+        )
+        if center_result is None:
+            continue
+        center, summary = center_result
+        strength = float(summary.get("power_sum", 0.0))
+        blob_candidates.append((center, strength, component, summary))
+
+    if not blob_candidates:
+        return [], {
+            "enabled": True,
+            "reason": "no_anchored_dense_components",
+            "candidate_count": int(candidate_indices.shape[0]),
+            "component_count": int(len(components)),
+            "anchor_count": int(len(anchors)),
+            "threshold": round(float(threshold), 4),
+        }
+
+    blob_candidates.sort(
+        key=lambda item: (
+            item[1],
+            item[3].get("point_count", 0),
+            float(item[0].score),
+        ),
+        reverse=True,
+    )
+    selected = blob_candidates[:max(1, int(max_blobs))]
+    refined = [item[0] for item in selected]
+    groups = []
+    for center, strength, component, summary in selected[:12]:
+        groups.append(
+            {
+                "center": _trace_candidate(center),
+                "member_count": int(summary.get("point_count", len(component))),
+                "strength": round(float(strength), 4),
+                "summary": summary,
+                "members": [],
+            }
+        )
+
+    return refined, {
+        "enabled": True,
+        "source": "rda_dense_connected_components",
+        "input_count": int(len(anchors)),
+        "candidate_count": int(candidate_indices.shape[0]),
+        "component_count": int(len(components)),
+        "anchored_component_count": int(len(blob_candidates)),
+        "output_count": int(len(refined)),
+        "max_blobs": int(max_blobs),
+        "min_points": int(min_points),
+        "quantile": round(float(quantile), 4),
+        "threshold": round(float(threshold), 4),
+        "max_power": round(float(max_power), 4),
+        "min_normalized_power": round(float(min_normalized_power), 4),
+        "center_method": str(center_method),
+        "groups": groups,
+    }
 
 
 def _refine_blob_centers_from_candidates(
@@ -1452,6 +1822,227 @@ def _candidate_angle_map(rai_map, rai_cube, doppler_bin, angle_source):
     return np.asarray(rai_map, dtype=np.float64), "collapsed_rai"
 
 
+def _trace_rda_cube_point(
+    runtime_config,
+    *,
+    doppler_bin,
+    range_bin,
+    angle_bin,
+    power,
+    weight=None,
+    power_max=None,
+):
+    range_bin = int(range_bin)
+    angle_bin = int(angle_bin)
+    range_m = float(runtime_config.range_axis_m[range_bin])
+    angle_rad = float(runtime_config.angle_axis_rad[angle_bin])
+    x_m = float(range_m * np.sin(angle_rad))
+    y_m = float(range_m * np.cos(angle_rad))
+    point = {
+        "range_bin": int(range_bin),
+        "doppler_bin": int(doppler_bin),
+        "angle_bin": int(angle_bin),
+        "range_m": round(float(range_m), 4),
+        "angle_deg": round(float(np.degrees(angle_rad)), 3),
+        "x_m": round(float(x_m), 4),
+        "y_m": round(float(y_m), 4),
+        "power": round(float(power), 4),
+        "score": round(float(power), 4),
+    }
+    if weight is not None:
+        point["weight"] = round(float(weight), 4)
+    if power_max is not None and float(power_max) > 1e-9:
+        point["normalized_power"] = round(float(power) / float(power_max), 4)
+    return point
+
+
+def _trace_rda_dense_points(
+    rai_cube,
+    runtime_config,
+    detection_region,
+    min_range_bin,
+    max_range_bin,
+    *,
+    doppler_guard_bins=0,
+    quantile=0.995,
+    max_points=180,
+):
+    if rai_cube is None:
+        return {
+            "enabled": False,
+            "reason": "missing_rai_cube",
+            "candidate_count": 0,
+            "top_points": [],
+        }
+
+    cube = np.asarray(rai_cube, dtype=np.float64)
+    if cube.ndim != 3 or cube.size == 0:
+        return {
+            "enabled": False,
+            "reason": "invalid_rai_cube",
+            "candidate_count": 0,
+            "top_points": [],
+        }
+
+    doppler_count, range_count, angle_count = cube.shape
+    range_lower = max(0, int(min_range_bin))
+    range_upper = min(int(max_range_bin), range_count)
+    if range_upper <= range_lower:
+        return {
+            "enabled": True,
+            "reason": "empty_range_roi",
+            "candidate_count": 0,
+            "top_points": [],
+        }
+
+    cube_roi = np.asarray(cube[:, range_lower:range_upper, :], dtype=np.float64)
+    cube_roi = np.maximum(cube_roi, 0.0)
+    if cube_roi.size == 0 or float(np.max(cube_roi)) <= 0.0:
+        return {
+            "enabled": True,
+            "reason": "zero_power_roi",
+            "candidate_count": 0,
+            "top_points": [],
+        }
+
+    range_axis = np.asarray(runtime_config.range_axis_m[range_lower:range_upper], dtype=np.float64)
+    angle_axis = np.asarray(runtime_config.angle_axis_rad, dtype=np.float64)
+    range_grid = range_axis[:, np.newaxis]
+    angle_grid = angle_axis[np.newaxis, :]
+    x_grid = range_grid * np.sin(angle_grid)
+    y_grid = range_grid * np.cos(angle_grid)
+    spatial_mask_2d = (
+        (np.abs(x_grid) <= float(detection_region.lateral_limit_m))
+        & (y_grid >= float(detection_region.min_forward_m))
+        & (y_grid <= float(detection_region.forward_limit_m))
+    )
+    valid_mask = np.broadcast_to(spatial_mask_2d[np.newaxis, :, :], cube_roi.shape).copy()
+
+    center_bin = int(getattr(runtime_config, "doppler_fft_size", doppler_count)) // 2
+    guard_bins = max(0, int(doppler_guard_bins))
+    if guard_bins > 0:
+        lower = max(center_bin - guard_bins, 0)
+        upper = min(center_bin + guard_bins + 1, doppler_count)
+        valid_mask[lower:upper, :, :] = False
+
+    valid_values = cube_roi[valid_mask]
+    valid_values = valid_values[np.isfinite(valid_values) & (valid_values > 0.0)]
+    if valid_values.size == 0:
+        return {
+            "enabled": True,
+            "reason": "empty_valid_values",
+            "candidate_count": 0,
+            "top_points": [],
+        }
+
+    quantile = float(np.clip(quantile, 0.0, 0.9999))
+    threshold = float(np.quantile(valid_values, quantile))
+    candidate_mask = valid_mask & (cube_roi >= threshold)
+    candidate_indices = np.argwhere(candidate_mask)
+    if candidate_indices.size == 0:
+        return {
+            "enabled": True,
+            "quantile": round(float(quantile), 4),
+            "threshold": round(float(threshold), 4),
+            "candidate_count": 0,
+            "top_points": [],
+        }
+
+    powers = cube_roi[candidate_indices[:, 0], candidate_indices[:, 1], candidate_indices[:, 2]]
+    order = np.argsort(powers)[::-1]
+    top_points = []
+    power_max = float(np.max(valid_values))
+    for local_index in order[: max(1, int(max_points))]:
+        doppler_bin = int(candidate_indices[local_index, 0])
+        range_bin = int(candidate_indices[local_index, 1] + range_lower)
+        angle_bin = int(candidate_indices[local_index, 2])
+        power = float(powers[local_index])
+        top_points.append(
+            _trace_rda_cube_point(
+                runtime_config,
+                doppler_bin=doppler_bin,
+                range_bin=range_bin,
+                angle_bin=angle_bin,
+                power=power,
+                power_max=power_max,
+            )
+        )
+
+    return {
+        "enabled": True,
+        "source": "range_doppler_angle_cube",
+        "quantile": round(float(quantile), 4),
+        "threshold": round(float(threshold), 4),
+        "valid_value_count": int(valid_values.size),
+        "candidate_count": int(candidate_indices.shape[0]),
+        "stored_count": int(len(top_points)),
+        "top_points": top_points,
+    }
+
+
+def _trace_projected_cfar_seeds(
+    ordered_indices,
+    power_map,
+    rai_map,
+    rai_cube,
+    runtime_config,
+    detection_region,
+    min_range_bin,
+    *,
+    angle_source,
+    max_points=48,
+):
+    seeds = []
+    if ordered_indices is None:
+        iterable_indices = []
+    else:
+        iterable_indices = list(ordered_indices)
+    for range_bin_rel, doppler_bin in iterable_indices[: max(1, int(max_points))]:
+        range_bin = int(range_bin_rel + min_range_bin)
+        if not (0 <= range_bin < len(runtime_config.range_axis_m)):
+            continue
+        range_m = float(runtime_config.range_axis_m[range_bin])
+        angle_mask = _angle_roi_mask(
+            range_m,
+            runtime_config.angle_axis_rad,
+            detection_region,
+        )
+        if not np.any(angle_mask):
+            continue
+        candidate_rai_map, resolved_angle_source = _candidate_angle_map(
+            rai_map,
+            rai_cube,
+            int(doppler_bin),
+            angle_source,
+        )
+        if range_bin >= candidate_rai_map.shape[0]:
+            continue
+        angle_profile = np.asarray(candidate_rai_map[range_bin], dtype=np.float64)
+        masked_angle_profile = np.where(angle_mask, angle_profile, 0.0)
+        angle_bin = int(np.argmax(masked_angle_profile))
+        angle_power = float(masked_angle_profile[angle_bin])
+        if angle_power <= 0.0:
+            continue
+        angle_rad = float(runtime_config.angle_axis_rad[angle_bin])
+        power = float(power_map[int(range_bin_rel), int(doppler_bin)])
+        seeds.append(
+            {
+                "range_bin": int(range_bin),
+                "doppler_bin": int(doppler_bin),
+                "angle_bin": int(angle_bin),
+                "range_m": round(float(range_m), 4),
+                "angle_deg": round(float(np.degrees(angle_rad)), 3),
+                "x_m": round(float(range_m * np.sin(angle_rad)), 4),
+                "y_m": round(float(range_m * np.cos(angle_rad)), 4),
+                "rdi_power": round(float(power), 4),
+                "angle_power": round(float(angle_power), 4),
+                "score": round(float(power), 4),
+                "angle_source": resolved_angle_source,
+            }
+        )
+    return seeds
+
+
 def detect_targets(
     rdi_map,
     rai_map,
@@ -1508,6 +2099,11 @@ def detect_targets(
     blob_center_cube_range_radius_m=None,
     blob_center_cube_angle_radius_deg=None,
     blob_center_cube_relative_floor=None,
+    blob_center_dense_enabled=True,
+    blob_center_dense_quantile=0.995,
+    blob_center_dense_min_normalized_power=0.08,
+    blob_center_dense_max_points=2400,
+    blob_center_dense_min_points=6,
     enable_body_center_refinement=True,
     enable_candidate_merge=True,
     enable_dbscan=True,
@@ -1566,6 +2162,17 @@ def detect_targets(
         if trace_enabled:
             trace["early_exit"] = "zero_power_map"
         return []
+    if trace_enabled:
+        trace["rda_dense_points"] = _trace_rda_dense_points(
+            rai_cube,
+            runtime_config,
+            detection_region,
+            min_range_bin,
+            max_range_bin,
+            doppler_guard_bins=runtime_config.doppler_guard_bins,
+            quantile=0.995,
+            max_points=180,
+        )
 
     cfar_noise = cfar_threshold_2d(
         power_map,
@@ -1596,6 +2203,17 @@ def detect_targets(
     candidate_scores = power_map[candidate_indices[:, 0], candidate_indices[:, 1]]
     ordered_indices = candidate_indices[np.argsort(candidate_scores)[::-1]]
     if trace_enabled:
+        projected_seeds = _trace_projected_cfar_seeds(
+            ordered_indices,
+            power_map,
+            rai_map,
+            rai_cube,
+            runtime_config,
+            detection_region,
+            min_range_bin,
+            angle_source=angle_source,
+            max_points=48,
+        )
         top_cfar = []
         for range_bin_rel, doppler_bin in ordered_indices[:24]:
             top_cfar.append(
@@ -1612,6 +2230,8 @@ def detect_targets(
             "power_max": round(float(np.max(power_map)), 4),
             "fallback_used": bool(candidate_indices.shape[0] == 1 and not bool(np.any(peak_mask))),
             "top_candidates": top_cfar,
+            "projected_seed_count": int(len(projected_seeds)),
+            "projected_seeds": projected_seeds,
         }
     coarse_candidate_pool = []
     rdi_peak_ceiling = float(np.max(power_map))
@@ -1883,32 +2503,61 @@ def detect_targets(
 
     candidate_pool = refined_candidate_pool or coarse_candidate_pool
     if blob_center_refinement_enabled:
-        candidate_pool, blob_center_trace = _refine_blob_centers_from_candidates(
-            candidate_pool,
-            runtime_config,
-            detection_region,
-            rai_cube=rai_cube,
-            body_center_patch_bands=body_center_patch_bands,
-            enabled=True,
-            max_blobs=int(detection_region.max_targets),
-            max_candidates=blob_center_max_candidates,
-            min_points=blob_center_min_points,
-            min_score_ratio=blob_center_min_score_ratio,
-            cluster_radius_m=blob_center_cluster_radius_m,
-            cluster_radius_range_scale=blob_center_cluster_radius_range_scale,
-            cluster_radius_bands=blob_center_cluster_radius_bands,
-            doppler_radius_bins=blob_center_doppler_radius_bins,
-            center_method=blob_center_method,
-            trim_radius_m=blob_center_trim_radius_m,
-            floor_quantile=blob_center_floor_quantile,
-            peak_blend=blob_center_peak_blend,
-            single_min_score_ratio=blob_center_single_min_score_ratio,
-            single_range_window_m=blob_center_single_range_window_m,
-            single_side_deadband_m=blob_center_single_side_deadband_m,
-            cube_range_radius_m=blob_center_cube_range_radius_m,
-            cube_angle_radius_deg=blob_center_cube_angle_radius_deg,
-            cube_relative_floor=blob_center_cube_relative_floor,
-        )
+        dense_blob_trace = None
+        dense_blob_candidates = []
+        if blob_center_dense_enabled and rai_cube is not None:
+            dense_blob_candidates, dense_blob_trace = _dense_blob_centers_from_rda_cube(
+                rai_cube,
+                runtime_config,
+                detection_region,
+                min_range_bin,
+                max_range_bin,
+                anchor_candidates=candidate_pool,
+                doppler_guard_bins=runtime_config.doppler_guard_bins,
+                quantile=blob_center_dense_quantile,
+                min_normalized_power=blob_center_dense_min_normalized_power,
+                max_points=blob_center_dense_max_points,
+                min_points=max(blob_center_dense_min_points, blob_center_min_points),
+                max_blobs=int(detection_region.max_targets),
+                center_method=blob_center_method,
+                anchor_range_bins=max(3, int(round((blob_center_cube_range_radius_m or 0.35) / max(float(np.median(np.diff(runtime_config.range_axis_m))), 1e-6)))) if len(runtime_config.range_axis_m) > 1 else 6,
+                anchor_doppler_bins=blob_center_doppler_radius_bins,
+            )
+
+        if dense_blob_candidates:
+            candidate_pool = dense_blob_candidates
+            blob_center_trace = dense_blob_trace or {}
+            blob_center_trace["fallback_used"] = False
+        else:
+            candidate_pool, blob_center_trace = _refine_blob_centers_from_candidates(
+                candidate_pool,
+                runtime_config,
+                detection_region,
+                rai_cube=rai_cube,
+                body_center_patch_bands=body_center_patch_bands,
+                enabled=True,
+                max_blobs=int(detection_region.max_targets),
+                max_candidates=blob_center_max_candidates,
+                min_points=blob_center_min_points,
+                min_score_ratio=blob_center_min_score_ratio,
+                cluster_radius_m=blob_center_cluster_radius_m,
+                cluster_radius_range_scale=blob_center_cluster_radius_range_scale,
+                cluster_radius_bands=blob_center_cluster_radius_bands,
+                doppler_radius_bins=blob_center_doppler_radius_bins,
+                center_method=blob_center_method,
+                trim_radius_m=blob_center_trim_radius_m,
+                floor_quantile=blob_center_floor_quantile,
+                peak_blend=blob_center_peak_blend,
+                single_min_score_ratio=blob_center_single_min_score_ratio,
+                single_range_window_m=blob_center_single_range_window_m,
+                single_side_deadband_m=blob_center_single_side_deadband_m,
+                cube_range_radius_m=blob_center_cube_range_radius_m,
+                cube_angle_radius_deg=blob_center_cube_angle_radius_deg,
+                cube_relative_floor=blob_center_cube_relative_floor,
+            )
+            if dense_blob_trace is not None:
+                blob_center_trace["dense_component_attempt"] = dense_blob_trace
+                blob_center_trace["fallback_used"] = True
     else:
         blob_center_trace = {
             "enabled": False,

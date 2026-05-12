@@ -226,7 +226,7 @@ DETECTION_TUNING = {
     'blob_center_cluster_radius_range_scale': float(DETECTION_ALGORITHM.get('blob_center_cluster_radius_range_scale', 0.04)),
     'blob_center_cluster_radius_bands': list(DETECTION_ALGORITHM.get('blob_center_cluster_radius_bands', [])),
     'blob_center_doppler_radius_bins': int(DETECTION_ALGORITHM.get('blob_center_doppler_radius_bins', 10)),
-    'blob_center_method': str(DETECTION_ALGORITHM.get('blob_center_method', 'weighted_median')),
+    'blob_center_method': str(DETECTION_ALGORITHM.get('blob_center_method', 'weighted_median_trimmed')),
     'blob_center_trim_radius_m': float(DETECTION_ALGORITHM.get('blob_center_trim_radius_m', 0.85)),
     'blob_center_floor_quantile': float(DETECTION_ALGORITHM.get('blob_center_floor_quantile', 0.65)),
     'blob_center_peak_blend': float(DETECTION_ALGORITHM.get('blob_center_peak_blend', 0.0)),
@@ -236,6 +236,11 @@ DETECTION_TUNING = {
     'blob_center_cube_range_radius_m': DETECTION_ALGORITHM.get('blob_center_cube_range_radius_m', None),
     'blob_center_cube_angle_radius_deg': DETECTION_ALGORITHM.get('blob_center_cube_angle_radius_deg', None),
     'blob_center_cube_relative_floor': DETECTION_ALGORITHM.get('blob_center_cube_relative_floor', None),
+    'blob_center_dense_enabled': bool(DETECTION_ALGORITHM.get('blob_center_dense_enabled', True)),
+    'blob_center_dense_quantile': float(DETECTION_ALGORITHM.get('blob_center_dense_quantile', 0.995)),
+    'blob_center_dense_min_normalized_power': float(DETECTION_ALGORITHM.get('blob_center_dense_min_normalized_power', 0.08)),
+    'blob_center_dense_max_points': int(DETECTION_ALGORITHM.get('blob_center_dense_max_points', 2400)),
+    'blob_center_dense_min_points': int(DETECTION_ALGORITHM.get('blob_center_dense_min_points', 6)),
 }
 LOG_ROOT = PROJECT_ROOT / 'logs' / 'live_motion_viewer'
 SPATIAL_VIEW_HEIGHT = int(STATIC['spatial_view']['height'])

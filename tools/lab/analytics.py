@@ -896,6 +896,7 @@ def build_snapshot(project_root: Path, runs: list[dict] | None = None) -> dict:
                 "session_id": row.get("session_id"),
                 "input_mode": row.get("input_mode"),
                 "transport_category": row.get("transport_category"),
+                "board_type": row.get("annotation_board_type") or row.get("board_type"),
                 "annotation_label": row.get("annotation_label"),
                 "annotation_people_count": row.get("annotation_people_count"),
                 "annotation_motion_pattern": row.get("annotation_motion_pattern"),

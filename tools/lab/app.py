@@ -971,6 +971,10 @@ def _as_float(value, default=None):
 def _trace_stage_points(trace: dict, stage: str) -> list[dict]:
     detection = trace.get("detection") or {}
     tracker = trace.get("tracker") or {}
+    if stage == "rda_dense":
+        return list(_nested_get(detection, "rda_dense_points", "top_points", default=[]) or [])
+    if stage == "cfar_seed":
+        return list(_nested_get(detection, "cfar", "projected_seeds", default=[]) or [])
     if stage == "angle":
         return list(_nested_get(detection, "angle_validation", "top_candidates", default=[]) or [])
     if stage == "coarse_merge":
@@ -985,6 +989,17 @@ def _trace_stage_points(trace: dict, stage: str) -> list[dict]:
             for group in groups
             if isinstance(group, dict) and isinstance(group.get("center"), dict)
         ]
+    if stage == "blob_grouping":
+        groups = _nested_get(detection, "blob_center_refinement", "groups", default=[]) or []
+        points = []
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            summary = group.get("summary") or {}
+            if not isinstance(summary, dict):
+                continue
+            points.extend(summary.get("component_points") or [])
+        return [point for point in points if isinstance(point, dict)]
     if stage == "final_merge":
         return list(_nested_get(detection, "candidate_merge_final", "after_top", default=[]) or [])
     if stage == "dbscan":
@@ -1006,6 +1021,10 @@ def _trace_stage_points(trace: dict, stage: str) -> list[dict]:
 def _trace_stage_count(trace: dict, stage: str) -> int:
     detection = trace.get("detection") or {}
     tracker = trace.get("tracker") or {}
+    if stage == "rda_dense":
+        return int(_nested_get(detection, "rda_dense_points", "candidate_count", default=0) or 0)
+    if stage == "cfar_seed":
+        return int(_nested_get(detection, "cfar", "projected_seed_count", default=0) or 0)
     if stage == "cfar":
         return int(_nested_get(detection, "cfar", "candidate_count", default=0) or 0)
     if stage == "angle":
@@ -1016,6 +1035,17 @@ def _trace_stage_count(trace: dict, stage: str) -> int:
         return int(_nested_get(detection, "body_center_refinement", "refined_count", default=0) or 0)
     if stage == "blob_center":
         return int(_nested_get(detection, "blob_center_refinement", "output_count", default=0) or 0)
+    if stage == "blob_grouping":
+        groups = _nested_get(detection, "blob_center_refinement", "groups", default=[]) or []
+        total = 0
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            summary = group.get("summary") or {}
+            if not isinstance(summary, dict):
+                continue
+            total += int(summary.get("component_point_count") or summary.get("point_count") or 0)
+        return total
     if stage == "final_merge":
         return int(_nested_get(detection, "candidate_merge_final", "after_count", default=0) or 0)
     if stage == "dbscan":
@@ -1220,6 +1250,9 @@ def _render_detection_tracking_comparison(trace_rows: list[dict]) -> None:
     )
 
     detection_options = {
+        "RDA dense points": ("rda_dense", "#667085"),
+        "CFAR seeds": ("cfar_seed", "#2869a6"),
+        "Blob grouping points": ("blob_grouping", "#9b6a2f"),
         "Score-filtered output": ("score_filtered", "#0b7285"),
         "Blob-centered candidates": ("blob_center", "#8d63c7"),
         "DBSCAN output before score filter": ("dbscan", "#0e8a7e"),
@@ -1565,8 +1598,11 @@ def _render_stage_sequence_overview(trace_rows: list[dict]) -> None:
         return
 
     stage_options = [
+        ("rda_dense", "RDA dense points", "#667085"),
+        ("cfar_seed", "CFAR seeds", "#2869a6"),
         ("angle", "Raw angle candidates", "#2d8f7a"),
         ("body_center", "Legacy body-center patch", "#c05d9f"),
+        ("blob_grouping", "Blob grouping points", "#9b6a2f"),
         ("blob_center", "Blob-centered candidates", "#8d63c7"),
         ("final_merge", "Merged candidates", "#5176b8"),
         ("dbscan", "DBSCAN before score filter", "#0e8a7e"),
@@ -1576,17 +1612,18 @@ def _render_stage_sequence_overview(trace_rows: list[dict]) -> None:
         ("display", "Display output", "#1b7a4c"),
     ]
     label_to_stage = {label: (stage, label, color) for stage, label, color in stage_options}
-    default_labels = ["Raw angle candidates", "Blob-centered candidates", "Score-filtered output", "Tracker state", "Display output"]
+    default_labels = ["RDA dense points", "CFAR seeds", "Raw angle candidates", "Blob grouping points", "Blob-centered candidates", "Tracker state", "Display output"]
     selected_labels = st.multiselect(
         "Trajectory Stages",
         list(label_to_stage.keys()),
         default=[label for label in default_labels if label in label_to_stage],
         help=(
             "전체 움직임을 처리 단계별 궤적으로 비교합니다. "
-            "Raw angle은 보정 전 후보, Blob-centered는 RDA cube patch 기반 보정 후보입니다. "
+            "RDA dense는 threshold 이상 cube cell, CFAR seeds는 range-doppler peak를 angle로 투영한 점, "
+            "Raw angle은 angle 검증 통과 후보, Blob grouping은 같은 사람으로 묶인 cube cell입니다. "
             "실제 반영 여부는 Score-filtered output과 Tracker input을 같이 보세요."
         ),
-        key="stage_trajectory_stages_v2",
+        key="stage_trajectory_stages_v3",
     )
     selected_stages = [label_to_stage[label] for label in selected_labels] or [label_to_stage["Score-filtered output"]]
 
@@ -1628,10 +1665,13 @@ def _render_trace_funnel(trace: dict) -> None:
             default=_nested_get(detection, "dbscan", "output_count", default=0),
         )
     stages = [
+        ("RDA Dense", _nested_get(detection, "rda_dense_points", "candidate_count", default=0), "#667085"),
         ("CFAR", _nested_get(detection, "cfar", "candidate_count", default=0), "#2869a6"),
+        ("CFAR Seeds", _nested_get(detection, "cfar", "projected_seed_count", default=0), "#2869a6"),
         ("Angle", _nested_get(detection, "angle_validation", "passed_count", default=0), "#2d8f7a"),
         ("Coarse Merge", _nested_get(detection, "candidate_merge_coarse", "after_count", default=0), "#d6862c"),
         ("Legacy Body", _nested_get(detection, "body_center_refinement", "refined_count", default=0), "#c05d9f"),
+        ("Blob Points", _trace_stage_count(trace, "blob_grouping"), "#9b6a2f"),
         ("RDA Blob", _nested_get(detection, "blob_center_refinement", "output_count", default=0), "#8d63c7"),
         ("Final Merge", _nested_get(detection, "candidate_merge_final", "after_count", default=0), "#5176b8"),
         ("DBSCAN", _nested_get(detection, "dbscan", "output_count", default=0), "#0e8a7e"),
@@ -1798,6 +1838,8 @@ def _render_trace_flow(trace: dict) -> None:
 
     raw_packets = _nested_get(trace, "raw_udp_packets", "packets_in_frame", default="n/a")
     invalid = _nested_get(trace, "frame_parsing", "invalid", default=False)
+    rda_dense_count = _nested_get(trace, "detection", "rda_dense_points", "candidate_count", default=0)
+    cfar_seed_count = _nested_get(trace, "detection", "cfar", "projected_seed_count", default=0)
     cfar_count = _nested_get(trace, "detection", "cfar", "candidate_count", default=0)
     angle_passed = _nested_get(trace, "detection", "angle_validation", "passed_count", default=0)
     body_refined = _nested_get(trace, "detection", "body_center_refinement", "refined_count", default=0)
@@ -1820,7 +1862,9 @@ def _render_trace_flow(trace: dict) -> None:
         {"stage": "shared FFT", "value": _nested_get(trace, "shared_fft", "shape", default="ok"), "meaning": "common FFT cache"},
         {"stage": "RDI", "value": _nested_get(trace, "rdi", "shape", default="n/a"), "meaning": "range-doppler map"},
         {"stage": "RAI", "value": _nested_get(trace, "rai", "shape", default="n/a"), "meaning": "range-angle map"},
+        {"stage": "RDA dense", "value": rda_dense_count, "meaning": "thresholded range-doppler-angle cells"},
         {"stage": "CFAR", "value": cfar_count, "meaning": "raw candidates"},
+        {"stage": "CFAR projected seeds", "value": cfar_seed_count, "meaning": "CFAR range/doppler seeds projected to strongest angle"},
         {"stage": "angle validation", "value": angle_passed, "meaning": "ROI/angle passed"},
         {"stage": "legacy body center", "value": body_refined, "meaning": "old patch representative points"},
         {"stage": "RDA blob center", "value": blob_center_count, "meaning": "connected component blob centers"},
@@ -1850,7 +1894,9 @@ def _render_trace_flow(trace: dict) -> None:
         {"stage": "shared FFT", "input": "cube", "output": _nested_get(trace, "shared_fft", "shape", default="n/a"), "meaning": "RDI/RAI에 공통으로 쓰는 range-doppler FFT"},
         {"stage": "RDI", "input": "FFT cube", "output": _nested_get(trace, "rdi", "shape", default="n/a"), "meaning": "range-doppler energy map"},
         {"stage": "RAI", "input": "FFT cube", "output": _nested_get(trace, "rai", "shape", default="n/a"), "meaning": "range-angle energy map"},
+        {"stage": "RDA dense points", "input": "RDA cube", "output": rda_dense_count, "meaning": "ROI 안에서 threshold 이상인 range/angle/doppler cell. 사진 같은 조밀한 점군에 가장 가까운 단계"},
         {"stage": "CFAR candidates", "input": "RDI", "output": cfar_count, "meaning": "RDI local peak + CFAR threshold 통과 후보"},
+        {"stage": "CFAR projected seeds", "input": "CFAR candidates + angle profile", "output": cfar_seed_count, "meaning": "아직 사람 중심은 아니지만 CFAR seed가 어느 각도로 투영되는지 확인"},
         {"stage": "angle validation", "input": cfar_count, "output": angle_passed, "meaning": "ROI, RAI peak, angle contrast, local peak 검증"},
         {"stage": "legacy body-center refinement", "input": _nested_get(trace, "detection", "body_center_refinement", "input_count", default=0), "output": body_refined, "meaning": "기존 강한 반사점 근처 patch 보정"},
         {"stage": "RDA blob-center refinement", "input": _nested_get(trace, "detection", "blob_center_refinement", "input_count", default=0), "output": blob_center_count, "meaning": "range/angle/doppler cube patch 연결 성분 중심 후보"},
@@ -2135,14 +2181,21 @@ def _render_compare_final_trajectory_grid(run_roles: list[tuple[str, dict]]) -> 
 
 
 def _render_sequence_trajectory_overlay(trace_rows: list[dict], selected_stages: list[tuple[str, str, str]]) -> None:
-    trajectories = [
+    stage_trajectories = [
         (stage, label, color, _collect_stage_trajectory(trace_rows, stage))
         for stage, label, color in selected_stages
     ]
-    trajectories = [(stage, label, color, rows) for stage, label, color, rows in trajectories if rows]
+    missing_labels = [label for _, label, _, rows in stage_trajectories if not rows]
+    trajectories = [(stage, label, color, rows) for stage, label, color, rows in stage_trajectories if rows]
     if not trajectories:
         st.caption("선택한 stage에서 전체 궤적으로 그릴 x/y 좌표가 없습니다.")
         return
+    if missing_labels:
+        st.caption(
+            "선택했지만 x/y trajectory 데이터가 없어 생략된 stage: "
+            + ", ".join(missing_labels)
+            + ". 이전 cache라면 Force Rebuild가 필요합니다."
+        )
 
     all_points = [point for _, _, _, rows in trajectories for point in rows]
     xs = np.asarray([point["x_m"] for point in all_points], dtype=float)
@@ -2307,8 +2360,11 @@ def _render_sequence_count_timeline(trace_rows: list[dict], selected_stages: lis
 
 def _render_trace_spatial_view(trace: dict) -> None:
     stage_specs = [
+        ("rda_dense", "RDA Dense", "#667085", 160, 18, 0.32),
+        ("cfar_seed", "CFAR Seed", "#2869a6", 48, 30, 0.52),
         ("angle", "Raw Angle", "#2d8f7a"),
         ("body_center", "Legacy Body", "#c05d9f"),
+        ("blob_grouping", "Blob Points", "#9b6a2f", 160, 16, 0.30),
         ("blob_center", "RDA Blob", "#8d63c7"),
         ("final_merge", "Merge", "#5176b8"),
         ("dbscan", "DBSCAN", "#0e8a7e"),
@@ -2317,13 +2373,15 @@ def _render_trace_spatial_view(trace: dict) -> None:
     ]
     point_sets = []
     all_points = []
-    for key, label, color in stage_specs:
+    for spec in stage_specs:
+        key, label, color = spec[:3]
+        limit = int(spec[3]) if len(spec) >= 4 else 12
         points = [
-            point for point in _trace_stage_points(trace, key)[:12]
+            point for point in _trace_stage_points(trace, key)[:limit]
             if _as_float(point.get("x_m")) is not None and _as_float(point.get("y_m")) is not None
         ]
         if points:
-            point_sets.append((label, color, points))
+            point_sets.append((label, color, points, spec))
             all_points.extend(points)
     if not all_points:
         st.info("이 frame에는 x/y로 표시할 후보가 없습니다.")
@@ -2335,10 +2393,12 @@ def _render_trace_spatial_view(trace: dict) -> None:
     ys = [_as_float(point.get("y_m"), 0.0) or 0.0 for point in all_points]
     x_abs = max(max(abs(value) for value in xs), 0.6)
     y_max = max(max(ys), 3.0)
-    for label, color, points in point_sets:
+    for label, color, points, spec in point_sets:
         px = [_as_float(point.get("x_m"), 0.0) or 0.0 for point in points]
         py = [_as_float(point.get("y_m"), 0.0) or 0.0 for point in points]
-        ax.scatter(px, py, s=38, color=color, alpha=0.78, label=f"{label} ({len(points)})", edgecolors="white", linewidth=0.5)
+        marker_size = float(spec[4]) if len(spec) >= 5 else 38.0
+        alpha = float(spec[5]) if len(spec) >= 6 else 0.78
+        ax.scatter(px, py, s=marker_size, color=color, alpha=alpha, label=f"{label} ({len(points)})", edgecolors="white", linewidth=0.35)
     pairs = _nested_get(trace, "detection", "body_center_refinement", "pairs", default=[]) or []
     for pair in pairs[:10]:
         before = pair.get("before") if isinstance(pair, dict) else None
