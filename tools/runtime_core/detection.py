@@ -145,6 +145,70 @@ def _doppler_bin_distance(left_bin, right_bin, fft_size):
     return min(delta, max(fft_size - delta, 0))
 
 
+def _weighted_quantile(values, weights, quantile):
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    weights = np.asarray(weights, dtype=np.float64).reshape(-1)
+    if values.size == 0 or weights.size != values.size:
+        return None
+
+    valid = np.isfinite(values) & np.isfinite(weights) & (weights > 0)
+    if not np.any(valid):
+        return None
+
+    values = values[valid]
+    weights = weights[valid]
+    order = np.argsort(values)
+    values = values[order]
+    weights = weights[order]
+    cumulative = np.cumsum(weights)
+    total = float(cumulative[-1])
+    if total <= 1e-9:
+        return None
+    target = float(np.clip(quantile, 0.0, 1.0)) * total
+    return float(values[int(np.searchsorted(cumulative, target, side="left"))])
+
+
+def _connected_component_mask_3d(binary_mask, seed_depth, seed_row, seed_col):
+    depth_count, row_count, col_count = binary_mask.shape
+    if depth_count == 0 or row_count == 0 or col_count == 0:
+        return np.zeros_like(binary_mask, dtype=bool)
+
+    seed_depth = int(np.clip(seed_depth, 0, depth_count - 1))
+    seed_row = int(np.clip(seed_row, 0, row_count - 1))
+    seed_col = int(np.clip(seed_col, 0, col_count - 1))
+    if not bool(binary_mask[seed_depth, seed_row, seed_col]):
+        return np.zeros_like(binary_mask, dtype=bool)
+
+    component = np.zeros_like(binary_mask, dtype=bool)
+    stack = [(seed_depth, seed_row, seed_col)]
+    component[seed_depth, seed_row, seed_col] = True
+
+    while stack:
+        depth_index, row_index, col_index = stack.pop()
+        for depth_offset in (-1, 0, 1):
+            for row_offset in (-1, 0, 1):
+                for col_offset in (-1, 0, 1):
+                    if depth_offset == 0 and row_offset == 0 and col_offset == 0:
+                        continue
+                    next_depth = depth_index + depth_offset
+                    next_row = row_index + row_offset
+                    next_col = col_index + col_offset
+                    if not (
+                        0 <= next_depth < depth_count
+                        and 0 <= next_row < row_count
+                        and 0 <= next_col < col_count
+                    ):
+                        continue
+                    if component[next_depth, next_row, next_col]:
+                        continue
+                    if not bool(binary_mask[next_depth, next_row, next_col]):
+                        continue
+                    component[next_depth, next_row, next_col] = True
+                    stack.append((next_depth, next_row, next_col))
+
+    return component
+
+
 def _candidate_strength(candidate):
     score = float(getattr(candidate, "score", 0.0) or 0.0)
     if score > 0.0:
@@ -153,6 +217,53 @@ def _candidate_strength(candidate):
     if rdi_peak > 0.0:
         return rdi_peak
     return float(getattr(candidate, "rai_peak", 0.0) or 0.0)
+
+
+def _candidate_lateral_side(candidate, deadband_m=0.12):
+    x_m = float(getattr(candidate, "x_m", 0.0) or 0.0)
+    deadband_m = max(0.0, float(deadband_m))
+    if abs(x_m) <= deadband_m:
+        return 0
+    return -1 if x_m < 0.0 else 1
+
+
+def _single_target_blob_members(
+    usable_candidates,
+    *,
+    min_score_ratio=0.12,
+    range_window_m=1.05,
+    side_deadband_m=0.15,
+):
+    ordered = sorted(list(usable_candidates or []), key=_candidate_strength, reverse=True)
+    if not ordered:
+        return []
+
+    strongest = ordered[0]
+    strongest_score = max(_candidate_strength(strongest), 1e-9)
+    min_score_ratio = float(np.clip(float(min_score_ratio), 0.0, 1.0))
+    range_window_m = max(0.05, float(range_window_m))
+    side_deadband_m = max(0.0, float(side_deadband_m))
+    dominant_side = _candidate_lateral_side(strongest, side_deadband_m)
+    dominant_range_m = float(getattr(strongest, "range_m", 0.0) or 0.0)
+
+    members = []
+    for candidate in ordered:
+        strength = _candidate_strength(candidate)
+        if strength < strongest_score * min_score_ratio:
+            continue
+
+        candidate_side = _candidate_lateral_side(candidate, side_deadband_m)
+        if dominant_side and candidate_side and candidate_side != dominant_side:
+            continue
+
+        candidate_range_m = float(getattr(candidate, "range_m", 0.0) or 0.0)
+        dynamic_window_m = range_window_m + max(dominant_range_m, candidate_range_m, 0.0) * 0.08
+        if abs(candidate_range_m - dominant_range_m) > dynamic_window_m:
+            continue
+
+        members.append(candidate)
+
+    return members or [strongest]
 
 
 def _estimate_object_count_from_candidates(
@@ -218,6 +329,653 @@ def _estimate_object_count_from_candidates(
         "min_doppler_bins": int(min_doppler_bins),
         "min_score_ratio": round(float(min_score_ratio), 4),
         "selected": _trace_candidates(selected),
+    }
+
+
+def _blob_weight(candidate):
+    # Use a compressed weight so one very strong limb/multipath peak does not own the center.
+    return float(np.sqrt(max(_candidate_strength(candidate), 1e-9)))
+
+
+def _blob_radius_for_range(range_m, radius_bands, default_radius_m=0.65, range_scale=0.04):
+    radius_m = float(default_radius_m) + max(float(range_m), 0.0) * float(range_scale)
+    if not radius_bands:
+        return max(radius_m, 0.05)
+
+    for band in radius_bands:
+        try:
+            r_min = float(band.get("r_min", 0.0))
+            r_max = band.get("r_max")
+        except (TypeError, ValueError, AttributeError):
+            continue
+
+        if float(range_m) < r_min:
+            continue
+        if r_max is not None and float(range_m) >= float(r_max):
+            continue
+
+        try:
+            radius_m = float(band.get("radius_m", band.get("merge_radius_m", radius_m)))
+        except (TypeError, ValueError):
+            pass
+        break
+
+    return max(float(radius_m), 0.05)
+
+
+def _candidate_blob_center(members, runtime_config, *, center_method="weighted_median"):
+    member_list = list(members or [])
+    if not member_list:
+        return None
+
+    weights = np.asarray([_blob_weight(candidate) for candidate in member_list], dtype=np.float64)
+    xs = np.asarray([float(candidate.x_m) for candidate in member_list], dtype=np.float64)
+    ys = np.asarray([float(candidate.y_m) for candidate in member_list], dtype=np.float64)
+    weight_sum = float(np.sum(weights))
+    if weight_sum <= 1e-9:
+        return None
+
+    method = str(center_method or "weighted_median").strip().lower()
+    if method in {"median", "weighted_median", "robust"}:
+        x_center = _weighted_quantile(xs, weights, 0.5)
+        y_center = _weighted_quantile(ys, weights, 0.5)
+        if x_center is None or y_center is None:
+            x_center = float(np.sum(xs * weights) / weight_sum)
+            y_center = float(np.sum(ys * weights) / weight_sum)
+            method = "weighted_mean_fallback"
+    else:
+        x_center = float(np.sum(xs * weights) / weight_sum)
+        y_center = float(np.sum(ys * weights) / weight_sum)
+        method = "weighted_mean"
+
+    range_m = float(hypot(float(x_center), float(y_center)))
+    angle_rad = float(atan2(float(x_center), max(float(y_center), 1e-6)))
+    dopplers = np.asarray([float(candidate.doppler_bin) for candidate in member_list], dtype=np.float64)
+    doppler_center = _weighted_quantile(dopplers, weights, 0.5)
+    if doppler_center is None:
+        doppler_center = float(np.sum(dopplers * weights) / weight_sum)
+
+    strongest = max(
+        member_list,
+        key=lambda candidate: (
+            _candidate_strength(candidate),
+            float(candidate.rdi_peak),
+            float(candidate.rai_peak),
+        ),
+    )
+    score_sum = float(sum(_candidate_strength(candidate) for candidate in member_list))
+    score_scale = min(1.35, 1.0 + 0.06 * max(len(member_list) - 1, 0))
+    return (
+        DetectionCandidate(
+            range_bin=_nearest_axis_bin(runtime_config.range_axis_m, range_m),
+            doppler_bin=int(np.clip(round(float(doppler_center)), 0, runtime_config.doppler_fft_size - 1)),
+            angle_bin=_nearest_axis_bin(runtime_config.angle_axis_rad, angle_rad),
+            range_m=range_m,
+            angle_deg=float(np.degrees(angle_rad)),
+            x_m=float(x_center),
+            y_m=float(y_center),
+            rdi_peak=float(max(candidate.rdi_peak for candidate in member_list)),
+            rai_peak=float(max(candidate.rai_peak for candidate in member_list)),
+            score=max(float(strongest.score) * score_scale, score_sum / max(len(member_list), 1)),
+        ),
+        {
+            "method": method,
+            "member_count": int(len(member_list)),
+            "weight_sum": round(weight_sum, 4),
+            "score_sum": round(score_sum, 4),
+            "strongest": _trace_candidate(strongest),
+        },
+    )
+
+
+def _cube_blob_center_for_members(
+    rai_cube,
+    members,
+    runtime_config,
+    detection_region,
+    *,
+    body_center_patch_bands=None,
+    doppler_radius_bins=2,
+    floor_quantile=0.65,
+    min_points=4,
+    center_method="weighted_median",
+    peak_blend=0.0,
+    cube_range_radius_m=None,
+    cube_angle_radius_deg=None,
+    cube_relative_floor=None,
+):
+    if rai_cube is None:
+        return None
+
+    member_list = list(members or [])
+    if not member_list:
+        return None
+
+    cube = np.asarray(rai_cube, dtype=np.float64)
+    if cube.ndim != 3 or cube.size == 0:
+        return None
+
+    doppler_count, range_count, angle_count = cube.shape
+    doppler_radius_bins = max(0, int(doppler_radius_bins))
+    floor_quantile = float(np.clip(floor_quantile, 0.0, 0.95))
+    min_points = max(1, int(min_points))
+    peak_blend = float(np.clip(peak_blend, 0.0, 0.75))
+    point_map = {}
+
+    for seed in member_list:
+        seed_doppler_bin = int(np.clip(seed.doppler_bin, 0, doppler_count - 1))
+        seed_range_bin = int(np.clip(seed.range_bin, 0, range_count - 1))
+        seed_angle_bin = int(np.clip(seed.angle_bin, 0, angle_count - 1))
+        seed_range_m = float(runtime_config.range_axis_m[seed_range_bin])
+        angle_mask = _angle_roi_mask(
+            seed_range_m,
+            runtime_config.angle_axis_rad,
+            detection_region,
+        )
+        if not np.any(angle_mask):
+            continue
+
+        range_radius_bins, angle_radius_bins, relative_floor = _body_center_patch_for_range(
+            seed_range_m,
+            body_center_patch_bands,
+            default_range_radius_bins=2,
+            default_angle_radius_bins=3,
+            default_relative_floor=0.45,
+        )
+        range_radius_bins = max(1, int(range_radius_bins))
+        angle_radius_bins = max(1, int(angle_radius_bins))
+        relative_floor = float(np.clip(relative_floor, 0.0, 0.95))
+
+        if cube_range_radius_m is not None:
+            range_axis = np.asarray(runtime_config.range_axis_m, dtype=np.float64)
+            range_steps = np.diff(range_axis)
+            range_steps = range_steps[np.isfinite(range_steps) & (range_steps > 0)]
+            if range_steps.size:
+                range_step_m = float(np.median(range_steps))
+                expanded_range_bins = int(np.ceil(float(cube_range_radius_m) / max(range_step_m, 1e-6)))
+                range_radius_bins = max(range_radius_bins, expanded_range_bins)
+
+        if cube_angle_radius_deg is not None:
+            angle_axis = np.asarray(runtime_config.angle_axis_rad, dtype=np.float64)
+            angle_steps = np.diff(angle_axis)
+            angle_steps = np.abs(angle_steps[np.isfinite(angle_steps) & (np.abs(angle_steps) > 0)])
+            if angle_steps.size:
+                angle_step_rad = float(np.median(angle_steps))
+                expanded_angle_bins = int(
+                    np.ceil(np.radians(float(cube_angle_radius_deg)) / max(angle_step_rad, 1e-6))
+                )
+                angle_radius_bins = max(angle_radius_bins, expanded_angle_bins)
+
+        if cube_relative_floor is not None:
+            relative_floor = float(np.clip(float(cube_relative_floor), 0.0, 0.95))
+
+        doppler_lower = max(seed_doppler_bin - doppler_radius_bins, 0)
+        doppler_upper = min(seed_doppler_bin + doppler_radius_bins + 1, doppler_count)
+        range_lower = max(seed_range_bin - range_radius_bins, 0)
+        range_upper = min(seed_range_bin + range_radius_bins + 1, range_count)
+        angle_lower = max(seed_angle_bin - angle_radius_bins, 0)
+        angle_upper = min(seed_angle_bin + angle_radius_bins + 1, angle_count)
+        patch = cube[doppler_lower:doppler_upper, range_lower:range_upper, angle_lower:angle_upper]
+        if patch.size == 0:
+            continue
+
+        local_angle_mask = np.asarray(angle_mask[angle_lower:angle_upper], dtype=bool)
+        if not np.any(local_angle_mask):
+            continue
+
+        local_range_axis = np.asarray(runtime_config.range_axis_m[range_lower:range_upper], dtype=np.float64)
+        local_angle_axis = np.asarray(runtime_config.angle_axis_rad[angle_lower:angle_upper], dtype=np.float64)
+        range_grid = local_range_axis[np.newaxis, :, np.newaxis]
+        angle_grid = local_angle_axis[np.newaxis, np.newaxis, :]
+        x_grid = range_grid * np.sin(angle_grid)
+        y_grid = range_grid * np.cos(angle_grid)
+        roi_mask = (
+            (np.abs(x_grid) <= float(detection_region.lateral_limit_m))
+            & (y_grid >= float(detection_region.min_forward_m))
+            & (y_grid <= float(detection_region.forward_limit_m))
+        )
+        spatial_mask = (
+            np.broadcast_to(roi_mask, patch.shape)
+            & np.broadcast_to(local_angle_mask[np.newaxis, np.newaxis, :], patch.shape)
+        )
+        valid_values = patch[spatial_mask]
+        if valid_values.size == 0:
+            continue
+
+        seed_depth = seed_doppler_bin - doppler_lower
+        seed_row = seed_range_bin - range_lower
+        seed_col = seed_angle_bin - angle_lower
+        seed_value = float(patch[seed_depth, seed_row, seed_col])
+        if seed_value <= 0.0:
+            seed_value = float(np.max(valid_values))
+        if seed_value <= 0.0:
+            continue
+
+        quantile_floor = float(np.quantile(valid_values, floor_quantile))
+        component_floor = max(seed_value * relative_floor, quantile_floor)
+        threshold_mask = spatial_mask & (patch >= component_floor)
+        if spatial_mask[seed_depth, seed_row, seed_col]:
+            threshold_mask = np.array(threshold_mask, copy=True)
+            threshold_mask[seed_depth, seed_row, seed_col] = True
+        component_mask = _connected_component_mask_3d(
+            threshold_mask,
+            seed_depth,
+            seed_row,
+            seed_col,
+        )
+        if int(np.count_nonzero(component_mask)) < min_points:
+            relaxed_floor = max(seed_value * max(relative_floor * 0.65, 0.18), quantile_floor * 0.65)
+            relaxed_mask = spatial_mask & (patch >= relaxed_floor)
+            if spatial_mask[seed_depth, seed_row, seed_col]:
+                relaxed_mask = np.array(relaxed_mask, copy=True)
+                relaxed_mask[seed_depth, seed_row, seed_col] = True
+            relaxed_component = _connected_component_mask_3d(
+                relaxed_mask,
+                seed_depth,
+                seed_row,
+                seed_col,
+            )
+            if int(np.count_nonzero(relaxed_component)) > int(np.count_nonzero(component_mask)):
+                component_mask = relaxed_component
+                component_floor = relaxed_floor
+
+        if int(np.count_nonzero(component_mask)) <= 0:
+            continue
+
+        local_indices = np.argwhere(component_mask)
+        for depth_index, row_index, col_index in local_indices:
+            global_key = (
+                int(depth_index + doppler_lower),
+                int(row_index + range_lower),
+                int(col_index + angle_lower),
+            )
+            value = float(patch[int(depth_index), int(row_index), int(col_index)])
+            weight = float(np.sqrt(max(value - component_floor, value * 0.10, 1e-9)))
+            previous = point_map.get(global_key)
+            if previous is None or weight > previous:
+                point_map[global_key] = weight
+
+    if len(point_map) < min_points:
+        return None
+
+    doppler_indices = []
+    x_values = []
+    y_values = []
+    weights = []
+    for (doppler_bin, range_bin, angle_bin), weight in point_map.items():
+        range_m = float(runtime_config.range_axis_m[int(range_bin)])
+        angle_rad = float(runtime_config.angle_axis_rad[int(angle_bin)])
+        doppler_indices.append(float(doppler_bin))
+        x_values.append(float(range_m * np.sin(angle_rad)))
+        y_values.append(float(range_m * np.cos(angle_rad)))
+        weights.append(float(weight))
+
+    x_values = np.asarray(x_values, dtype=np.float64)
+    y_values = np.asarray(y_values, dtype=np.float64)
+    doppler_indices = np.asarray(doppler_indices, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    weight_sum = float(np.sum(weights))
+    if weight_sum <= 1e-9:
+        return None
+
+    method = str(center_method or "weighted_median").strip().lower()
+    if method in {"median", "weighted_median", "robust"}:
+        x_center = _weighted_quantile(x_values, weights, 0.5)
+        y_center = _weighted_quantile(y_values, weights, 0.5)
+        if x_center is None or y_center is None:
+            x_center = float(np.sum(x_values * weights) / weight_sum)
+            y_center = float(np.sum(y_values * weights) / weight_sum)
+            method = "weighted_mean_fallback"
+    else:
+        x_center = float(np.sum(x_values * weights) / weight_sum)
+        y_center = float(np.sum(y_values * weights) / weight_sum)
+        method = "weighted_mean"
+
+    candidate_center, candidate_summary = _candidate_blob_center(
+        member_list,
+        runtime_config,
+        center_method=center_method,
+    )
+    if candidate_center is not None and peak_blend > 0.0:
+        x_center = float((1.0 - peak_blend) * x_center + peak_blend * candidate_center.x_m)
+        y_center = float((1.0 - peak_blend) * y_center + peak_blend * candidate_center.y_m)
+
+    range_m = float(hypot(float(x_center), float(y_center)))
+    angle_rad = float(atan2(float(x_center), max(float(y_center), 1e-6)))
+    doppler_center = _weighted_quantile(doppler_indices, weights, 0.5)
+    if doppler_center is None:
+        doppler_center = float(np.sum(doppler_indices * weights) / weight_sum)
+
+    strongest = max(member_list, key=_candidate_strength)
+    score_sum = float(sum(_candidate_strength(candidate) for candidate in member_list))
+    return (
+        DetectionCandidate(
+            range_bin=_nearest_axis_bin(runtime_config.range_axis_m, range_m),
+            doppler_bin=int(np.clip(round(float(doppler_center)), 0, runtime_config.doppler_fft_size - 1)),
+            angle_bin=_nearest_axis_bin(runtime_config.angle_axis_rad, angle_rad),
+            range_m=range_m,
+            angle_deg=float(np.degrees(angle_rad)),
+            x_m=float(x_center),
+            y_m=float(y_center),
+            rdi_peak=float(max(candidate.rdi_peak for candidate in member_list)),
+            rai_peak=float(max(candidate.rai_peak for candidate in member_list)),
+            score=max(float(strongest.score), score_sum / max(len(member_list), 1)),
+        ),
+        {
+            "method": method,
+            "source": "rai_cube_patch_union",
+            "member_count": int(len(member_list)),
+            "point_count": int(len(point_map)),
+            "weight_sum": round(weight_sum, 4),
+            "candidate_center": _trace_candidate(candidate_center) if candidate_center is not None else None,
+            "candidate_summary": candidate_summary,
+            "cube_range_radius_m": None if cube_range_radius_m is None else round(float(cube_range_radius_m), 4),
+            "cube_angle_radius_deg": None if cube_angle_radius_deg is None else round(float(cube_angle_radius_deg), 4),
+            "cube_relative_floor": None if cube_relative_floor is None else round(float(cube_relative_floor), 4),
+        },
+    )
+
+
+def _refine_blob_centers_from_candidates(
+    candidate_pool,
+    runtime_config,
+    detection_region,
+    *,
+    rai_cube=None,
+    body_center_patch_bands=None,
+    enabled=True,
+    max_blobs=None,
+    max_candidates=36,
+    min_points=3,
+    min_score_ratio=0.04,
+    cluster_radius_m=0.65,
+    cluster_radius_range_scale=0.04,
+    cluster_radius_bands=None,
+    doppler_radius_bins=10,
+    center_method="weighted_median",
+    trim_radius_m=0.85,
+    floor_quantile=0.65,
+    peak_blend=0.0,
+    single_min_score_ratio=0.12,
+    single_range_window_m=1.05,
+    single_side_deadband_m=0.15,
+    cube_range_radius_m=None,
+    cube_angle_radius_deg=None,
+    cube_relative_floor=None,
+):
+    if not enabled:
+        return list(candidate_pool or []), {"enabled": False}
+
+    candidates = list(candidate_pool or [])
+    max_candidates = max(1, int(max_candidates))
+    min_points = max(1, int(min_points))
+    min_seed_count = 1 if rai_cube is not None else min_points
+    min_cube_points = max(4, min_points)
+    min_score_ratio = float(np.clip(float(min_score_ratio), 0.0, 1.0))
+    doppler_radius_bins = max(0, int(doppler_radius_bins))
+    max_blobs = int(max_blobs if max_blobs is not None else detection_region.max_targets)
+    max_blobs = max(1, max_blobs)
+
+    if len(candidates) <= 1:
+        if candidates and rai_cube is not None:
+            center_result = _cube_blob_center_for_members(
+                rai_cube,
+                candidates,
+                runtime_config,
+                detection_region,
+                body_center_patch_bands=body_center_patch_bands,
+                doppler_radius_bins=doppler_radius_bins,
+                floor_quantile=floor_quantile,
+                min_points=min_cube_points,
+                center_method=center_method,
+                peak_blend=peak_blend,
+                cube_range_radius_m=cube_range_radius_m,
+                cube_angle_radius_deg=cube_angle_radius_deg,
+                cube_relative_floor=cube_relative_floor,
+            )
+            if center_result is not None:
+                center, summary = center_result
+                return [center], {
+                    "enabled": True,
+                    "input_count": int(len(candidates)),
+                    "usable_count": int(len(candidates)),
+                    "output_count": 1,
+                    "single_seed_cube_refined": True,
+                    "groups": [
+                        {
+                            "center": _trace_candidate(center),
+                            "member_count": 1,
+                            "strength": round(float(_candidate_strength(candidates[0])), 4),
+                            "summary": summary,
+                            "members": _trace_candidates(candidates),
+                        }
+                    ],
+                }
+        return candidates, {
+            "enabled": True,
+            "input_count": int(len(candidates)),
+            "output_count": int(len(candidates)),
+            "reason": "not_enough_candidates",
+        }
+
+    ordered = sorted(candidates, key=_candidate_strength, reverse=True)
+    strongest = max(_candidate_strength(ordered[0]), 1e-9)
+    usable = [
+        candidate
+        for candidate in ordered[:max_candidates]
+        if _candidate_strength(candidate) >= strongest * min_score_ratio
+    ]
+    if len(usable) < min_seed_count:
+        return candidates, {
+            "enabled": True,
+            "input_count": int(len(candidates)),
+            "usable_count": int(len(usable)),
+            "output_count": int(len(candidates)),
+            "reason": "not_enough_usable_candidates",
+        }
+
+    if max_blobs == 1:
+        single_members = _single_target_blob_members(
+            usable,
+            min_score_ratio=max(float(min_score_ratio), float(single_min_score_ratio)),
+            range_window_m=single_range_window_m,
+            side_deadband_m=single_side_deadband_m,
+        )
+        if len(single_members) >= min_seed_count:
+            center_result = _cube_blob_center_for_members(
+                rai_cube,
+                single_members,
+                runtime_config,
+                detection_region,
+                body_center_patch_bands=body_center_patch_bands,
+                doppler_radius_bins=doppler_radius_bins,
+                floor_quantile=floor_quantile,
+                min_points=min_cube_points,
+                center_method=center_method,
+                peak_blend=peak_blend,
+                cube_range_radius_m=cube_range_radius_m,
+                cube_angle_radius_deg=cube_angle_radius_deg,
+                cube_relative_floor=cube_relative_floor,
+            )
+            if center_result is None:
+                center_result = _candidate_blob_center(
+                    single_members,
+                    runtime_config,
+                    center_method=center_method,
+                )
+            if center_result is not None:
+                center, summary = center_result
+                strength = float(sum(_candidate_strength(candidate) for candidate in single_members))
+                return [center], {
+                    "enabled": True,
+                    "input_count": int(len(candidates)),
+                    "usable_count": int(len(usable)),
+                    "output_count": 1,
+                    "max_blobs": int(max_blobs),
+                    "max_candidates": int(max_candidates),
+                    "min_points": int(min_points),
+                    "min_score_ratio": round(float(min_score_ratio), 4),
+                    "single_target_dominant_blob": True,
+                    "single_min_score_ratio": round(float(single_min_score_ratio), 4),
+                    "single_range_window_m": round(float(single_range_window_m), 4),
+                    "single_side_deadband_m": round(float(single_side_deadband_m), 4),
+                    "center_method": str(center_method),
+                    "floor_quantile": round(float(floor_quantile), 4),
+                    "peak_blend": round(float(peak_blend), 4),
+                    "groups": [
+                        {
+                            "center": _trace_candidate(center),
+                            "member_count": int(len(single_members)),
+                            "strength": round(float(strength), 4),
+                            "summary": summary,
+                            "members": _trace_candidates(single_members[:12]),
+                        }
+                    ],
+                }
+
+    def _member_distance(left, right):
+        return float(hypot(float(left.x_m) - float(right.x_m), float(left.y_m) - float(right.y_m)))
+
+    groups = []
+    for candidate in usable:
+        best_group = None
+        best_distance = None
+        for group in groups:
+            reference = group["center"]
+            reference_range = max(float(candidate.range_m), float(reference.range_m))
+            radius_m = _blob_radius_for_range(
+                reference_range,
+                cluster_radius_bands,
+                default_radius_m=cluster_radius_m,
+                range_scale=cluster_radius_range_scale,
+            )
+            distance_m = _member_distance(candidate, reference)
+            doppler_distance = _doppler_bin_distance(
+                candidate.doppler_bin,
+                reference.doppler_bin,
+                runtime_config.doppler_fft_size,
+            )
+            if distance_m > radius_m or doppler_distance > doppler_radius_bins:
+                continue
+            if best_distance is None or distance_m < best_distance:
+                best_distance = distance_m
+                best_group = group
+
+        if best_group is None:
+            best_group = {"members": [candidate], "center": candidate}
+            groups.append(best_group)
+            continue
+
+        best_group["members"].append(candidate)
+        center_result = _candidate_blob_center(
+            best_group["members"],
+            runtime_config,
+            center_method=center_method,
+        )
+        if center_result is not None:
+            best_group["center"] = center_result[0]
+
+    blob_candidates = []
+    group_traces = []
+    for group in groups:
+        members = list(group["members"])
+        if len(members) < min_seed_count:
+            continue
+
+        center_result = _cube_blob_center_for_members(
+            rai_cube,
+            members,
+            runtime_config,
+            detection_region,
+            body_center_patch_bands=body_center_patch_bands,
+            doppler_radius_bins=doppler_radius_bins,
+            floor_quantile=floor_quantile,
+            min_points=min_cube_points,
+            center_method=center_method,
+            peak_blend=peak_blend,
+            cube_range_radius_m=cube_range_radius_m,
+            cube_angle_radius_deg=cube_angle_radius_deg,
+            cube_relative_floor=cube_relative_floor,
+        )
+        if center_result is None:
+            center_result = _candidate_blob_center(members, runtime_config, center_method=center_method)
+        if center_result is None:
+            continue
+        center, summary = center_result
+
+        if (
+            summary.get("source") != "rai_cube_patch_union"
+            and trim_radius_m
+            and float(trim_radius_m) > 0.0
+            and len(members) > min_points
+        ):
+            trim_radius = float(trim_radius_m) + max(float(center.range_m), 0.0) * float(cluster_radius_range_scale)
+            trimmed_members = [
+                candidate
+                for candidate in members
+                if float(hypot(candidate.x_m - center.x_m, candidate.y_m - center.y_m)) <= trim_radius
+            ]
+            if len(trimmed_members) >= min_points and len(trimmed_members) < len(members):
+                trimmed_result = _candidate_blob_center(
+                    trimmed_members,
+                    runtime_config,
+                    center_method=center_method,
+                )
+                if trimmed_result is not None:
+                    center, summary = trimmed_result
+                    members = trimmed_members
+                    summary["trimmed"] = True
+                    summary["trim_radius_m"] = round(float(trim_radius), 4)
+
+        strength = float(sum(_candidate_strength(candidate) for candidate in members))
+        blob_candidates.append((center, strength, members, summary))
+
+    if not blob_candidates:
+        return candidates, {
+            "enabled": True,
+            "input_count": int(len(candidates)),
+            "usable_count": int(len(usable)),
+            "output_count": int(len(candidates)),
+            "reason": "no_valid_blob_groups",
+        }
+
+    blob_candidates.sort(
+        key=lambda item: (
+            item[1],
+            len(item[2]),
+            float(item[0].score),
+            float(item[0].rdi_peak),
+        ),
+        reverse=True,
+    )
+    refined = [item[0] for item in blob_candidates[:max_blobs]]
+    for center, strength, members, summary in blob_candidates[:12]:
+        group_traces.append(
+            {
+                "center": _trace_candidate(center),
+                "member_count": int(len(members)),
+                "strength": round(float(strength), 4),
+                "summary": summary,
+                "members": _trace_candidates(sorted(members, key=_candidate_strength, reverse=True)[:8]),
+            }
+        )
+
+    return refined, {
+        "enabled": True,
+        "input_count": int(len(candidates)),
+        "usable_count": int(len(usable)),
+        "output_count": int(len(refined)),
+        "max_blobs": int(max_blobs),
+        "max_candidates": int(max_candidates),
+        "min_points": int(min_points),
+        "min_score_ratio": round(float(min_score_ratio), 4),
+        "cluster_radius_m": round(float(cluster_radius_m), 4),
+        "cluster_radius_range_scale": round(float(cluster_radius_range_scale), 4),
+        "doppler_radius_bins": int(doppler_radius_bins),
+        "center_method": str(center_method),
+        "floor_quantile": round(float(floor_quantile), 4),
+        "peak_blend": round(float(peak_blend), 4),
+        "groups": group_traces,
     }
 
 
@@ -330,6 +1088,162 @@ def _merge_candidate_pool(
         reverse=True,
     )
     return merged_candidates
+
+
+def _refine_person_blob_from_cube(
+    rai_cube,
+    runtime_config,
+    detection_region,
+    seed_range_bin,
+    seed_angle_bin,
+    seed_doppler_bin,
+    angle_mask,
+    *,
+    range_radius_bins=2,
+    angle_radius_bins=3,
+    doppler_radius_bins=2,
+    relative_floor=0.55,
+    floor_quantile=0.65,
+    min_points=4,
+    center_method="weighted_median",
+    peak_blend=0.10,
+):
+    if rai_cube is None:
+        return None
+
+    cube = np.asarray(rai_cube, dtype=np.float64)
+    if cube.ndim != 3 or cube.size == 0:
+        return None
+
+    doppler_count, range_count, angle_count = cube.shape
+    seed_doppler_bin = int(np.clip(seed_doppler_bin, 0, doppler_count - 1))
+    seed_range_bin = int(np.clip(seed_range_bin, 0, range_count - 1))
+    seed_angle_bin = int(np.clip(seed_angle_bin, 0, angle_count - 1))
+    range_radius_bins = max(1, int(range_radius_bins))
+    angle_radius_bins = max(1, int(angle_radius_bins))
+    doppler_radius_bins = max(0, int(doppler_radius_bins))
+    relative_floor = float(np.clip(relative_floor, 0.0, 0.95))
+    floor_quantile = float(np.clip(floor_quantile, 0.0, 0.95))
+    min_points = max(1, int(min_points))
+    peak_blend = float(np.clip(peak_blend, 0.0, 0.75))
+
+    doppler_lower = max(seed_doppler_bin - doppler_radius_bins, 0)
+    doppler_upper = min(seed_doppler_bin + doppler_radius_bins + 1, doppler_count)
+    range_lower = max(seed_range_bin - range_radius_bins, 0)
+    range_upper = min(seed_range_bin + range_radius_bins + 1, range_count)
+    angle_lower = max(seed_angle_bin - angle_radius_bins, 0)
+    angle_upper = min(seed_angle_bin + angle_radius_bins + 1, angle_count)
+
+    patch = np.asarray(
+        cube[doppler_lower:doppler_upper, range_lower:range_upper, angle_lower:angle_upper],
+        dtype=np.float64,
+    )
+    if patch.size == 0:
+        return None
+
+    local_angle_mask = np.asarray(angle_mask[angle_lower:angle_upper], dtype=bool)
+    if not np.any(local_angle_mask):
+        return None
+
+    local_range_axis = np.asarray(runtime_config.range_axis_m[range_lower:range_upper], dtype=np.float64)
+    local_angle_axis = np.asarray(runtime_config.angle_axis_rad[angle_lower:angle_upper], dtype=np.float64)
+    range_grid = local_range_axis[np.newaxis, :, np.newaxis]
+    angle_grid = local_angle_axis[np.newaxis, np.newaxis, :]
+    x_grid = range_grid * np.sin(angle_grid)
+    y_grid = range_grid * np.cos(angle_grid)
+    roi_mask = (
+        (np.abs(x_grid) <= float(detection_region.lateral_limit_m))
+        & (y_grid >= float(detection_region.min_forward_m))
+        & (y_grid <= float(detection_region.forward_limit_m))
+    )
+    angle_roi_mask = np.broadcast_to(local_angle_mask[np.newaxis, np.newaxis, :], patch.shape)
+    spatial_mask = np.broadcast_to(roi_mask, patch.shape) & angle_roi_mask
+    valid_values = patch[spatial_mask]
+    if valid_values.size == 0:
+        return None
+
+    seed_depth = seed_doppler_bin - doppler_lower
+    seed_row = seed_range_bin - range_lower
+    seed_col = seed_angle_bin - angle_lower
+    seed_value = float(patch[seed_depth, seed_row, seed_col])
+    if seed_value <= 0.0:
+        seed_value = float(np.max(valid_values))
+    if seed_value <= 0.0:
+        return None
+
+    quantile_floor = float(np.quantile(valid_values, floor_quantile)) if valid_values.size else 0.0
+    component_floor = max(seed_value * relative_floor, quantile_floor)
+    threshold_mask = spatial_mask & (patch >= component_floor)
+    if spatial_mask[seed_depth, seed_row, seed_col]:
+        threshold_mask = np.array(threshold_mask, copy=True)
+        threshold_mask[seed_depth, seed_row, seed_col] = True
+
+    component_mask = _connected_component_mask_3d(threshold_mask, seed_depth, seed_row, seed_col)
+    if int(np.count_nonzero(component_mask)) < min_points:
+        relaxed_floor = max(seed_value * max(relative_floor * 0.75, 0.20), quantile_floor * 0.75)
+        relaxed_mask = spatial_mask & (patch >= relaxed_floor)
+        if spatial_mask[seed_depth, seed_row, seed_col]:
+            relaxed_mask = np.array(relaxed_mask, copy=True)
+            relaxed_mask[seed_depth, seed_row, seed_col] = True
+        component_mask = _connected_component_mask_3d(relaxed_mask, seed_depth, seed_row, seed_col)
+        component_floor = relaxed_floor
+
+    if int(np.count_nonzero(component_mask)) < min_points:
+        return None
+
+    weights = np.where(component_mask, np.maximum(patch - component_floor, 0.0), 0.0)
+    weight_sum = float(np.sum(weights))
+    if weight_sum <= 1e-9:
+        weights = np.where(component_mask, np.maximum(patch, 0.0), 0.0)
+        weight_sum = float(np.sum(weights))
+    if weight_sum <= 1e-9:
+        return None
+
+    x_values = np.broadcast_to(x_grid, patch.shape)[component_mask]
+    y_values = np.broadcast_to(y_grid, patch.shape)[component_mask]
+    weight_values = weights[component_mask]
+    method = str(center_method or "weighted_median").strip().lower()
+    if method in {"median", "weighted_median", "robust"}:
+        x_center = _weighted_quantile(x_values, weight_values, 0.5)
+        y_center = _weighted_quantile(y_values, weight_values, 0.5)
+        if x_center is None or y_center is None:
+            x_center = float(np.sum(x_values * weight_values) / weight_sum)
+            y_center = float(np.sum(y_values * weight_values) / weight_sum)
+            method = "weighted_mean_fallback"
+    else:
+        x_center = float(np.sum(x_values * weight_values) / weight_sum)
+        y_center = float(np.sum(y_values * weight_values) / weight_sum)
+        method = "weighted_mean"
+
+    seed_range_m = float(runtime_config.range_axis_m[seed_range_bin])
+    seed_angle_rad = float(runtime_config.angle_axis_rad[seed_angle_bin])
+    seed_x_m = float(seed_range_m * np.sin(seed_angle_rad))
+    seed_y_m = float(seed_range_m * np.cos(seed_angle_rad))
+    x_center = float((1.0 - peak_blend) * x_center + peak_blend * seed_x_m)
+    y_center = float((1.0 - peak_blend) * y_center + peak_blend * seed_y_m)
+
+    range_m = float(hypot(x_center, y_center))
+    angle_rad = float(atan2(x_center, max(y_center, 1e-6)))
+    doppler_indices = np.arange(doppler_lower, doppler_upper, dtype=np.float64)[:, np.newaxis, np.newaxis]
+    doppler_bin = int(round(float(np.sum(doppler_indices * weights) / weight_sum)))
+    return {
+        "range_bin": _nearest_axis_bin(runtime_config.range_axis_m, range_m),
+        "angle_bin": _nearest_axis_bin(runtime_config.angle_axis_rad, angle_rad),
+        "doppler_bin": int(np.clip(doppler_bin, 0, doppler_count - 1)),
+        "range_m": range_m,
+        "angle_rad": angle_rad,
+        "x_m": x_center,
+        "y_m": y_center,
+        "point_count": int(np.count_nonzero(component_mask)),
+        "weight_sum": round(float(weight_sum), 4),
+        "floor": round(float(component_floor), 4),
+        "method": method,
+        "bounds": {
+            "doppler": [int(doppler_lower), int(doppler_upper - 1)],
+            "range": [int(range_lower), int(range_upper - 1)],
+            "angle": [int(angle_lower), int(angle_upper - 1)],
+        },
+    }
 
 
 def _select_cluster_representative(members, cluster):
@@ -569,6 +1483,31 @@ def detect_targets(
     object_count_min_score_ratio=0.05,
     protect_multi_object_candidates=False,
     limit_output_to_object_count=False,
+    min_output_score=0.0,
+    person_blob_refinement_enabled=False,
+    person_blob_doppler_radius_bins=2,
+    person_blob_min_points=4,
+    person_blob_floor_quantile=0.65,
+    person_blob_center_method="weighted_median",
+    person_blob_peak_blend=0.10,
+    blob_center_refinement_enabled=False,
+    blob_center_max_candidates=36,
+    blob_center_min_points=2,
+    blob_center_min_score_ratio=0.04,
+    blob_center_cluster_radius_m=0.65,
+    blob_center_cluster_radius_range_scale=0.04,
+    blob_center_cluster_radius_bands=None,
+    blob_center_doppler_radius_bins=10,
+    blob_center_method="weighted_median",
+    blob_center_trim_radius_m=0.85,
+    blob_center_floor_quantile=0.65,
+    blob_center_peak_blend=0.0,
+    blob_center_single_min_score_ratio=0.12,
+    blob_center_single_range_window_m=1.05,
+    blob_center_single_side_deadband_m=0.15,
+    blob_center_cube_range_radius_m=None,
+    blob_center_cube_angle_radius_deg=None,
+    blob_center_cube_relative_floor=None,
     enable_body_center_refinement=True,
     enable_candidate_merge=True,
     enable_dbscan=True,
@@ -596,6 +1535,8 @@ def detect_targets(
                 "mode": {
                     "angle_source": angle_source,
                     "body_center_refinement": bool(enable_body_center_refinement),
+                    "person_blob_refinement": bool(person_blob_refinement_enabled),
+                    "blob_center_refinement": bool(blob_center_refinement_enabled),
                     "candidate_merge": bool(enable_candidate_merge),
                     "dbscan": bool(enable_dbscan),
                 },
@@ -793,6 +1734,7 @@ def detect_targets(
 
     refined_candidate_pool = []
     body_center_pairs = []
+    person_blob_pairs = []
     for coarse_candidate in coarse_candidate_pool:
         range_bin = int(np.clip(coarse_candidate.range_bin, 0, rai_map.shape[0] - 1))
         range_m = float(runtime_config.range_axis_m[range_bin])
@@ -850,7 +1792,34 @@ def detect_targets(
             default_angle_radius_bins=max(2, centroid_radius + 1),
             default_relative_floor=0.55,
         )
-        if enable_body_center_refinement:
+        person_blob = None
+        if person_blob_refinement_enabled:
+            person_blob = _refine_person_blob_from_cube(
+                rai_cube,
+                runtime_config,
+                detection_region,
+                range_bin,
+                angle_bin,
+                int(coarse_candidate.doppler_bin),
+                angle_mask,
+                range_radius_bins=patch_range_radius,
+                angle_radius_bins=patch_angle_radius,
+                doppler_radius_bins=person_blob_doppler_radius_bins,
+                relative_floor=patch_relative_floor,
+                floor_quantile=person_blob_floor_quantile,
+                min_points=person_blob_min_points,
+                center_method=person_blob_center_method,
+                peak_blend=person_blob_peak_blend,
+            )
+        if person_blob is not None:
+            refined_range_bin = int(person_blob["range_bin"])
+            refined_angle_bin = int(person_blob["angle_bin"])
+            refined_range_m = float(person_blob["range_m"])
+            refined_angle_rad = float(person_blob["angle_rad"])
+            refined_x_m = float(person_blob["x_m"])
+            refined_y_m = float(person_blob["y_m"])
+            refined_doppler_bin = int(person_blob["doppler_bin"])
+        elif enable_body_center_refinement:
             (
                 refined_range_bin,
                 refined_angle_bin,
@@ -869,6 +1838,7 @@ def detect_targets(
                 angle_radius_bins=patch_angle_radius,
                 relative_floor=patch_relative_floor,
             )
+            refined_doppler_bin = int(coarse_candidate.doppler_bin)
         else:
             refined_range_bin = int(range_bin)
             refined_angle_bin = int(angle_bin)
@@ -876,9 +1846,10 @@ def detect_targets(
             refined_angle_rad = float(angle_rad)
             refined_x_m = float(range_m * np.sin(angle_rad))
             refined_y_m = float(range_m * np.cos(angle_rad))
+            refined_doppler_bin = int(coarse_candidate.doppler_bin)
         refined_candidate = DetectionCandidate(
             range_bin=refined_range_bin,
-            doppler_bin=int(coarse_candidate.doppler_bin),
+            doppler_bin=refined_doppler_bin,
             angle_bin=refined_angle_bin,
             range_m=refined_range_m,
             angle_deg=float(np.degrees(refined_angle_rad)),
@@ -889,6 +1860,18 @@ def detect_targets(
             score=float(coarse_candidate.score),
         )
         refined_candidate_pool.append(refined_candidate)
+        if person_blob is not None and trace_enabled and len(person_blob_pairs) < 12:
+            blob_trace = {
+                "before": _trace_candidate(coarse_candidate),
+                "after": _trace_candidate(refined_candidate),
+                "shift_m": round(float(hypot(coarse_candidate.x_m - refined_candidate.x_m, coarse_candidate.y_m - refined_candidate.y_m)), 4),
+                "point_count": int(person_blob["point_count"]),
+                "weight_sum": person_blob["weight_sum"],
+                "floor": person_blob["floor"],
+                "method": person_blob["method"],
+                "bounds": person_blob["bounds"],
+            }
+            person_blob_pairs.append(blob_trace)
         if trace_enabled and len(body_center_pairs) < 12:
             body_center_pairs.append(
                 {
@@ -899,6 +1882,39 @@ def detect_targets(
             )
 
     candidate_pool = refined_candidate_pool or coarse_candidate_pool
+    if blob_center_refinement_enabled:
+        candidate_pool, blob_center_trace = _refine_blob_centers_from_candidates(
+            candidate_pool,
+            runtime_config,
+            detection_region,
+            rai_cube=rai_cube,
+            body_center_patch_bands=body_center_patch_bands,
+            enabled=True,
+            max_blobs=int(detection_region.max_targets),
+            max_candidates=blob_center_max_candidates,
+            min_points=blob_center_min_points,
+            min_score_ratio=blob_center_min_score_ratio,
+            cluster_radius_m=blob_center_cluster_radius_m,
+            cluster_radius_range_scale=blob_center_cluster_radius_range_scale,
+            cluster_radius_bands=blob_center_cluster_radius_bands,
+            doppler_radius_bins=blob_center_doppler_radius_bins,
+            center_method=blob_center_method,
+            trim_radius_m=blob_center_trim_radius_m,
+            floor_quantile=blob_center_floor_quantile,
+            peak_blend=blob_center_peak_blend,
+            single_min_score_ratio=blob_center_single_min_score_ratio,
+            single_range_window_m=blob_center_single_range_window_m,
+            single_side_deadband_m=blob_center_single_side_deadband_m,
+            cube_range_radius_m=blob_center_cube_range_radius_m,
+            cube_angle_radius_deg=blob_center_cube_angle_radius_deg,
+            cube_relative_floor=blob_center_cube_relative_floor,
+        )
+    else:
+        blob_center_trace = {
+            "enabled": False,
+            "input_count": int(len(candidate_pool)),
+            "output_count": int(len(candidate_pool)),
+        }
     if trace_enabled:
         trace["body_center_refinement"] = {
             "enabled": bool(enable_body_center_refinement),
@@ -907,6 +1923,17 @@ def detect_targets(
             "fallback_to_coarse": bool(not refined_candidate_pool),
             "pairs": body_center_pairs,
         }
+        trace["person_blob_refinement"] = {
+            "enabled": bool(person_blob_refinement_enabled),
+            "used_count": int(len(person_blob_pairs)),
+            "doppler_radius_bins": int(person_blob_doppler_radius_bins),
+            "min_points": int(person_blob_min_points),
+            "floor_quantile": round(float(person_blob_floor_quantile), 4),
+            "center_method": str(person_blob_center_method),
+            "peak_blend": round(float(person_blob_peak_blend), 4),
+            "pairs": person_blob_pairs,
+        }
+        trace["blob_center_refinement"] = blob_center_trace
         pre_merge_final = list(candidate_pool)
     if enable_candidate_merge:
         candidate_pool = _merge_candidate_pool(
@@ -999,6 +2026,29 @@ def detect_targets(
     if not clustered_detections:
         if trace_enabled:
             trace["early_exit"] = "duplicate_suppression_empty"
+        return []
+    pre_score_filter = list(clustered_detections)
+    min_output_score = max(0.0, float(min_output_score))
+    if min_output_score > 0.0:
+        clustered_detections = [
+            candidate for candidate in clustered_detections
+            if float(candidate.score) >= min_output_score
+        ]
+    if trace_enabled:
+        trace["output_score_filter"] = {
+            "enabled": bool(min_output_score > 0.0),
+            "min_output_score": round(float(min_output_score), 4),
+            "before_count": int(len(pre_score_filter)),
+            "after_count": int(len(clustered_detections)),
+            "dropped_count": int(len(pre_score_filter) - len(clustered_detections)),
+            "dropped": _trace_candidates([
+                candidate for candidate in pre_score_filter
+                if candidate not in clustered_detections
+            ][:12]),
+        }
+    if not clustered_detections:
+        if trace_enabled:
+            trace["early_exit"] = "output_score_filter_empty"
         return []
     output_limit = int(detection_region.max_targets)
     if limit_output_to_object_count and estimated_object_count > 0:

@@ -95,6 +95,8 @@ TRACK_PROCESS_VAR = float(TUNING['tracking']['process_var'])
 TRACK_MEASUREMENT_VAR = float(TUNING['tracking']['measurement_var'])
 TRACK_RANGE_MEASUREMENT_SCALE = float(TUNING['tracking']['range_measurement_scale'])
 TRACK_CONFIDENCE_MEASUREMENT_SCALE = float(TUNING['tracking']['confidence_measurement_scale'])
+TRACK_LATERAL_MEASUREMENT_SCALE = float(TUNING['tracking'].get('lateral_measurement_scale', 1.0))
+TRACK_FORWARD_MEASUREMENT_SCALE = float(TUNING['tracking'].get('forward_measurement_scale', 1.0))
 TRACK_ASSOCIATION_GATE = float(TUNING['tracking']['association_gate'])
 TRACK_DOPPLER_ZERO_GUARD_BINS = int(TUNING['tracking']['doppler_zero_guard_bins'])
 TRACK_DOPPLER_GATE_BINS = int(TUNING['tracking']['doppler_gate_bins'])
@@ -114,6 +116,42 @@ TRACK_LATERAL_DEADBAND_M = float(TUNING['tracking']['lateral_deadband_m'])
 TRACK_LATERAL_DEADBAND_RANGE_SCALE = float(TUNING['tracking']['lateral_deadband_range_scale'])
 TRACK_LATERAL_SMOOTHING_ALPHA = float(TUNING['tracking']['lateral_smoothing_alpha'])
 TRACK_LATERAL_VELOCITY_DAMPING = float(TUNING['tracking']['lateral_velocity_damping'])
+TRACK_LATERAL_RANGE_DAMPING_ENABLED = bool(TUNING['tracking'].get('lateral_range_damping_enabled', False))
+TRACK_LATERAL_RANGE_DAMPING_START_M = float(TUNING['tracking'].get('lateral_range_damping_start_m', 1.4))
+TRACK_LATERAL_RANGE_DAMPING_FULL_M = float(TUNING['tracking'].get('lateral_range_damping_full_m', 3.8))
+TRACK_LATERAL_RANGE_DAMPING_MIN_ALPHA = float(TUNING['tracking'].get('lateral_range_damping_min_alpha', 0.18))
+TRACK_LINE_PROJECTION_ENABLED = bool(
+    TUNING['tracking'].get(
+        'line_projection_enabled',
+        TUNING['tracking'].get('track_line_projection_enabled', False),
+    )
+)
+TRACK_LINE_PROJECTION_MIN_POINTS = int(
+    TUNING['tracking'].get(
+        'line_projection_min_points',
+        TUNING['tracking'].get('track_line_projection_min_points', 18),
+    )
+)
+TRACK_LINE_PROJECTION_HISTORY_FRAMES = int(
+    TUNING['tracking'].get(
+        'line_projection_history_frames',
+        TUNING['tracking'].get('track_line_projection_history_frames', 90),
+    )
+)
+TRACK_LINE_PROJECTION_BLEND = float(
+    TUNING['tracking'].get(
+        'line_projection_blend',
+        TUNING['tracking'].get('track_line_projection_blend', 0.35),
+    )
+)
+TRACK_LINE_PROJECTION_MAX_SHIFT_M = float(
+    TUNING['tracking'].get(
+        'line_projection_max_shift_m',
+        TUNING['tracking'].get('track_line_projection_max_shift_m', 0.16),
+    )
+)
+TRACK_FORWARD_SMOOTHING_ALPHA = float(TUNING['tracking'].get('forward_smoothing_alpha', 1.0))
+TRACK_FORWARD_VELOCITY_DAMPING = float(TUNING['tracking'].get('forward_velocity_damping', 1.0))
 TRACK_LOCAL_REMEASUREMENT_ENABLED = bool(TUNING['tracking'].get('local_remeasurement_enabled', False))
 TRACK_LOCAL_REMEASUREMENT_BLEND = float(TUNING['tracking'].get('local_remeasurement_blend', 0.0))
 TRACK_LOCAL_REMEASUREMENT_MAX_SHIFT_M = float(TUNING['tracking'].get('local_remeasurement_max_shift_m', 0.0))
@@ -125,6 +163,12 @@ TRACK_MEASUREMENT_SOFT_GATE_START_M = float(TUNING['tracking'].get('measurement_
 TRACK_MEASUREMENT_SOFT_GATE_FULL_M = float(TUNING['tracking'].get('measurement_soft_gate_full_m', 0.52))
 TRACK_MEASUREMENT_SOFT_GATE_RANGE_SCALE = float(TUNING['tracking'].get('measurement_soft_gate_range_scale', 0.05))
 TRACK_MEASUREMENT_SOFT_GATE_SPEED_SCALE = float(TUNING['tracking'].get('measurement_soft_gate_speed_scale', 0.06))
+TRACK_MOTION_DIRECTION_GATE_ENABLED = bool(TUNING['tracking'].get('motion_direction_gate_enabled', False))
+TRACK_MOTION_DIRECTION_MIN_SPEED_M_S = float(TUNING['tracking'].get('motion_direction_min_speed_m_s', 0.18))
+TRACK_MOTION_DIRECTION_MIN_DISPLACEMENT_M = float(TUNING['tracking'].get('motion_direction_min_displacement_m', 0.35))
+TRACK_MOTION_DIRECTION_MAX_ANGLE_DEG = float(TUNING['tracking'].get('motion_direction_max_angle_deg', 105.0))
+TRACK_MOTION_DIRECTION_MAX_CROSS_M = float(TUNING['tracking'].get('motion_direction_max_cross_m', 0.75))
+TRACK_MOTION_DIRECTION_CROSS_RANGE_SCALE = float(TUNING['tracking'].get('motion_direction_cross_range_scale', 0.04))
 TRACK_MAX_OBJECT_COUNT = int(TUNING['tracking'].get('max_object_count', 3))
 TRACK_EXPECTED_OBJECT_COUNT = TUNING['tracking'].get('expected_object_count')
 TRACK_CROSSING_HOLD_FRAMES = int(TUNING['tracking'].get('crossing_hold_frames', 8))
@@ -152,6 +196,9 @@ DETECTION_TUNING = {
     'angle_centroid_radius_bands': list(DETECTION_ALGORITHM.get('angle_centroid_radius_bands', [])),
     'body_center_patch_bands': list(DETECTION_ALGORITHM.get('body_center_patch_bands', [])),
     'candidate_merge_bands': list(DETECTION_ALGORITHM.get('candidate_merge_bands', [])),
+    'enable_body_center_refinement': bool(DETECTION_ALGORITHM.get('enable_body_center_refinement', True)),
+    'enable_candidate_merge': bool(DETECTION_ALGORITHM.get('enable_candidate_merge', True)),
+    'enable_dbscan': bool(DETECTION_ALGORITHM.get('enable_dbscan', True)),
     'duplicate_suppression_enabled': bool(DETECTION_ALGORITHM.get('duplicate_suppression_enabled', True)),
     'duplicate_suppression_radius_m': float(DETECTION_ALGORITHM.get('duplicate_suppression_radius_m', 0.55)),
     'duplicate_suppression_range_scale': float(DETECTION_ALGORITHM.get('duplicate_suppression_range_scale', 0.03)),
@@ -164,6 +211,31 @@ DETECTION_TUNING = {
     'object_count_min_score_ratio': float(DETECTION_ALGORITHM.get('object_count_min_score_ratio', 0.05)),
     'protect_multi_object_candidates': bool(DETECTION_ALGORITHM.get('protect_multi_object_candidates', False)),
     'limit_output_to_object_count': bool(DETECTION_ALGORITHM.get('limit_output_to_object_count', False)),
+    'min_output_score': float(DETECTION_ALGORITHM.get('min_output_score', 0.0)),
+    'person_blob_refinement_enabled': bool(DETECTION_ALGORITHM.get('person_blob_refinement_enabled', False)),
+    'person_blob_doppler_radius_bins': int(DETECTION_ALGORITHM.get('person_blob_doppler_radius_bins', 2)),
+    'person_blob_min_points': int(DETECTION_ALGORITHM.get('person_blob_min_points', 4)),
+    'person_blob_floor_quantile': float(DETECTION_ALGORITHM.get('person_blob_floor_quantile', 0.65)),
+    'person_blob_center_method': str(DETECTION_ALGORITHM.get('person_blob_center_method', 'weighted_median')),
+    'person_blob_peak_blend': float(DETECTION_ALGORITHM.get('person_blob_peak_blend', 0.10)),
+    'blob_center_refinement_enabled': bool(DETECTION_ALGORITHM.get('blob_center_refinement_enabled', False)),
+    'blob_center_max_candidates': int(DETECTION_ALGORITHM.get('blob_center_max_candidates', 36)),
+    'blob_center_min_points': int(DETECTION_ALGORITHM.get('blob_center_min_points', 2)),
+    'blob_center_min_score_ratio': float(DETECTION_ALGORITHM.get('blob_center_min_score_ratio', 0.04)),
+    'blob_center_cluster_radius_m': float(DETECTION_ALGORITHM.get('blob_center_cluster_radius_m', 0.65)),
+    'blob_center_cluster_radius_range_scale': float(DETECTION_ALGORITHM.get('blob_center_cluster_radius_range_scale', 0.04)),
+    'blob_center_cluster_radius_bands': list(DETECTION_ALGORITHM.get('blob_center_cluster_radius_bands', [])),
+    'blob_center_doppler_radius_bins': int(DETECTION_ALGORITHM.get('blob_center_doppler_radius_bins', 10)),
+    'blob_center_method': str(DETECTION_ALGORITHM.get('blob_center_method', 'weighted_median')),
+    'blob_center_trim_radius_m': float(DETECTION_ALGORITHM.get('blob_center_trim_radius_m', 0.85)),
+    'blob_center_floor_quantile': float(DETECTION_ALGORITHM.get('blob_center_floor_quantile', 0.65)),
+    'blob_center_peak_blend': float(DETECTION_ALGORITHM.get('blob_center_peak_blend', 0.0)),
+    'blob_center_single_min_score_ratio': float(DETECTION_ALGORITHM.get('blob_center_single_min_score_ratio', 0.12)),
+    'blob_center_single_range_window_m': float(DETECTION_ALGORITHM.get('blob_center_single_range_window_m', 1.05)),
+    'blob_center_single_side_deadband_m': float(DETECTION_ALGORITHM.get('blob_center_single_side_deadband_m', 0.15)),
+    'blob_center_cube_range_radius_m': DETECTION_ALGORITHM.get('blob_center_cube_range_radius_m', None),
+    'blob_center_cube_angle_radius_deg': DETECTION_ALGORITHM.get('blob_center_cube_angle_radius_deg', None),
+    'blob_center_cube_relative_floor': DETECTION_ALGORITHM.get('blob_center_cube_relative_floor', None),
 }
 LOG_ROOT = PROJECT_ROOT / 'logs' / 'live_motion_viewer'
 SPATIAL_VIEW_HEIGHT = int(STATIC['spatial_view']['height'])
@@ -173,6 +245,8 @@ SPATIAL_POINT_CONFIDENCE_SCALE_M = float(STATIC['spatial_view']['point_confidenc
 SHOW_TENTATIVE_TRACKS = bool(TUNING['visualization']['show_tentative_tracks'])
 TENTATIVE_MIN_CONFIDENCE = float(TUNING['visualization']['tentative_min_confidence'])
 TENTATIVE_MIN_HITS = int(TUNING['visualization']['tentative_min_hits'])
+TENTATIVE_REQUIRES_MULTI_EVIDENCE = bool(TUNING['visualization'].get('tentative_requires_multi_evidence', True))
+TENTATIVE_MULTI_EVIDENCE_MIN_TRACKER_INPUTS = int(TUNING['visualization'].get('tentative_multi_evidence_min_tracker_inputs', 2))
 DISPLAY_HYSTERESIS_FRAMES = int(TUNING['visualization'].get('display_hysteresis_frames', 0))
 DISPLAY_HYSTERESIS_CONFIDENCE_FLOOR = float(TUNING['visualization'].get('display_hysteresis_confidence_floor', 0.0))
 DISPLAY_PRIMARY_BONUS_FRAMES = int(TUNING['visualization'].get('display_primary_bonus_frames', 0))
@@ -377,6 +451,8 @@ class MotionViewer:
             'track_measurement_var': TRACK_MEASUREMENT_VAR,
             'track_range_measurement_scale': TRACK_RANGE_MEASUREMENT_SCALE,
             'track_confidence_measurement_scale': TRACK_CONFIDENCE_MEASUREMENT_SCALE,
+            'track_lateral_measurement_scale': TRACK_LATERAL_MEASUREMENT_SCALE,
+            'track_forward_measurement_scale': TRACK_FORWARD_MEASUREMENT_SCALE,
             'track_angle_resolution_deg': round(float(np.degrees(self.track_angle_resolution_rad)), 3),
             'track_association_gate': TRACK_ASSOCIATION_GATE,
             'track_doppler_zero_guard_bins': TRACK_DOPPLER_ZERO_GUARD_BINS,
@@ -394,6 +470,17 @@ class MotionViewer:
             'track_lateral_deadband_range_scale': TRACK_LATERAL_DEADBAND_RANGE_SCALE,
             'track_lateral_smoothing_alpha': TRACK_LATERAL_SMOOTHING_ALPHA,
             'track_lateral_velocity_damping': TRACK_LATERAL_VELOCITY_DAMPING,
+            'track_lateral_range_damping_enabled': TRACK_LATERAL_RANGE_DAMPING_ENABLED,
+            'track_lateral_range_damping_start_m': TRACK_LATERAL_RANGE_DAMPING_START_M,
+            'track_lateral_range_damping_full_m': TRACK_LATERAL_RANGE_DAMPING_FULL_M,
+            'track_lateral_range_damping_min_alpha': TRACK_LATERAL_RANGE_DAMPING_MIN_ALPHA,
+            'track_line_projection_enabled': TRACK_LINE_PROJECTION_ENABLED,
+            'track_line_projection_min_points': TRACK_LINE_PROJECTION_MIN_POINTS,
+            'track_line_projection_history_frames': TRACK_LINE_PROJECTION_HISTORY_FRAMES,
+            'track_line_projection_blend': TRACK_LINE_PROJECTION_BLEND,
+            'track_line_projection_max_shift_m': TRACK_LINE_PROJECTION_MAX_SHIFT_M,
+            'track_forward_smoothing_alpha': TRACK_FORWARD_SMOOTHING_ALPHA,
+            'track_forward_velocity_damping': TRACK_FORWARD_VELOCITY_DAMPING,
             'track_local_remeasurement_enabled': TRACK_LOCAL_REMEASUREMENT_ENABLED,
             'track_local_remeasurement_blend': TRACK_LOCAL_REMEASUREMENT_BLEND,
             'track_local_remeasurement_max_shift_m': TRACK_LOCAL_REMEASUREMENT_MAX_SHIFT_M,
@@ -405,6 +492,12 @@ class MotionViewer:
             'track_measurement_soft_gate_full_m': TRACK_MEASUREMENT_SOFT_GATE_FULL_M,
             'track_measurement_soft_gate_range_scale': TRACK_MEASUREMENT_SOFT_GATE_RANGE_SCALE,
             'track_measurement_soft_gate_speed_scale': TRACK_MEASUREMENT_SOFT_GATE_SPEED_SCALE,
+            'track_motion_direction_gate_enabled': TRACK_MOTION_DIRECTION_GATE_ENABLED,
+            'track_motion_direction_min_speed_m_s': TRACK_MOTION_DIRECTION_MIN_SPEED_M_S,
+            'track_motion_direction_min_displacement_m': TRACK_MOTION_DIRECTION_MIN_DISPLACEMENT_M,
+            'track_motion_direction_max_angle_deg': TRACK_MOTION_DIRECTION_MAX_ANGLE_DEG,
+            'track_motion_direction_max_cross_m': TRACK_MOTION_DIRECTION_MAX_CROSS_M,
+            'track_motion_direction_cross_range_scale': TRACK_MOTION_DIRECTION_CROSS_RANGE_SCALE,
             'track_max_object_count': TRACK_MAX_OBJECT_COUNT,
             'track_expected_object_count': TRACK_EXPECTED_OBJECT_COUNT,
             'track_crossing_hold_frames': TRACK_CROSSING_HOLD_FRAMES,
@@ -416,6 +509,8 @@ class MotionViewer:
             'show_tentative_tracks': SHOW_TENTATIVE_TRACKS,
             'tentative_min_confidence': TENTATIVE_MIN_CONFIDENCE,
             'tentative_min_hits': TENTATIVE_MIN_HITS,
+            'tentative_requires_multi_evidence': TENTATIVE_REQUIRES_MULTI_EVIDENCE,
+            'tentative_multi_evidence_min_tracker_inputs': TENTATIVE_MULTI_EVIDENCE_MIN_TRACKER_INPUTS,
             'display_hysteresis_frames': DISPLAY_HYSTERESIS_FRAMES,
             'display_hysteresis_confidence_floor': DISPLAY_HYSTERESIS_CONFIDENCE_FLOOR,
             'display_primary_bonus_frames': DISPLAY_PRIMARY_BONUS_FRAMES,
@@ -459,6 +554,8 @@ class MotionViewer:
             measurement_var=TRACK_MEASUREMENT_VAR,
             range_measurement_scale=TRACK_RANGE_MEASUREMENT_SCALE,
             confidence_measurement_scale=TRACK_CONFIDENCE_MEASUREMENT_SCALE,
+            lateral_measurement_scale=TRACK_LATERAL_MEASUREMENT_SCALE,
+            forward_measurement_scale=TRACK_FORWARD_MEASUREMENT_SCALE,
             angle_resolution_rad=self.track_angle_resolution_rad,
             association_gate=TRACK_ASSOCIATION_GATE,
             doppler_center_bin=self.runtime_config.doppler_fft_size // 2,
@@ -482,6 +579,17 @@ class MotionViewer:
             lateral_deadband_range_scale=TRACK_LATERAL_DEADBAND_RANGE_SCALE,
             lateral_smoothing_alpha=TRACK_LATERAL_SMOOTHING_ALPHA,
             lateral_velocity_damping=TRACK_LATERAL_VELOCITY_DAMPING,
+            lateral_range_damping_enabled=TRACK_LATERAL_RANGE_DAMPING_ENABLED,
+            lateral_range_damping_start_m=TRACK_LATERAL_RANGE_DAMPING_START_M,
+            lateral_range_damping_full_m=TRACK_LATERAL_RANGE_DAMPING_FULL_M,
+            lateral_range_damping_min_alpha=TRACK_LATERAL_RANGE_DAMPING_MIN_ALPHA,
+            track_line_projection_enabled=TRACK_LINE_PROJECTION_ENABLED,
+            track_line_projection_min_points=TRACK_LINE_PROJECTION_MIN_POINTS,
+            track_line_projection_history_frames=TRACK_LINE_PROJECTION_HISTORY_FRAMES,
+            track_line_projection_blend=TRACK_LINE_PROJECTION_BLEND,
+            track_line_projection_max_shift_m=TRACK_LINE_PROJECTION_MAX_SHIFT_M,
+            forward_smoothing_alpha=TRACK_FORWARD_SMOOTHING_ALPHA,
+            forward_velocity_damping=TRACK_FORWARD_VELOCITY_DAMPING,
             local_remeasurement_enabled=TRACK_LOCAL_REMEASUREMENT_ENABLED,
             local_remeasurement_blend=TRACK_LOCAL_REMEASUREMENT_BLEND,
             local_remeasurement_max_shift_m=TRACK_LOCAL_REMEASUREMENT_MAX_SHIFT_M,
@@ -493,6 +601,12 @@ class MotionViewer:
             measurement_soft_gate_full_m=TRACK_MEASUREMENT_SOFT_GATE_FULL_M,
             measurement_soft_gate_range_scale=TRACK_MEASUREMENT_SOFT_GATE_RANGE_SCALE,
             measurement_soft_gate_speed_scale=TRACK_MEASUREMENT_SOFT_GATE_SPEED_SCALE,
+            motion_direction_gate_enabled=TRACK_MOTION_DIRECTION_GATE_ENABLED,
+            motion_direction_min_speed_m_s=TRACK_MOTION_DIRECTION_MIN_SPEED_M_S,
+            motion_direction_min_displacement_m=TRACK_MOTION_DIRECTION_MIN_DISPLACEMENT_M,
+            motion_direction_max_angle_deg=TRACK_MOTION_DIRECTION_MAX_ANGLE_DEG,
+            motion_direction_max_cross_m=TRACK_MOTION_DIRECTION_MAX_CROSS_M,
+            motion_direction_cross_range_scale=TRACK_MOTION_DIRECTION_CROSS_RANGE_SCALE,
             max_object_count=TRACK_MAX_OBJECT_COUNT,
             expected_object_count=TRACK_EXPECTED_OBJECT_COUNT,
             crossing_hold_frames=TRACK_CROSSING_HOLD_FRAMES,
@@ -1027,7 +1141,14 @@ class MotionViewer:
             for track in display_tracks
         ]
         tentative_display_tracks = []
-        if SHOW_TENTATIVE_TRACKS:
+        multi_evidence_for_tentative = (
+            tracker_input_count >= TENTATIVE_MULTI_EVIDENCE_MIN_TRACKER_INPUTS
+            or len(display_tracks) >= TENTATIVE_MULTI_EVIDENCE_MIN_TRACKER_INPUTS
+        )
+        allow_tentative_display = SHOW_TENTATIVE_TRACKS and (
+            not TENTATIVE_REQUIRES_MULTI_EVIDENCE or multi_evidence_for_tentative
+        )
+        if allow_tentative_display:
             confirmed_track_ids = {track.track_id for track in display_tracks}
             tentative_display_tracks = [
                 track for track in tentative_tracks
@@ -1071,7 +1192,7 @@ class MotionViewer:
             self.rai_tentative_scatter.setData(tentative_rai_points)
 
         if self.replay_plot is not None:
-            self.update_replay_trajectory_plot(confirmed_tracks, tentative_tracks)
+            self.update_replay_trajectory_plot(confirmed_tracks, tentative_display_tracks)
         else:
             self.spatial_view.update(display_tracks, tentative_display_tracks)
 

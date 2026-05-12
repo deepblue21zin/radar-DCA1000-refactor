@@ -780,6 +780,8 @@ def _stage_cache_mode_options() -> dict[str, str]:
         "baseline": "baseline",
         "doppler_slice_angle": "doppler_slice_angle",
         "rda_candidates": "rda_candidates",
+        "person_blob": "person_blob",
+        "blob_center": "blob_center",
         "person_aware_merge": "person_aware_merge",
         "multi_tracker_relaxed": "multi_tracker_relaxed",
         "no_body_center": "no_body_center",
@@ -796,6 +798,32 @@ def _trace_count(trace: dict, *keys: str) -> int:
         return int(value or 0)
     except Exception:
         return 0
+
+
+def _trace_has_multi_display_evidence(trace: dict) -> bool:
+    evidence_counts = (
+        _trace_count(trace, "detection", "object_count_estimator", "estimated_count"),
+        _trace_count(trace, "tracker_input_filter", "tracker_input_count"),
+        _trace_count(trace, "detection", "candidate_merge_final", "after_count"),
+        _trace_count(trace, "detection", "dbscan", "output_count"),
+    )
+    return max(evidence_counts, default=0) >= 2
+
+
+def _trace_display_points(trace: dict) -> list[dict]:
+    confirmed = _nested_get(trace, "display_output", "confirmed_tracks", default=[]) or []
+    tentative = _nested_get(trace, "display_output", "tentative_tracks", default=[]) or []
+    if _trace_has_multi_display_evidence(trace):
+        return list(confirmed) + list(tentative)
+    return list(confirmed)
+
+
+def _trace_display_count(trace: dict) -> int:
+    confirmed = int(_nested_get(trace, "display_output", "confirmed_count", default=0) or 0)
+    if _trace_has_multi_display_evidence(trace):
+        tentative = int(_nested_get(trace, "display_output", "tentative_count", default=0) or 0)
+        return confirmed + tentative
+    return confirmed
 
 
 def _stage_multitarget_kpis(trace_rows: list[dict], *, expected_max: int = 2) -> dict:
@@ -950,18 +978,28 @@ def _trace_stage_points(trace: dict, stage: str) -> list[dict]:
     if stage == "body_center":
         pairs = _nested_get(detection, "body_center_refinement", "pairs", default=[]) or []
         return [pair.get("after") for pair in pairs if isinstance(pair, dict) and isinstance(pair.get("after"), dict)]
+    if stage == "blob_center":
+        groups = _nested_get(detection, "blob_center_refinement", "groups", default=[]) or []
+        return [
+            group.get("center")
+            for group in groups
+            if isinstance(group, dict) and isinstance(group.get("center"), dict)
+        ]
     if stage == "final_merge":
         return list(_nested_get(detection, "candidate_merge_final", "after_top", default=[]) or [])
     if stage == "dbscan":
+        return list(_nested_get(detection, "dbscan", "output_top", default=[]) or [])
+    if stage == "score_filtered":
+        final_output = _nested_get(detection, "final_output", "top_detections", default=[]) or []
+        if final_output:
+            return list(final_output)
         return list(_nested_get(detection, "dbscan", "output_top", default=[]) or [])
     if stage == "tracker_input":
         return list(tracker.get("measurements") or [])
     if stage == "tracks":
         return list(_nested_get(tracker, "track_lifecycle", "tracks_after_prune", default=[]) or [])
     if stage == "display":
-        confirmed = _nested_get(trace, "display_output", "confirmed_tracks", default=[]) or []
-        tentative = _nested_get(trace, "display_output", "tentative_tracks", default=[]) or []
-        return list(confirmed) + list(tentative)
+        return _trace_display_points(trace)
     return []
 
 
@@ -976,9 +1014,16 @@ def _trace_stage_count(trace: dict, stage: str) -> int:
         return int(_nested_get(detection, "candidate_merge_coarse", "after_count", default=0) or 0)
     if stage == "body_center":
         return int(_nested_get(detection, "body_center_refinement", "refined_count", default=0) or 0)
+    if stage == "blob_center":
+        return int(_nested_get(detection, "blob_center_refinement", "output_count", default=0) or 0)
     if stage == "final_merge":
         return int(_nested_get(detection, "candidate_merge_final", "after_count", default=0) or 0)
     if stage == "dbscan":
+        return int(_nested_get(detection, "dbscan", "output_count", default=0) or 0)
+    if stage == "score_filtered":
+        final_count = _nested_get(detection, "final_output", "output_count", default=None)
+        if final_count is not None:
+            return int(final_count or 0)
         return int(_nested_get(detection, "dbscan", "output_count", default=0) or 0)
     if stage == "tracker_input":
         return int(_nested_get(trace, "tracker_input_filter", "tracker_input_count", default=0) or 0)
@@ -989,9 +1034,7 @@ def _trace_stage_count(trace: dict, stage: str) -> int:
     if stage == "update":
         return int(_nested_get(tracker, "kalman_update", "updated_count", default=0) or 0)
     if stage == "display":
-        confirmed = int(_nested_get(trace, "display_output", "confirmed_count", default=0) or 0)
-        tentative = int(_nested_get(trace, "display_output", "tentative_count", default=0) or 0)
-        return confirmed + tentative
+        return _trace_display_count(trace)
     return 0
 
 
@@ -1113,6 +1156,268 @@ def _track_trajectory_stats(rows: list[dict], total_frames: int) -> dict:
         "y_range_m": f"{float(np.min(ys)):.2f}..{float(np.max(ys)):.2f}",
         "mean_confidence": f"{float(np.mean(confidences)):.3f}" if confidences else "",
     }
+
+
+def _trajectory_by_index(trajectory: list[dict]) -> dict[int, dict]:
+    return {
+        int(row["index"]): row
+        for row in trajectory
+        if row.get("index") is not None
+    }
+
+
+def _stage_count_series(trace_rows: list[dict], stage: str) -> list[tuple[int, int]]:
+    return [(index, _trace_stage_count(trace, stage)) for index, trace in enumerate(trace_rows)]
+
+
+def _aligned_stage_distance_rows(
+    detection_trajectory: list[dict],
+    tracking_trajectory: list[dict],
+) -> list[dict]:
+    detection_by_index = _trajectory_by_index(detection_trajectory)
+    tracking_by_index = _trajectory_by_index(tracking_trajectory)
+    rows = []
+    for index in sorted(set(detection_by_index) & set(tracking_by_index)):
+        detection = detection_by_index[index]
+        tracking = tracking_by_index[index]
+        rows.append(
+            {
+                "index": index,
+                "frame_id": detection.get("frame_id", index),
+                "detection_x_m": detection["x_m"],
+                "detection_y_m": detection["y_m"],
+                "tracking_x_m": tracking["x_m"],
+                "tracking_y_m": tracking["y_m"],
+                "distance_m": float(
+                    np.hypot(
+                        tracking["x_m"] - detection["x_m"],
+                        tracking["y_m"] - detection["y_m"],
+                    )
+                ),
+            }
+        )
+    return rows
+
+
+def _stage_path_length(trajectory: list[dict]) -> float:
+    if len(trajectory) < 2:
+        return 0.0
+    return float(
+        np.sum(
+            [
+                np.hypot(after["x_m"] - before["x_m"], after["y_m"] - before["y_m"])
+                for before, after in zip(trajectory, trajectory[1:])
+            ]
+        )
+    )
+
+
+def _render_detection_tracking_comparison(trace_rows: list[dict]) -> None:
+    st.markdown("### Detection vs Tracking")
+    st.caption(
+        "detection 대표점과 tracker/display 대표점을 같은 프레임 기준으로 겹쳐서 봅니다. "
+        "tracker path가 detection path보다 짧거나 카운트가 줄면 tracking이 보수적으로 동작한 것입니다."
+    )
+
+    detection_options = {
+        "Score-filtered output": ("score_filtered", "#0b7285"),
+        "Blob-centered candidates": ("blob_center", "#8d63c7"),
+        "DBSCAN output before score filter": ("dbscan", "#0e8a7e"),
+        "Tracker input": ("tracker_input", "#6155b8"),
+        "Legacy body-center patch": ("body_center", "#c05d9f"),
+        "Merged candidates": ("final_merge", "#5176b8"),
+        "Raw angle candidates": ("angle", "#2d8f7a"),
+    }
+    tracking_options = {
+        "Display output": ("display", "#1b7a4c"),
+        "Tracker state": ("tracks", "#172232"),
+    }
+    control_cols = st.columns(2)
+    with control_cols[0]:
+        detection_label = st.selectbox(
+            "Detection reference",
+            list(detection_options.keys()),
+            index=0,
+            help="tracking으로 들어가기 전 기준 stage입니다. RDA blob 보정 효과는 Blob-centered candidates와 Score-filtered output을 비교하세요.",
+            key="detection_reference_v2",
+        )
+    with control_cols[1]:
+        tracking_label = st.selectbox(
+            "Tracking output",
+            list(tracking_options.keys()),
+            index=0,
+            help="최종 표시 기준은 Display output, tracker 내부 상태 기준은 Tracker state입니다.",
+            key="tracking_output_v2",
+        )
+
+    detection_stage, detection_color = detection_options[detection_label]
+    tracking_stage, tracking_color = tracking_options[tracking_label]
+    detection_trajectory = _collect_stage_trajectory(trace_rows, detection_stage)
+    tracking_trajectory = _collect_stage_trajectory(trace_rows, tracking_stage)
+    if not detection_trajectory or not tracking_trajectory:
+        st.info("비교할 detection/tracking 대표점 궤적이 부족합니다. Stage Cache를 Force Rebuild로 다시 생성해 주세요.")
+        return
+
+    aligned_rows = _aligned_stage_distance_rows(detection_trajectory, tracking_trajectory)
+    detection_counts = _stage_count_series(trace_rows, detection_stage)
+    tracking_counts = _stage_count_series(trace_rows, tracking_stage)
+    detection_path = _stage_path_length(detection_trajectory)
+    tracking_path = _stage_path_length(tracking_trajectory)
+    detection_count_values = np.asarray([value for _, value in detection_counts], dtype=float)
+    tracking_count_values = np.asarray([value for _, value in tracking_counts], dtype=float)
+    distance_values = np.asarray([row["distance_m"] for row in aligned_rows], dtype=float)
+
+    frames_with_detection = int(np.count_nonzero(detection_count_values > 0))
+    frames_with_tracking = int(np.count_nonzero(tracking_count_values > 0))
+    detection_two_plus = detection_count_values >= 2
+    tracking_two_plus = tracking_count_values >= 2
+    collapse_when_detection_multi = int(np.count_nonzero(detection_two_plus & ~tracking_two_plus))
+    over_tracking = int(np.count_nonzero(tracking_count_values > detection_count_values))
+    motion_ratio = tracking_path / detection_path if detection_path > 1e-6 else 0.0
+    count_ratio = (
+        float(np.mean(tracking_count_values)) / float(np.mean(detection_count_values))
+        if float(np.mean(detection_count_values)) > 1e-6
+        else 0.0
+    )
+
+    metric_cols = st.columns(6)
+    metric_cols[0].metric("aligned frames", f"{len(aligned_rows)}")
+    metric_cols[1].metric("track/detect path", f"{motion_ratio:.2f}")
+    metric_cols[2].metric("mean count ratio", f"{count_ratio:.2f}")
+    metric_cols[3].metric("detected frames", f"{frames_with_detection}")
+    metric_cols[4].metric("tracked frames", f"{frames_with_tracking}")
+    metric_cols[5].metric("multi -> single", f"{collapse_when_detection_multi}")
+
+    kpi_rows = [
+        {
+            "metric": "detection_path_m",
+            "value": round(detection_path, 3),
+            "meaning": "선택한 detection 대표점이 움직인 총 거리",
+        },
+        {
+            "metric": "tracking_path_m",
+            "value": round(tracking_path, 3),
+            "meaning": "선택한 tracking 대표점이 움직인 총 거리",
+        },
+        {
+            "metric": "tracking_motion_ratio",
+            "value": round(motion_ratio, 3),
+            "meaning": "1보다 작을수록 tracker가 detection보다 덜 움직임",
+        },
+        {
+            "metric": "aligned_median_distance_m",
+            "value": round(float(np.median(distance_values)), 3) if len(distance_values) else "",
+            "meaning": "같은 프레임에서 detection과 tracking 대표점의 중앙 거리",
+        },
+        {
+            "metric": "aligned_p95_distance_m",
+            "value": round(float(np.quantile(distance_values, 0.95)), 3) if len(distance_values) else "",
+            "meaning": "같은 프레임에서 detection/tracking 차이가 큰 구간",
+        },
+        {
+            "metric": "multi_detection_collapsed_frames",
+            "value": collapse_when_detection_multi,
+            "meaning": "detection은 2개 이상인데 tracking은 1개 이하인 프레임",
+        },
+        {
+            "metric": "tracking_over_detection_frames",
+            "value": over_tracking,
+            "meaning": "tracking/display가 detection보다 더 많은 객체를 낸 프레임",
+        },
+    ]
+    _render_table(kpi_rows, key="detection-tracking-conservatism-kpis", height=250)
+
+    all_points = detection_trajectory + tracking_trajectory
+    xs = np.asarray([point["x_m"] for point in all_points], dtype=float)
+    ys = np.asarray([point["y_m"] for point in all_points], dtype=float)
+    x_abs = max(float(np.max(np.abs(xs))) + 0.15, 0.6)
+    y_max = max(float(np.max(ys)) + 0.25, 3.0)
+    fig, plt = _make_figure(width=13.2, height=7.4)
+    axes = fig.subplots(2, 2, squeeze=False)
+    fig.suptitle(
+        "Detection vs Tracking Conservatism",
+        x=0.01,
+        ha="left",
+        fontsize=13,
+        fontweight="bold",
+        color="#163044",
+    )
+
+    ax_xy = axes[0][0]
+    for label, color, trajectory in [
+        (detection_label, detection_color, detection_trajectory),
+        (tracking_label, tracking_color, tracking_trajectory),
+    ]:
+        tx = [point["x_m"] for point in trajectory]
+        ty = [point["y_m"] for point in trajectory]
+        ax_xy.plot(tx, ty, color=color, linewidth=2.0, marker="o", markersize=2.2, label=label)
+        ax_xy.scatter([tx[0]], [ty[0]], s=42, color=color, edgecolors="white", linewidth=0.8, zorder=5)
+        ax_xy.scatter([tx[-1]], [ty[-1]], s=54, color=color, edgecolors="#172232", linewidth=1.0, zorder=5)
+    ax_xy.scatter([0.0], [0.0], s=52, color="#172232", marker="s", zorder=6)
+    ax_xy.set_title("XY overlay")
+    ax_xy.set_xlim(-x_abs * 1.08, x_abs * 1.08)
+    ax_xy.set_ylim(0.0, y_max * 1.06)
+    ax_xy.set_xlabel("x (m)")
+    ax_xy.set_ylabel("y (m)")
+    ax_xy.legend(loc="best", frameon=False, fontsize=8)
+
+    ax_x = axes[0][1]
+    ax_y = axes[1][0]
+    for axis, coord, title in [(ax_x, "x_m", "x over frame"), (ax_y, "y_m", "y over frame")]:
+        axis.plot(
+            [point["index"] for point in detection_trajectory],
+            [point[coord] for point in detection_trajectory],
+            color=detection_color,
+            linewidth=1.8,
+            label=detection_label,
+        )
+        axis.plot(
+            [point["index"] for point in tracking_trajectory],
+            [point[coord] for point in tracking_trajectory],
+            color=tracking_color,
+            linewidth=1.8,
+            label=tracking_label,
+        )
+        axis.set_title(title)
+        axis.set_xlabel("frame ordinal")
+        axis.set_ylabel(coord.replace("_m", " (m)"))
+        axis.legend(loc="best", frameon=False, fontsize=8)
+
+    ax_count = axes[1][1]
+    ax_count.step(
+        [index for index, _ in detection_counts],
+        [value for _, value in detection_counts],
+        where="post",
+        color=detection_color,
+        linewidth=1.8,
+        label=detection_label,
+    )
+    ax_count.step(
+        [index for index, _ in tracking_counts],
+        [value for _, value in tracking_counts],
+        where="post",
+        color=tracking_color,
+        linewidth=1.8,
+        label=tracking_label,
+    )
+    ax_count.set_title("object count over frame")
+    ax_count.set_xlabel("frame ordinal")
+    ax_count.set_ylabel("count")
+    ax_count.legend(loc="best", frameon=False, fontsize=8)
+
+    for axis in axes.ravel():
+        axis.grid(True, color="#e5edf2", linewidth=0.8)
+        axis.set_facecolor("#fbfdfe")
+        axis.spines[["top", "right"]].set_visible(False)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    _render_matplotlib_figure(
+        fig,
+        caption=(
+            "왼쪽 위는 detection과 tracking 대표점의 XY 궤적입니다. "
+            "오른쪽/아래 그래프는 같은 시간축에서 x, y, 객체 수가 어디서 줄거나 늦는지 보여 줍니다."
+        ),
+    )
 
 
 def _render_sequence_trajectory_overlay_svg_legacy(trace_rows: list[dict], selected_stages: list[tuple[str, str, str]]) -> None:
@@ -1260,25 +1565,33 @@ def _render_stage_sequence_overview(trace_rows: list[dict]) -> None:
         return
 
     stage_options = [
-        ("angle", "Angle candidates", "#2d8f7a"),
-        ("body_center", "Body-center refined", "#c05d9f"),
+        ("angle", "Raw angle candidates", "#2d8f7a"),
+        ("body_center", "Legacy body-center patch", "#c05d9f"),
+        ("blob_center", "Blob-centered candidates", "#8d63c7"),
         ("final_merge", "Merged candidates", "#5176b8"),
-        ("dbscan", "DBSCAN output", "#0e8a7e"),
+        ("dbscan", "DBSCAN before score filter", "#0e8a7e"),
+        ("score_filtered", "Score-filtered output", "#0b7285"),
         ("tracker_input", "Tracker input", "#6155b8"),
         ("tracks", "Tracker state", "#172232"),
         ("display", "Display output", "#1b7a4c"),
     ]
     label_to_stage = {label: (stage, label, color) for stage, label, color in stage_options}
-    default_labels = ["Angle candidates", "Body-center refined", "DBSCAN output", "Tracker state", "Display output"]
+    default_labels = ["Raw angle candidates", "Blob-centered candidates", "Score-filtered output", "Tracker state", "Display output"]
     selected_labels = st.multiselect(
         "Trajectory Stages",
         list(label_to_stage.keys()),
         default=[label for label in default_labels if label in label_to_stage],
-        help="전체 움직임을 처리 단계별 궤적으로 비교합니다. 핵심은 DBSCAN까지 괜찮은지, Tracker/Display에서 깨지는지 보는 것입니다.",
+        help=(
+            "전체 움직임을 처리 단계별 궤적으로 비교합니다. "
+            "Raw angle은 보정 전 후보, Blob-centered는 RDA cube patch 기반 보정 후보입니다. "
+            "실제 반영 여부는 Score-filtered output과 Tracker input을 같이 보세요."
+        ),
+        key="stage_trajectory_stages_v2",
     )
-    selected_stages = [label_to_stage[label] for label in selected_labels] or [label_to_stage["DBSCAN output"]]
+    selected_stages = [label_to_stage[label] for label in selected_labels] or [label_to_stage["Score-filtered output"]]
 
     _render_multi_track_trajectory_overlay(trace_rows)
+    _render_detection_tracking_comparison(trace_rows)
     _render_sequence_trajectory_overlay(trace_rows, selected_stages)
     _render_sequence_count_timeline(trace_rows, selected_stages)
 
@@ -1306,13 +1619,23 @@ def _render_stage_sequence_overview(trace_rows: list[dict]) -> None:
 def _render_trace_funnel(trace: dict) -> None:
     detection = trace.get("detection") or {}
     tracker = trace.get("tracker") or {}
+    score_filtered_count = _nested_get(detection, "output_score_filter", "after_count", default=None)
+    if score_filtered_count is None:
+        score_filtered_count = _nested_get(
+            detection,
+            "final_output",
+            "output_count",
+            default=_nested_get(detection, "dbscan", "output_count", default=0),
+        )
     stages = [
         ("CFAR", _nested_get(detection, "cfar", "candidate_count", default=0), "#2869a6"),
         ("Angle", _nested_get(detection, "angle_validation", "passed_count", default=0), "#2d8f7a"),
         ("Coarse Merge", _nested_get(detection, "candidate_merge_coarse", "after_count", default=0), "#d6862c"),
-        ("Body Center", _nested_get(detection, "body_center_refinement", "refined_count", default=0), "#c05d9f"),
+        ("Legacy Body", _nested_get(detection, "body_center_refinement", "refined_count", default=0), "#c05d9f"),
+        ("RDA Blob", _nested_get(detection, "blob_center_refinement", "output_count", default=0), "#8d63c7"),
         ("Final Merge", _nested_get(detection, "candidate_merge_final", "after_count", default=0), "#5176b8"),
         ("DBSCAN", _nested_get(detection, "dbscan", "output_count", default=0), "#0e8a7e"),
+        ("Score Filter", score_filtered_count, "#0b7285"),
         ("Tracker In", _nested_get(trace, "tracker_input_filter", "tracker_input_count", default=0), "#6155b8"),
         ("Matched", _nested_get(tracker, "association", "matched_count", default=0), "#8d63c7"),
         ("Display", _nested_get(trace, "display_output", "confirmed_count", default=0), "#1b7a4c"),
@@ -1345,8 +1668,10 @@ def _render_trace_spatial_view_svg_legacy(trace: dict) -> None:
     stage_specs = [
         ("angle", "Angle", "#2d8f7a", 4.8, 0.45),
         ("body_center", "Body", "#c05d9f", 5.4, 0.72),
+        ("blob_center", "RDA Blob", "#8d63c7", 6.2, 0.88),
         ("final_merge", "Merge", "#5176b8", 5.8, 0.76),
         ("dbscan", "DBSCAN", "#0e8a7e", 7.2, 0.92),
+        ("score_filtered", "Score", "#0b7285", 7.8, 0.94),
         ("tracker_input", "Tracker In", "#6155b8", 8.2, 0.95),
         ("tracks", "Track", "#172232", 9.0, 0.95),
     ]
@@ -1476,6 +1801,7 @@ def _render_trace_flow(trace: dict) -> None:
     cfar_count = _nested_get(trace, "detection", "cfar", "candidate_count", default=0)
     angle_passed = _nested_get(trace, "detection", "angle_validation", "passed_count", default=0)
     body_refined = _nested_get(trace, "detection", "body_center_refinement", "refined_count", default=0)
+    blob_center_count = _nested_get(trace, "detection", "blob_center_refinement", "output_count", default=0)
     merge_after = _nested_get(trace, "detection", "candidate_merge_final", "after_count", default=0)
     dbscan_out = _nested_get(trace, "detection", "dbscan", "output_count", default=0)
     tracker_in = _nested_get(trace, "tracker_input_filter", "tracker_input_count", default=0)
@@ -1496,7 +1822,8 @@ def _render_trace_flow(trace: dict) -> None:
         {"stage": "RAI", "value": _nested_get(trace, "rai", "shape", default="n/a"), "meaning": "range-angle map"},
         {"stage": "CFAR", "value": cfar_count, "meaning": "raw candidates"},
         {"stage": "angle validation", "value": angle_passed, "meaning": "ROI/angle passed"},
-        {"stage": "body center", "value": body_refined, "meaning": "representative points"},
+        {"stage": "legacy body center", "value": body_refined, "meaning": "old patch representative points"},
+        {"stage": "RDA blob center", "value": blob_center_count, "meaning": "connected component blob centers"},
         {"stage": "candidate merge", "value": merge_after, "meaning": "after final merge"},
         {"stage": "DBSCAN", "value": dbscan_out, "meaning": "clusters"},
         {"stage": "tracker input", "value": tracker_in, "meaning": "measurements"},
@@ -1525,7 +1852,8 @@ def _render_trace_flow(trace: dict) -> None:
         {"stage": "RAI", "input": "FFT cube", "output": _nested_get(trace, "rai", "shape", default="n/a"), "meaning": "range-angle energy map"},
         {"stage": "CFAR candidates", "input": "RDI", "output": cfar_count, "meaning": "RDI local peak + CFAR threshold 통과 후보"},
         {"stage": "angle validation", "input": cfar_count, "output": angle_passed, "meaning": "ROI, RAI peak, angle contrast, local peak 검증"},
-        {"stage": "body-center refinement", "input": _nested_get(trace, "detection", "body_center_refinement", "input_count", default=0), "output": body_refined, "meaning": "강한 반사점 근처 patch에서 대표점을 몸 중심 쪽으로 보정"},
+        {"stage": "legacy body-center refinement", "input": _nested_get(trace, "detection", "body_center_refinement", "input_count", default=0), "output": body_refined, "meaning": "기존 강한 반사점 근처 patch 보정"},
+        {"stage": "RDA blob-center refinement", "input": _nested_get(trace, "detection", "blob_center_refinement", "input_count", default=0), "output": blob_center_count, "meaning": "range/angle/doppler cube patch 연결 성분 중심 후보"},
         {"stage": "candidate merge", "input": _nested_get(trace, "detection", "candidate_merge_final", "before_count", default=0), "output": merge_after, "meaning": "거리/도플러 기준으로 가까운 후보 결합"},
         {"stage": "DBSCAN clustering", "input": _nested_get(trace, "detection", "dbscan", "input_count", default=0), "output": dbscan_out, "meaning": "최종 detection cluster 구성"},
         {"stage": "tracker input filter", "input": dbscan_out, "output": tracker_in, "meaning": "invalid frame 정책과 birth block 적용"},
@@ -1859,6 +2187,8 @@ def _render_sequence_trajectory_overlay(trace_rows: list[dict], selected_stages:
         fig,
         caption=(
             "각 패널은 stage별 후보 중 score/confidence가 가장 큰 대표점 1개만 연결합니다. "
+            "Angle/Body/DBSCAN은 score filter 전 후보라서 버려진 ghost가 보일 수 있습니다. "
+            "실제 tracker에 들어가는 결과는 Score-filtered output, Tracker state, Display output으로 확인하세요. "
             "2명 교차 분리 판단은 위의 Multi-object Track Trajectory를 기준으로 보세요."
         ),
     )
@@ -1977,8 +2307,9 @@ def _render_sequence_count_timeline(trace_rows: list[dict], selected_stages: lis
 
 def _render_trace_spatial_view(trace: dict) -> None:
     stage_specs = [
-        ("angle", "Angle", "#2d8f7a"),
-        ("body_center", "Body", "#c05d9f"),
+        ("angle", "Raw Angle", "#2d8f7a"),
+        ("body_center", "Legacy Body", "#c05d9f"),
+        ("blob_center", "RDA Blob", "#8d63c7"),
         ("final_merge", "Merge", "#5176b8"),
         ("dbscan", "DBSCAN", "#0e8a7e"),
         ("tracker_input", "Tracker In", "#6155b8"),
@@ -3875,6 +4206,8 @@ def _stage_page() -> None:
         index=0,
         help=(
             "같은 raw를 어떤 처리 조건으로 다시 돌릴지 고릅니다. "
+            "person_blob은 seed 주변 range-angle-Doppler patch를 robust center로 바꿉니다. "
+            "blob_center는 여러 peak 후보를 사람 덩어리로 묶은 중심을 measurement로 씁니다. "
             "person_aware_merge는 2명 근거가 있을 때 DBSCAN 병합을 막는 후보 모드이고, "
             "multi_tracker_relaxed는 tracker birth/association까지 완화한 후보 모드입니다."
         ),
@@ -3882,6 +4215,8 @@ def _stage_page() -> None:
     selected_ablation_mode = mode_options[selected_ablation_label]
     st.caption(
         "`baseline`: 현재 기본 처리 | `rda_candidates`: Doppler slice 후보 + DBSCAN 끔 | "
+        "`person_blob`: Doppler patch 기반 사람 덩어리 중심화 | "
+        "`blob_center`: 여러 seed 후보 기반 사람 blob 중심화 | "
         "`person_aware_merge`: multi-object 근거 보호 | "
         "`multi_tracker_relaxed`: 후보 보호 + tracker 완화 | "
         "`no_*`: 단계별 끄기 실험"

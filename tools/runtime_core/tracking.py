@@ -1,7 +1,7 @@
 """Lightweight multi-target Kalman tracker for radar cluster centroids."""
 
-from math import atan2, degrees, hypot
-from typing import List, Optional, Tuple
+from math import atan2, cos, degrees, hypot, radians
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -47,6 +47,17 @@ class MultiTargetTracker:
         lateral_deadband_range_scale=0.0,
         lateral_smoothing_alpha=1.0,
         lateral_velocity_damping=1.0,
+        lateral_range_damping_enabled=False,
+        lateral_range_damping_start_m=1.4,
+        lateral_range_damping_full_m=3.8,
+        lateral_range_damping_min_alpha=0.18,
+        track_line_projection_enabled=False,
+        track_line_projection_min_points=18,
+        track_line_projection_history_frames=90,
+        track_line_projection_blend=0.35,
+        track_line_projection_max_shift_m=0.16,
+        forward_smoothing_alpha=1.0,
+        forward_velocity_damping=1.0,
         local_remeasurement_enabled=False,
         local_remeasurement_blend=0.0,
         local_remeasurement_max_shift_m=0.0,
@@ -58,6 +69,12 @@ class MultiTargetTracker:
         measurement_soft_gate_full_m=0.52,
         measurement_soft_gate_range_scale=0.05,
         measurement_soft_gate_speed_scale=0.06,
+        motion_direction_gate_enabled=False,
+        motion_direction_min_speed_m_s=0.18,
+        motion_direction_min_displacement_m=0.35,
+        motion_direction_max_angle_deg=105.0,
+        motion_direction_max_cross_m=0.75,
+        motion_direction_cross_range_scale=0.04,
         max_object_count=0,
         expected_object_count=None,
         crossing_hold_frames=0,
@@ -112,6 +129,26 @@ class MultiTargetTracker:
             raise ValueError("lateral_smoothing_alpha must be in (0, 1].")
         if not (0.0 < lateral_velocity_damping <= 1.0):
             raise ValueError("lateral_velocity_damping must be in (0, 1].")
+        if lateral_range_damping_start_m < 0 or lateral_range_damping_full_m < 0:
+            raise ValueError("lateral range damping distances must be non-negative.")
+        if lateral_range_damping_full_m < lateral_range_damping_start_m:
+            raise ValueError("lateral_range_damping_full_m must be >= lateral_range_damping_start_m.")
+        if not (0.0 < lateral_range_damping_min_alpha <= 1.0):
+            raise ValueError("lateral_range_damping_min_alpha must be in (0, 1].")
+        if track_line_projection_min_points < 2:
+            raise ValueError("track_line_projection_min_points must be at least 2.")
+        if track_line_projection_history_frames < track_line_projection_min_points:
+            raise ValueError(
+                "track_line_projection_history_frames must be >= track_line_projection_min_points."
+            )
+        if not (0.0 <= track_line_projection_blend <= 1.0):
+            raise ValueError("track_line_projection_blend must be in [0, 1].")
+        if track_line_projection_max_shift_m < 0:
+            raise ValueError("track_line_projection_max_shift_m must be non-negative.")
+        if not (0.0 < forward_smoothing_alpha <= 1.0):
+            raise ValueError("forward_smoothing_alpha must be in (0, 1].")
+        if not (0.0 < forward_velocity_damping <= 1.0):
+            raise ValueError("forward_velocity_damping must be in (0, 1].")
         if not (0.0 <= local_remeasurement_blend <= 1.0):
             raise ValueError("local_remeasurement_blend must be in [0, 1].")
         if local_remeasurement_max_shift_m < 0:
@@ -126,6 +163,14 @@ class MultiTargetTracker:
             raise ValueError("measurement_soft_gate_full_m must be >= measurement_soft_gate_start_m.")
         if measurement_soft_gate_range_scale < 0 or measurement_soft_gate_speed_scale < 0:
             raise ValueError("measurement soft gate scales must be non-negative.")
+        if motion_direction_min_speed_m_s < 0:
+            raise ValueError("motion_direction_min_speed_m_s must be non-negative.")
+        if motion_direction_min_displacement_m < 0:
+            raise ValueError("motion_direction_min_displacement_m must be non-negative.")
+        if not (0.0 < motion_direction_max_angle_deg <= 180.0):
+            raise ValueError("motion_direction_max_angle_deg must be in (0, 180].")
+        if motion_direction_max_cross_m < 0 or motion_direction_cross_range_scale < 0:
+            raise ValueError("motion direction cross gate values must be non-negative.")
         if max_object_count < 0:
             raise ValueError("max_object_count must be non-negative.")
         if expected_object_count is not None and int(expected_object_count) < 1:
@@ -166,6 +211,17 @@ class MultiTargetTracker:
         self.lateral_deadband_range_scale = float(lateral_deadband_range_scale)
         self.lateral_smoothing_alpha = float(lateral_smoothing_alpha)
         self.lateral_velocity_damping = float(lateral_velocity_damping)
+        self.lateral_range_damping_enabled = bool(lateral_range_damping_enabled)
+        self.lateral_range_damping_start_m = float(lateral_range_damping_start_m)
+        self.lateral_range_damping_full_m = float(lateral_range_damping_full_m)
+        self.lateral_range_damping_min_alpha = float(lateral_range_damping_min_alpha)
+        self.track_line_projection_enabled = bool(track_line_projection_enabled)
+        self.track_line_projection_min_points = int(track_line_projection_min_points)
+        self.track_line_projection_history_frames = int(track_line_projection_history_frames)
+        self.track_line_projection_blend = float(track_line_projection_blend)
+        self.track_line_projection_max_shift_m = float(track_line_projection_max_shift_m)
+        self.forward_smoothing_alpha = float(forward_smoothing_alpha)
+        self.forward_velocity_damping = float(forward_velocity_damping)
         self.local_remeasurement_enabled = bool(local_remeasurement_enabled)
         self.local_remeasurement_blend = float(local_remeasurement_blend)
         self.local_remeasurement_max_shift_m = float(local_remeasurement_max_shift_m)
@@ -177,6 +233,13 @@ class MultiTargetTracker:
         self.measurement_soft_gate_full_m = float(measurement_soft_gate_full_m)
         self.measurement_soft_gate_range_scale = float(measurement_soft_gate_range_scale)
         self.measurement_soft_gate_speed_scale = float(measurement_soft_gate_speed_scale)
+        self.motion_direction_gate_enabled = bool(motion_direction_gate_enabled)
+        self.motion_direction_min_speed_m_s = float(motion_direction_min_speed_m_s)
+        self.motion_direction_min_displacement_m = float(motion_direction_min_displacement_m)
+        self.motion_direction_max_angle_deg = float(motion_direction_max_angle_deg)
+        self.motion_direction_cos_threshold = float(cos(radians(motion_direction_max_angle_deg)))
+        self.motion_direction_max_cross_m = float(motion_direction_max_cross_m)
+        self.motion_direction_cross_range_scale = float(motion_direction_cross_range_scale)
         self.max_object_count = int(max_object_count)
         self.expected_object_count = (
             None if expected_object_count is None else int(expected_object_count)
@@ -187,6 +250,7 @@ class MultiTargetTracker:
         self._next_track_id = 1
         self._last_frame_ts: Optional[float] = None
         self._primary_track_id: Optional[int] = None
+        self._track_path_history: Dict[int, List[Tuple[float, float]]] = {}
 
     def _active_track_limit(self) -> int:
         if self.expected_object_count is not None:
@@ -563,6 +627,19 @@ class MultiTargetTracker:
         extra = max(float(range_m) - 0.5, 0.0) * self.lateral_deadband_range_scale
         return min(self.lateral_deadband_m + extra, 0.25)
 
+    def _lateral_alpha_for_range(self, range_m: float) -> float:
+        base_alpha = float(self.lateral_smoothing_alpha)
+        if not self.lateral_range_damping_enabled:
+            return base_alpha
+        start_m = float(self.lateral_range_damping_start_m)
+        full_m = float(self.lateral_range_damping_full_m)
+        min_alpha = min(float(self.lateral_range_damping_min_alpha), base_alpha)
+        if full_m <= start_m:
+            return min_alpha if float(range_m) >= start_m else base_alpha
+        t = (float(range_m) - start_m) / (full_m - start_m)
+        t = float(np.clip(t, 0.0, 1.0))
+        return (base_alpha * (1.0 - t)) + (min_alpha * t)
+
     def _stabilize_lateral_state(
         self,
         predicted_x: float,
@@ -575,9 +652,66 @@ class MultiTargetTracker:
         if abs(delta_x) <= deadband:
             stabilized_x = float(predicted_x) + (delta_x * 0.15)
         else:
-            stabilized_x = float(predicted_x) + (delta_x * self.lateral_smoothing_alpha)
+            stabilized_x = float(predicted_x) + (
+                delta_x * self._lateral_alpha_for_range(range_m)
+            )
         stabilized_vx = float(updated_vx) * self.lateral_velocity_damping
         return stabilized_x, stabilized_vx
+
+    def _stabilize_forward_state(
+        self,
+        predicted_y: float,
+        updated_y: float,
+        updated_vy: float,
+    ) -> tuple[float, float]:
+        delta_y = float(updated_y) - float(predicted_y)
+        stabilized_y = float(predicted_y) + (delta_y * self.forward_smoothing_alpha)
+        stabilized_vy = float(updated_vy) * self.forward_velocity_damping
+        return stabilized_y, stabilized_vy
+
+    def _append_track_path_history(self, track_id: int, x_m: float, y_m: float) -> None:
+        history = self._track_path_history.setdefault(int(track_id), [])
+        history.append((float(x_m), float(y_m)))
+        overflow = len(history) - int(self.track_line_projection_history_frames)
+        if overflow > 0:
+            del history[:overflow]
+
+    def _line_project_track_state(
+        self,
+        track_id: int,
+        x_m: float,
+        y_m: float,
+    ) -> tuple[float, float, float]:
+        if not self.track_line_projection_enabled:
+            return float(x_m), float(y_m), 0.0
+        history = self._track_path_history.get(int(track_id), [])
+        if len(history) < self.track_line_projection_min_points:
+            return float(x_m), float(y_m), 0.0
+
+        points = np.asarray(history[-self.track_line_projection_history_frames :], dtype=float)
+        center = np.mean(points, axis=0)
+        centered = points - center
+        cov = centered.T @ centered
+        if not np.all(np.isfinite(cov)):
+            return float(x_m), float(y_m), 0.0
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        major_index = int(np.argmax(eigvals))
+        if float(eigvals[major_index]) <= 1e-6:
+            return float(x_m), float(y_m), 0.0
+        direction = eigvecs[:, major_index]
+        measurement = np.asarray([float(x_m), float(y_m)], dtype=float)
+        projected = center + (np.dot(measurement - center, direction) * direction)
+        shift_vec = projected - measurement
+        shift_m = float(np.linalg.norm(shift_vec))
+        if shift_m <= 1e-9:
+            return float(x_m), float(y_m), 0.0
+
+        requested_shift = shift_m * self.track_line_projection_blend
+        applied_shift = min(requested_shift, self.track_line_projection_max_shift_m)
+        if applied_shift <= 0:
+            return float(x_m), float(y_m), 0.0
+        adjusted = measurement + (shift_vec * (applied_shift / shift_m))
+        return float(adjusted[0]), float(adjusted[1]), float(applied_shift)
 
     def _local_remeasurement_patch_for_range(self, range_m: float) -> tuple[int, int, float]:
         range_radius_bins = 1
@@ -819,6 +953,41 @@ class MultiTargetTracker:
 
         return self.doppler_cost_weight * penalty
 
+    def _motion_direction_reject(self, track: _Track, measurement: dict) -> bool:
+        if not self.motion_direction_gate_enabled:
+            return False
+        if track.state != TrackState.CONFIRMED:
+            return False
+        if track.consecutive_hits < self.min_confirmed_hits:
+            return False
+
+        vx = float(track.kf.x[2][0])
+        vy = float(track.kf.x[3][0])
+        speed_m_s = float(hypot(vx, vy))
+        if speed_m_s < self.motion_direction_min_speed_m_s:
+            return False
+
+        dx = float(measurement["x_m"]) - float(track.kf.x[0][0])
+        dy = float(measurement["y_m"]) - float(track.kf.x[1][0])
+        displacement_m = float(hypot(dx, dy))
+        if displacement_m < self.motion_direction_min_displacement_m:
+            return False
+
+        ux = vx / max(speed_m_s, 1e-6)
+        uy = vy / max(speed_m_s, 1e-6)
+        alignment = ((dx * ux) + (dy * uy)) / max(displacement_m, 1e-6)
+        if alignment < self.motion_direction_cos_threshold:
+            return True
+
+        cross_m = abs((dx * uy) - (dy * ux))
+        range_m = float(measurement.get("range_m", displacement_m))
+        cross_limit_m = (
+            self.motion_direction_max_cross_m
+            + self.motion_direction_cross_range_scale * max(range_m - 0.5, 0.0)
+        )
+        mostly_sideways = alignment < 0.35
+        return bool(mostly_sideways and cross_m > cross_limit_m)
+
     def _mahalanobis_sq(self, track: _Track, measurement: dict) -> float:
         z = np.array([[measurement["x_m"]], [measurement["y_m"]]], dtype=float)
         innovation = z - (track.kf.H @ track.kf.x)
@@ -884,6 +1053,8 @@ class MultiTargetTracker:
             for col, measurement_index in enumerate(measurement_indices):
                 track = self._tracks[track_index]
                 measurement = measurements[measurement_index]
+                if self._motion_direction_reject(track, measurement):
+                    continue
                 cost = self._mahalanobis_sq(
                     track,
                     measurement,
@@ -1130,8 +1301,25 @@ class MultiTargetTracker:
                 updated_vx=float(track.kf.x[2][0]),
                 range_m=measurement["range_m"],
             )
-            track.kf.x[0][0] = stabilized_x
+            stabilized_y, stabilized_vy = self._stabilize_forward_state(
+                predicted_y=predicted_y,
+                updated_y=float(track.kf.x[1][0]),
+                updated_vy=float(track.kf.x[3][0]),
+            )
+            projected_x, projected_y, line_projection_shift_m = self._line_project_track_state(
+                int(track.track_id),
+                stabilized_x,
+                stabilized_y,
+            )
+            track.kf.x[0][0] = projected_x
+            track.kf.x[1][0] = projected_y
             track.kf.x[2][0] = stabilized_vx
+            track.kf.x[3][0] = stabilized_vy
+            self._append_track_path_history(
+                int(track.track_id),
+                float(track.kf.x[0][0]),
+                float(track.kf.x[1][0]),
+            )
             track.hits += 1
             track.consecutive_hits += 1
             track.misses = 0
@@ -1159,6 +1347,7 @@ class MultiTargetTracker:
                         "previous_state": previous_state.name.lower(),
                         "measurement_quality": round(float(measurement_quality), 4),
                         "measurement_residual_m": round(float(measurement_residual_m), 4),
+                        "line_projection_shift_m": round(float(line_projection_shift_m), 4),
                         "updated_track": self._trace_track(track),
                     }
                 )
@@ -1228,6 +1417,11 @@ class MultiTargetTracker:
                     last_measurement_residual_m=0.0,
                 )
                 self._tracks.append(new_track)
+                self._append_track_path_history(
+                    int(new_track.track_id),
+                    float(new_track.kf.x[0][0]),
+                    float(new_track.kf.x[1][0]),
+                )
                 if trace is not None and len(birth_events) < 12:
                     birth_events.append(self._trace_track(new_track))
                 self._next_track_id += 1

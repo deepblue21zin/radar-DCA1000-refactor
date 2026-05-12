@@ -273,12 +273,76 @@ def _current_runtime_settings(project_root: Path) -> dict:
         return {}
 
 
+def _merge_mapping(base: dict, override: dict) -> dict:
+    merged = dict(base or {})
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_mapping(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _overlay_current_tuning(runtime_summary: dict, current_settings: dict) -> dict:
+    current_tuning = _nested_get(current_settings, "tuning", default={}) or {}
+    if not current_tuning:
+        return dict(runtime_summary or {})
+
+    summary = dict(runtime_summary or {})
+    summary["tuning_snapshot"] = _merge_mapping(summary.get("tuning_snapshot") or {}, current_tuning)
+
+    processing = current_tuning.get("processing") or {}
+    for key in (
+        "remove_static",
+        "doppler_guard_bins",
+        "angle_projection",
+        "angle_phase_sign",
+        "angle_source",
+    ):
+        if key in processing:
+            summary[key] = processing[key]
+    calibration = processing.get("channel_calibration") or {}
+    if "enabled" in calibration:
+        summary["channel_calibration_enabled"] = calibration["enabled"]
+
+    roi = current_tuning.get("roi") or {}
+    roi_key_map = {
+        "lateral_m": "roi_lateral_m",
+        "forward_m": "roi_forward_m",
+        "min_forward_m": "roi_min_forward_m",
+    }
+    for source_key, summary_key in roi_key_map.items():
+        if source_key in roi:
+            summary[summary_key] = roi[source_key]
+
+    detection = current_tuning.get("detection") or {}
+    detection_key_map = {
+        "max_targets": "max_targets",
+        "allow_strongest_fallback": "allow_strongest_fallback",
+        "dbscan_adaptive_eps_bands": "dbscan_adaptive_eps_bands",
+        "cluster_min_samples": "cluster_min_samples",
+        "cluster_velocity_weight": "cluster_velocity_weight",
+    }
+    for source_key, summary_key in detection_key_map.items():
+        if source_key in detection:
+            summary[summary_key] = detection[source_key]
+    if isinstance(detection.get("algorithm"), dict):
+        summary["detection_algorithm"] = detection["algorithm"]
+
+    for key, value in (current_tuning.get("tracking") or {}).items():
+        summary[f"track_{key}"] = value
+
+    return summary
+
+
 def _normalize_ablation_mode(mode: str | None) -> str:
     mode = str(mode or "baseline").strip().lower()
     allowed = {
         "baseline",
         "doppler_slice_angle",
         "rda_candidates",
+        "person_blob",
+        "blob_center",
         "person_aware_merge",
         "multi_tracker_relaxed",
         "no_body_center",
@@ -302,6 +366,7 @@ def _tracking_value(runtime_summary: dict, key: str, default=None):
 def _build_runtime_components(project_root: Path, runtime_summary: dict, *, ablation_mode: str = "baseline"):
     ablation_mode = _normalize_ablation_mode(ablation_mode)
     current_settings = _current_runtime_settings(project_root)
+    runtime_summary = _overlay_current_tuning(runtime_summary, current_settings)
     current_processing = _nested_get(current_settings, "tuning", "processing", default={}) or {}
     cfg_path = _resolve_cfg_path(project_root, runtime_summary)
     remove_static = bool(
@@ -494,6 +559,41 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict, *, abla
     elif ablation_mode == "rda_candidates":
         detection_params["angle_source"] = "doppler_slice_rai"
         detection_params["enable_dbscan"] = False
+    elif ablation_mode == "person_blob":
+        detection_params["angle_source"] = "doppler_slice_rai"
+        detection_params["protect_multi_object_candidates"] = True
+        detection_params["limit_output_to_object_count"] = True
+        detection_params["person_blob_refinement_enabled"] = True
+        detection_params["person_blob_doppler_radius_bins"] = 2
+        detection_params["person_blob_min_points"] = 4
+        detection_params["person_blob_floor_quantile"] = 0.68
+        detection_params["person_blob_center_method"] = "weighted_median"
+        detection_params["person_blob_peak_blend"] = 0.12
+    elif ablation_mode == "blob_center":
+        detection_params["angle_source"] = "doppler_slice_rai"
+        detection_params["blob_center_refinement_enabled"] = True
+        detection_params["blob_center_max_candidates"] = 36
+        detection_params["blob_center_min_points"] = 2
+        detection_params["blob_center_min_score_ratio"] = 0.04
+        detection_params["blob_center_cluster_radius_m"] = 0.65
+        detection_params["blob_center_cluster_radius_range_scale"] = 0.04
+        detection_params["blob_center_cluster_radius_bands"] = [
+            {"r_min": 0.0, "r_max": 1.5, "radius_m": 0.55},
+            {"r_min": 1.5, "r_max": 3.0, "radius_m": 0.72},
+            {"r_min": 3.0, "r_max": None, "radius_m": 0.90},
+        ]
+        detection_params["blob_center_doppler_radius_bins"] = 10
+        detection_params["blob_center_method"] = "weighted_median"
+        detection_params["blob_center_trim_radius_m"] = 0.85
+        detection_params["blob_center_floor_quantile"] = 0.65
+        detection_params["blob_center_peak_blend"] = 0.0
+        detection_params["blob_center_single_min_score_ratio"] = 0.12
+        detection_params["blob_center_single_range_window_m"] = 1.05
+        detection_params["blob_center_single_side_deadband_m"] = 0.15
+        detection_params["blob_center_cube_range_radius_m"] = 0.45
+        detection_params["blob_center_cube_angle_radius_deg"] = 18.0
+        detection_params["blob_center_cube_relative_floor"] = 0.32
+        detection_params["min_output_score"] = max(float(detection_params.get("min_output_score", 0.0) or 0.0), 0.25)
     elif ablation_mode == "person_aware_merge":
         detection_params["angle_source"] = "doppler_slice_rai"
         detection_params["protect_multi_object_candidates"] = True
@@ -533,6 +633,8 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict, *, abla
         measurement_var=float(runtime_summary.get("track_measurement_var", 0.4)),
         range_measurement_scale=float(runtime_summary.get("track_range_measurement_scale", 0.0)),
         confidence_measurement_scale=float(runtime_summary.get("track_confidence_measurement_scale", 0.0)),
+        lateral_measurement_scale=float(runtime_summary.get("track_lateral_measurement_scale", 1.0)),
+        forward_measurement_scale=float(runtime_summary.get("track_forward_measurement_scale", 1.0)),
         angle_resolution_rad=angle_resolution_rad,
         association_gate=float(runtime_summary.get("track_association_gate", 5.99)),
         doppler_center_bin=int(runtime_config.doppler_fft_size // 2),
@@ -581,6 +683,35 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict, *, abla
         lateral_deadband_range_scale=float(runtime_summary.get("track_lateral_deadband_range_scale", 0.0)),
         lateral_smoothing_alpha=float(runtime_summary.get("track_lateral_smoothing_alpha", 1.0)),
         lateral_velocity_damping=float(runtime_summary.get("track_lateral_velocity_damping", 1.0)),
+        lateral_range_damping_enabled=bool(
+            runtime_summary.get("track_lateral_range_damping_enabled", False)
+        ),
+        lateral_range_damping_start_m=float(
+            runtime_summary.get("track_lateral_range_damping_start_m", 1.4)
+        ),
+        lateral_range_damping_full_m=float(
+            runtime_summary.get("track_lateral_range_damping_full_m", 3.8)
+        ),
+        lateral_range_damping_min_alpha=float(
+            runtime_summary.get("track_lateral_range_damping_min_alpha", 0.18)
+        ),
+        track_line_projection_enabled=bool(
+            runtime_summary.get("track_line_projection_enabled", False)
+        ),
+        track_line_projection_min_points=int(
+            runtime_summary.get("track_line_projection_min_points", 18)
+        ),
+        track_line_projection_history_frames=int(
+            runtime_summary.get("track_line_projection_history_frames", 90)
+        ),
+        track_line_projection_blend=float(
+            runtime_summary.get("track_line_projection_blend", 0.35)
+        ),
+        track_line_projection_max_shift_m=float(
+            runtime_summary.get("track_line_projection_max_shift_m", 0.16)
+        ),
+        forward_smoothing_alpha=float(runtime_summary.get("track_forward_smoothing_alpha", 1.0)),
+        forward_velocity_damping=float(runtime_summary.get("track_forward_velocity_damping", 1.0)),
         local_remeasurement_enabled=bool(
             runtime_summary.get("track_local_remeasurement_enabled", False)
         ),
@@ -603,6 +734,24 @@ def _build_runtime_components(project_root: Path, runtime_summary: dict, *, abla
         ),
         measurement_soft_gate_speed_scale=float(
             runtime_summary.get("track_measurement_soft_gate_speed_scale", 0.06)
+        ),
+        motion_direction_gate_enabled=bool(
+            runtime_summary.get("track_motion_direction_gate_enabled", False)
+        ),
+        motion_direction_min_speed_m_s=float(
+            runtime_summary.get("track_motion_direction_min_speed_m_s", 0.18)
+        ),
+        motion_direction_min_displacement_m=float(
+            runtime_summary.get("track_motion_direction_min_displacement_m", 0.35)
+        ),
+        motion_direction_max_angle_deg=float(
+            runtime_summary.get("track_motion_direction_max_angle_deg", 105.0)
+        ),
+        motion_direction_max_cross_m=float(
+            runtime_summary.get("track_motion_direction_max_cross_m", 0.75)
+        ),
+        motion_direction_cross_range_scale=float(
+            runtime_summary.get("track_motion_direction_cross_range_scale", 0.04)
         ),
         max_object_count=int(_tracking_value(runtime_summary, "max_object_count", 3) or 0),
         expected_object_count=_tracking_value(runtime_summary, "expected_object_count", None),
@@ -1121,6 +1270,7 @@ def _build_trace_summary(traces: list[dict]) -> dict:
                 "angle_passed": int(_nested_get(detection, "angle_validation", "passed_count", default=0) or 0),
                 "coarse_merge_after": int(_nested_get(detection, "candidate_merge_coarse", "after_count", default=0) or 0),
                 "body_refined": int(_nested_get(detection, "body_center_refinement", "refined_count", default=0) or 0),
+                "blob_centered": int(_nested_get(detection, "blob_center_refinement", "output_count", default=0) or 0),
                 "final_merge_after": int(_nested_get(detection, "candidate_merge_final", "after_count", default=0) or 0),
                 "dbscan_output": int(_nested_get(detection, "dbscan", "output_count", default=0) or 0),
                 "tracker_input": int(_nested_get(trace, "tracker_input_filter", "tracker_input_count", default=0) or 0),
@@ -1140,6 +1290,7 @@ def _build_trace_summary(traces: list[dict]) -> dict:
         "angle_passed",
         "coarse_merge_after",
         "body_refined",
+        "blob_centered",
         "final_merge_after",
         "dbscan_output",
         "tracker_input",
@@ -1323,6 +1474,7 @@ def build_stage_cache(
             "detection.cfar",
             "detection.angle_validation",
             "detection.body_center_refinement",
+            "detection.blob_center_refinement",
             "detection.candidate_merge_final",
             "detection.dbscan",
             "tracker_input_filter",
@@ -1391,6 +1543,8 @@ def main() -> None:
             "baseline",
             "doppler_slice_angle",
             "rda_candidates",
+            "person_blob",
+            "blob_center",
             "person_aware_merge",
             "multi_tracker_relaxed",
             "no_body_center",
