@@ -69,6 +69,12 @@ DEFAULT_TUNING_SETTINGS = {
             "enabled": False,
             "coefficients": [],
         },
+        "tdm_mimo_doppler_compensation": {
+            "enabled": False,
+            "phase_sign": 1.0,
+            "slot_time_model": "uniform_tx_slot",
+            "reference_tx_slot": 0,
+        },
     },
     "roi": {
         "lateral_m": 1.5,
@@ -189,6 +195,10 @@ DEFAULT_TUNING_SETTINGS = {
             "blob_center_dense_min_normalized_power": 0.08,
             "blob_center_dense_max_points": 2400,
             "blob_center_dense_min_points": 6,
+            "blob_center_dense_grouping_mode": "rd_primary",
+            "blob_center_dense_angle_radius_deg": 18.0,
+            "blob_center_dense_angle_floor_quantile": 0.70,
+            "blob_center_dense_angle_relative_floor": 0.25,
         },
         "dbscan_adaptive_eps_bands": [
             {"r_min": 0.25, "r_max": 1.0, "eps": 0.34, "min_samples": 2},

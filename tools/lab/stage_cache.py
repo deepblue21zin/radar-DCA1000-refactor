@@ -24,7 +24,7 @@ from tools.runtime_core.runtime_settings import load_runtime_settings
 from tools.runtime_core.tracking import MultiTargetTracker as _RuntimeMultiTargetTracker
 
 
-STAGE_CACHE_SCHEMA_VERSION = 6
+STAGE_CACHE_SCHEMA_VERSION = 7
 STAGE_FEATURE_SCHEMA_VERSION = 1
 
 
@@ -304,6 +304,19 @@ def _overlay_current_tuning(runtime_summary: dict, current_settings: dict) -> di
     calibration = processing.get("channel_calibration") or {}
     if "enabled" in calibration:
         summary["channel_calibration_enabled"] = calibration["enabled"]
+    tdm_compensation = processing.get("tdm_mimo_doppler_compensation") or {}
+    if "enabled" in tdm_compensation:
+        summary["tdm_mimo_doppler_compensation_enabled"] = tdm_compensation["enabled"]
+    if "phase_sign" in tdm_compensation:
+        summary["tdm_mimo_doppler_compensation_phase_sign"] = tdm_compensation["phase_sign"]
+    if "slot_time_model" in tdm_compensation:
+        summary["tdm_mimo_doppler_compensation_slot_time_model"] = tdm_compensation[
+            "slot_time_model"
+        ]
+    if "reference_tx_slot" in tdm_compensation:
+        summary["tdm_mimo_doppler_compensation_reference_tx_slot"] = tdm_compensation[
+            "reference_tx_slot"
+        ]
 
     roi = current_tuning.get("roi") or {}
     roi_key_map = {
@@ -371,6 +384,8 @@ def _build_runtime_components(
     cfg_path_override: str | Path | None = None,
     angle_phase_sign_override: float | None = None,
     lateral_axis_sign_override: float | None = None,
+    tdm_compensation_override: bool | None = None,
+    tdm_phase_sign_override: float | None = None,
 ):
     ablation_mode = _normalize_ablation_mode(ablation_mode)
     current_settings = _current_runtime_settings(project_root)
@@ -435,6 +450,51 @@ def _build_runtime_components(
         channel_calibration.get("enabled", False),
     )
     channel_calibration_coefficients = channel_calibration.get("coefficients", [])
+    tdm_compensation = _nested_get(
+        runtime_summary,
+        "tuning_snapshot",
+        "processing",
+        "tdm_mimo_doppler_compensation",
+        default=current_processing.get("tdm_mimo_doppler_compensation", {}),
+    ) or {}
+    if tdm_compensation_override is not None:
+        tdm_compensation_enabled = bool(tdm_compensation_override)
+        tdm_compensation_source = "override"
+    else:
+        tdm_compensation_enabled = bool(
+            runtime_summary.get(
+                "tdm_mimo_doppler_compensation_enabled",
+                tdm_compensation.get("enabled", False),
+            )
+        )
+        tdm_compensation_source = (
+            "current_tuning"
+            if "tdm_mimo_doppler_compensation" in current_processing
+            else "logged_summary"
+        )
+    if tdm_phase_sign_override is not None:
+        tdm_compensation_phase_sign = float(tdm_phase_sign_override)
+        tdm_phase_sign_source = "override"
+    else:
+        tdm_compensation_phase_sign = float(
+            runtime_summary.get(
+                "tdm_mimo_doppler_compensation_phase_sign",
+                tdm_compensation.get("phase_sign", 1.0),
+            )
+        )
+        tdm_phase_sign_source = tdm_compensation_source
+    tdm_compensation_slot_time_model = str(
+        runtime_summary.get(
+            "tdm_mimo_doppler_compensation_slot_time_model",
+            tdm_compensation.get("slot_time_model", "uniform_tx_slot"),
+        )
+    ).strip().lower()
+    tdm_compensation_reference_tx_slot = int(
+        runtime_summary.get(
+            "tdm_mimo_doppler_compensation_reference_tx_slot",
+            tdm_compensation.get("reference_tx_slot", 0),
+        )
+    )
     angle_elevation_min_deg = _nested_get(
         runtime_summary,
         "tuning_snapshot",
@@ -490,6 +550,22 @@ def _build_runtime_components(
 
         runtime_config_updates["channel_calibration_coefficients"] = _parse_complex_coefficients(
             channel_calibration_coefficients
+        )
+    if hasattr(runtime_config, "tdm_mimo_doppler_compensation_enabled"):
+        runtime_config_updates["tdm_mimo_doppler_compensation_enabled"] = bool(
+            tdm_compensation_enabled
+        )
+    if hasattr(runtime_config, "tdm_mimo_doppler_compensation_phase_sign"):
+        runtime_config_updates["tdm_mimo_doppler_compensation_phase_sign"] = float(
+            tdm_compensation_phase_sign
+        )
+    if hasattr(runtime_config, "tdm_mimo_doppler_compensation_slot_time_model"):
+        runtime_config_updates["tdm_mimo_doppler_compensation_slot_time_model"] = str(
+            tdm_compensation_slot_time_model or "uniform_tx_slot"
+        ).strip().lower()
+    if hasattr(runtime_config, "tdm_mimo_doppler_compensation_reference_tx_slot"):
+        runtime_config_updates["tdm_mimo_doppler_compensation_reference_tx_slot"] = int(
+            tdm_compensation_reference_tx_slot
         )
     if runtime_config_updates:
         runtime_config = replace(runtime_config, **runtime_config_updates)
@@ -620,6 +696,10 @@ def _build_runtime_components(
         detection_params["blob_center_dense_min_normalized_power"] = 0.08
         detection_params["blob_center_dense_max_points"] = 2400
         detection_params["blob_center_dense_min_points"] = 6
+        detection_params["blob_center_dense_grouping_mode"] = "rd_primary"
+        detection_params["blob_center_dense_angle_radius_deg"] = 18.0
+        detection_params["blob_center_dense_angle_floor_quantile"] = 0.70
+        detection_params["blob_center_dense_angle_relative_floor"] = 0.25
         detection_params["min_output_score"] = max(float(detection_params.get("min_output_score", 0.0) or 0.0), 0.25)
     elif ablation_mode == "person_aware_merge":
         detection_params["angle_source"] = "doppler_slice_rai"
@@ -810,6 +890,8 @@ def _build_runtime_components(
         "roi_min_forward_m": roi_min_forward_m,
         "lateral_axis_sign_source": lateral_axis_sign_source,
         "angle_phase_sign_source": angle_phase_sign_source,
+        "tdm_compensation_source": tdm_compensation_source,
+        "tdm_phase_sign_source": tdm_phase_sign_source,
         "ablation_mode": ablation_mode,
         "tracker_enabled": tracker_enabled,
     }
@@ -933,9 +1015,15 @@ def load_stage_trace_summary(
     return _load_json(summary_path)
 
 
-def load_stage_cache_frame(project_root: Path, session_id: str, ordinal: int, ablation_mode: str | None = "baseline") -> tuple[dict, dict[str, np.ndarray]]:
-    cache_dir = stage_cache_dir(project_root, session_id, ablation_mode)
-    frames = load_stage_cache_frames(project_root, session_id, ablation_mode)
+def load_stage_cache_frame(
+    project_root: Path,
+    session_id: str,
+    ordinal: int,
+    ablation_mode: str | None = "baseline",
+    variant_label: str | None = None,
+) -> tuple[dict, dict[str, np.ndarray]]:
+    cache_dir = stage_cache_dir(project_root, session_id, ablation_mode, variant_label)
+    frames = load_stage_cache_frames(project_root, session_id, ablation_mode, variant_label)
     for record in frames:
         if int(record.get("ordinal", -1)) != int(ordinal):
             continue
@@ -1414,6 +1502,8 @@ def build_stage_cache(
     cfg_path_override: str | Path | None = None,
     angle_phase_sign_override: float | None = None,
     lateral_axis_sign_override: float | None = None,
+    tdm_compensation_override: bool | None = None,
+    tdm_phase_sign_override: float | None = None,
 ) -> dict:
     project_root = Path(project_root).resolve()
     ablation_mode = _normalize_ablation_mode(ablation_mode)
@@ -1434,6 +1524,8 @@ def build_stage_cache(
         cfg_path_override=cfg_path_override,
         angle_phase_sign_override=angle_phase_sign_override,
         lateral_axis_sign_override=lateral_axis_sign_override,
+        tdm_compensation_override=tdm_compensation_override,
+        tdm_phase_sign_override=tdm_phase_sign_override,
     )
 
     paths = stage_cache_paths(project_root, session_id, ablation_mode, variant_label)
@@ -1623,6 +1715,34 @@ def build_stage_cache(
             "channel_calibration_count": int(
                 len(getattr(components["runtime_config"], "channel_calibration_coefficients", ()) or ())
             ),
+            "tdm_mimo_doppler_compensation_enabled": bool(
+                getattr(components["runtime_config"], "tdm_mimo_doppler_compensation_enabled", False)
+            ),
+            "tdm_mimo_doppler_compensation_source": components["tdm_compensation_source"],
+            "tdm_mimo_doppler_compensation_phase_sign": float(
+                getattr(
+                    components["runtime_config"],
+                    "tdm_mimo_doppler_compensation_phase_sign",
+                    1.0,
+                )
+            ),
+            "tdm_mimo_doppler_compensation_phase_sign_source": components[
+                "tdm_phase_sign_source"
+            ],
+            "tdm_mimo_doppler_compensation_slot_time_model": str(
+                getattr(
+                    components["runtime_config"],
+                    "tdm_mimo_doppler_compensation_slot_time_model",
+                    "uniform_tx_slot",
+                )
+            ),
+            "tdm_mimo_doppler_compensation_reference_tx_slot": int(
+                getattr(
+                    components["runtime_config"],
+                    "tdm_mimo_doppler_compensation_reference_tx_slot",
+                    0,
+                )
+            ),
         },
         "roi": {
             "lateral_m": round(float(components["roi_lateral_m"]), 4),
@@ -1666,6 +1786,18 @@ def main() -> None:
         help="Optional lateral axis sign override. Use -1 for invert_lateral_axis=true and 1 for false.",
     )
     parser.add_argument(
+        "--tdm-compensation",
+        default="auto",
+        choices=["auto", "on", "off"],
+        help="Override TDM-MIMO Doppler phase compensation for replay diagnostics.",
+    )
+    parser.add_argument(
+        "--tdm-phase-sign",
+        type=float,
+        default=None,
+        help="Optional TDM-MIMO Doppler compensation phase sign override.",
+    )
+    parser.add_argument(
         "--mode",
         default="baseline",
         choices=[
@@ -1696,6 +1828,10 @@ def main() -> None:
         cfg_path_override=args.cfg_path_override,
         angle_phase_sign_override=args.angle_phase_sign,
         lateral_axis_sign_override=args.lateral_axis_sign,
+        tdm_compensation_override=(
+            None if args.tdm_compensation == "auto" else args.tdm_compensation == "on"
+        ),
+        tdm_phase_sign_override=args.tdm_phase_sign,
     )
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
 

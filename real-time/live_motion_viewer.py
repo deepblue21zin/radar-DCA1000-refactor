@@ -85,6 +85,21 @@ ANGLE_SOURCE = str(TUNING['processing'].get('angle_source', 'collapsed_rai')).st
 CHANNEL_CALIBRATION = TUNING['processing'].get('channel_calibration', {}) or {}
 CHANNEL_CALIBRATION_ENABLED = bool(CHANNEL_CALIBRATION.get('enabled', False))
 CHANNEL_CALIBRATION_COEFFICIENTS = list(CHANNEL_CALIBRATION.get('coefficients', []))
+TDM_MIMO_DOPPLER_COMPENSATION = (
+    TUNING['processing'].get('tdm_mimo_doppler_compensation', {}) or {}
+)
+TDM_MIMO_DOPPLER_COMPENSATION_ENABLED = bool(
+    TDM_MIMO_DOPPLER_COMPENSATION.get('enabled', False)
+)
+TDM_MIMO_DOPPLER_COMPENSATION_PHASE_SIGN = float(
+    TDM_MIMO_DOPPLER_COMPENSATION.get('phase_sign', 1.0)
+)
+TDM_MIMO_DOPPLER_COMPENSATION_SLOT_TIME_MODEL = str(
+    TDM_MIMO_DOPPLER_COMPENSATION.get('slot_time_model', 'uniform_tx_slot')
+).strip().lower()
+TDM_MIMO_DOPPLER_COMPENSATION_REFERENCE_TX_SLOT = int(
+    TDM_MIMO_DOPPLER_COMPENSATION.get('reference_tx_slot', 0)
+)
 ROI_LATERAL_M = float(TUNING['roi']['lateral_m'])
 ROI_FORWARD_M = float(TUNING['roi']['forward_m'])
 ROI_MIN_FORWARD_M = float(TUNING['roi']['min_forward_m'])
@@ -241,6 +256,10 @@ DETECTION_TUNING = {
     'blob_center_dense_min_normalized_power': float(DETECTION_ALGORITHM.get('blob_center_dense_min_normalized_power', 0.08)),
     'blob_center_dense_max_points': int(DETECTION_ALGORITHM.get('blob_center_dense_max_points', 2400)),
     'blob_center_dense_min_points': int(DETECTION_ALGORITHM.get('blob_center_dense_min_points', 6)),
+    'blob_center_dense_grouping_mode': str(DETECTION_ALGORITHM.get('blob_center_dense_grouping_mode', 'rd_primary')),
+    'blob_center_dense_angle_radius_deg': float(DETECTION_ALGORITHM.get('blob_center_dense_angle_radius_deg', 18.0)),
+    'blob_center_dense_angle_floor_quantile': float(DETECTION_ALGORITHM.get('blob_center_dense_angle_floor_quantile', 0.70)),
+    'blob_center_dense_angle_relative_floor': float(DETECTION_ALGORITHM.get('blob_center_dense_angle_relative_floor', 0.25)),
 }
 LOG_ROOT = PROJECT_ROOT / 'logs' / 'live_motion_viewer'
 SPATIAL_VIEW_HEIGHT = int(STATIC['spatial_view']['height'])
@@ -327,6 +346,10 @@ class MotionViewer:
             angle_source=ANGLE_SOURCE,
             channel_calibration_enabled=CHANNEL_CALIBRATION_ENABLED,
             channel_calibration_coefficients=CHANNEL_CALIBRATION_COEFFICIENTS,
+            tdm_mimo_doppler_compensation_enabled=TDM_MIMO_DOPPLER_COMPENSATION_ENABLED,
+            tdm_mimo_doppler_compensation_phase_sign=TDM_MIMO_DOPPLER_COMPENSATION_PHASE_SIGN,
+            tdm_mimo_doppler_compensation_slot_time_model=TDM_MIMO_DOPPLER_COMPENSATION_SLOT_TIME_MODEL,
+            tdm_mimo_doppler_compensation_reference_tx_slot=TDM_MIMO_DOPPLER_COMPENSATION_REFERENCE_TX_SLOT,
         )
         self.track_angle_resolution_rad = self.estimate_track_angle_resolution_rad()
         self.raw_frame_queue = Queue(maxsize=PIPELINE_QUEUE_SIZE)
@@ -441,6 +464,34 @@ class MotionViewer:
             ),
             'channel_calibration_count': len(
                 getattr(self.runtime_config, 'channel_calibration_coefficients', ()) or ()
+            ),
+            'tdm_mimo_doppler_compensation_enabled': bool(
+                getattr(
+                    self.runtime_config,
+                    'tdm_mimo_doppler_compensation_enabled',
+                    TDM_MIMO_DOPPLER_COMPENSATION_ENABLED,
+                )
+            ),
+            'tdm_mimo_doppler_compensation_phase_sign': float(
+                getattr(
+                    self.runtime_config,
+                    'tdm_mimo_doppler_compensation_phase_sign',
+                    TDM_MIMO_DOPPLER_COMPENSATION_PHASE_SIGN,
+                )
+            ),
+            'tdm_mimo_doppler_compensation_slot_time_model': str(
+                getattr(
+                    self.runtime_config,
+                    'tdm_mimo_doppler_compensation_slot_time_model',
+                    TDM_MIMO_DOPPLER_COMPENSATION_SLOT_TIME_MODEL,
+                )
+            ),
+            'tdm_mimo_doppler_compensation_reference_tx_slot': int(
+                getattr(
+                    self.runtime_config,
+                    'tdm_mimo_doppler_compensation_reference_tx_slot',
+                    TDM_MIMO_DOPPLER_COMPENSATION_REFERENCE_TX_SLOT,
+                )
             ),
             'range_resolution_m': round(self.runtime_config.range_resolution_m, 4),
             'max_range_m': round(self.runtime_config.max_range_m, 2),

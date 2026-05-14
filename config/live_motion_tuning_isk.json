@@ -12,6 +12,12 @@
     "channel_calibration": {
       "enabled": false,
       "coefficients": []
+    },
+    "tdm_mimo_doppler_compensation": {
+      "enabled": true,
+      "phase_sign": 1.0,
+      "slot_time_model": "uniform_tx_slot",
+      "reference_tx_slot": 0
     }
   },
   "roi": {
@@ -132,7 +138,11 @@
       "blob_center_dense_quantile": 0.995,
       "blob_center_dense_min_normalized_power": 0.08,
       "blob_center_dense_max_points": 2400,
-      "blob_center_dense_min_points": 6
+      "blob_center_dense_min_points": 6,
+      "blob_center_dense_grouping_mode": "rd_primary",
+      "blob_center_dense_angle_radius_deg": 18.0,
+      "blob_center_dense_angle_floor_quantile": 0.7,
+      "blob_center_dense_angle_relative_floor": 0.25
     },
     "dbscan_adaptive_eps_bands": [
       {"r_min": 0.25, "r_max": 1.0, "eps": 0.38, "min_samples": 2},
