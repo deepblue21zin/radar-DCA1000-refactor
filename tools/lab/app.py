@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 import html
 import io
 import json
@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import textwrap
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,7 @@ from tools.tuning_loop.run_loop import ISK_SCENARIOS, PARAMETER_SPECS
 EVAL_TASKS_DIR = PROJECT_ROOT / "docs" / "evals" / "tasks"
 EVAL_RUNS_DIR = PROJECT_ROOT / "docs" / "evals" / "runs"
 TUNING_RUNS_DIR = PROJECT_ROOT / "lab_data" / "tuning_runs"
+RAW_BUNDLE_EXPORT_DIR = PROJECT_ROOT / "lab_data" / "exports"
 
 LABEL_OPTIONS = ["", "baseline", "good", "usable", "interesting", "discard"]
 BOARD_OPTIONS = ["", "IWR6843ISK", "IWR6843ISK-ODS", "unknown", "mixed"]
@@ -223,6 +225,83 @@ def _registry_export_name() -> str:
     return f"radar_lab_registry_{stamp}.db"
 
 
+def _raw_bundle_export_name() -> str:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"radar_lab_registry_with_raw_{stamp}.zip"
+
+
+def _format_bytes(size_bytes: int | float | None) -> str:
+    if size_bytes is None:
+        return "n/a"
+    value = float(size_bytes)
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    for unit in units:
+        if abs(value) < 1024.0 or unit == units[-1]:
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024.0
+    return f"{value:.1f} TiB"
+
+
+def _raw_capture_dirs(project_root: Path) -> list[Path]:
+    raw_root = project_root / "logs" / "raw"
+    if not raw_root.exists():
+        return []
+    return sorted((item for item in raw_root.iterdir() if item.is_dir()), key=lambda path: path.name)
+
+
+def _capture_dir_timestamp(capture_dir: Path) -> datetime:
+    try:
+        return datetime.strptime(capture_dir.name[:15], "%Y%m%d_%H%M%S")
+    except ValueError:
+        return datetime.fromtimestamp(capture_dir.stat().st_mtime)
+
+
+def _recent_raw_capture_dirs(capture_dirs: list[Path], days: int) -> tuple[list[Path], datetime | None]:
+    if not capture_dirs:
+        return [], None
+    timestamps = {path: _capture_dir_timestamp(path) for path in capture_dirs}
+    latest = max(timestamps.values())
+    cutoff = latest - timedelta(days=max(int(days), 1))
+    return [path for path in capture_dirs if timestamps[path] >= cutoff], latest
+
+
+def _directory_size_bytes(path: Path) -> int:
+    total = 0
+    for file_path in path.rglob("*"):
+        if file_path.is_file():
+            try:
+                total += file_path.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def _build_registry_raw_bundle(db_path: Path, capture_dirs: list[Path]) -> Path:
+    RAW_BUNDLE_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    bundle_path = RAW_BUNDLE_EXPORT_DIR / _raw_bundle_export_name()
+    manifest = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "project_root": str(PROJECT_ROOT),
+        "registry_db": str(db_path),
+        "raw_capture_count": len(capture_dirs),
+        "raw_capture_ids": [path.name for path in capture_dirs],
+    }
+    with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_STORED) as archive:
+        if db_path.exists():
+            archive.write(db_path, "lab_data/radar_lab_registry.db")
+        archive.writestr(
+            "bundle_manifest.json",
+            json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+        for capture_dir in capture_dirs:
+            for file_path in capture_dir.rglob("*"):
+                if not file_path.is_file():
+                    continue
+                archive_name = file_path.relative_to(PROJECT_ROOT).as_posix()
+                archive.write(file_path, archive_name)
+    return bundle_path
+
+
 def _validate_registry_db(path: Path) -> None:
     expected_tables = {"captures", "runs", "run_parameters", "annotations", "registry_meta"}
     with sqlite3.connect(path) as connection:
@@ -267,7 +346,7 @@ def _render_registry_share_tools() -> None:
     db_path = registry.database_path(PROJECT_ROOT)
     with st.expander("DB Import / Export", expanded=False):
         st.caption(
-            "라벨, annotation, 세션 인덱스만 공유합니다. raw logs, reports, stage cache 파일은 별도로 공유해야 합니다."
+            "DB 단독 export는 라벨, annotation, 세션 인덱스만 공유합니다. raw logs는 아래 raw bundle zip으로 따로 묶을 수 있습니다."
         )
         if db_path.exists():
             st.download_button(
@@ -280,6 +359,69 @@ def _render_registry_share_tools() -> None:
         else:
             st.info("아직 export할 registry DB가 없습니다. Refresh Registry를 먼저 눌러 주세요.")
 
+        st.divider()
+        all_raw_dirs = _raw_capture_dirs(PROJECT_ROOT)
+        scope = st.radio(
+            "Raw Bundle Scope",
+            ["최근 N일 raw만", "전체 raw"],
+            index=0,
+            horizontal=True,
+            key="registry-raw-bundle-scope",
+        )
+        recent_days = int(
+            st.number_input(
+                "최근 raw 기간",
+                min_value=1,
+                max_value=365,
+                value=4,
+                step=1,
+                help="가장 최근 capture 날짜를 기준으로 N일 이내 raw만 zip에 포함합니다.",
+                disabled=scope != "최근 N일 raw만",
+                key="registry-raw-bundle-days",
+            )
+        )
+        if scope == "최근 N일 raw만":
+            raw_dirs, latest_raw_at = _recent_raw_capture_dirs(all_raw_dirs, recent_days)
+            scope_text = (
+                f"최근 `{recent_days}`일 raw"
+                + (f" (기준 최신 capture: `{latest_raw_at:%Y-%m-%d %H:%M:%S}`)" if latest_raw_at else "")
+            )
+        else:
+            raw_dirs = all_raw_dirs
+            scope_text = "전체 raw"
+        raw_size = sum(_directory_size_bytes(path) for path in raw_dirs)
+        st.caption(
+            f"Raw bundle 대상: {scope_text}, `{len(raw_dirs)}` / `{len(all_raw_dirs)}` capture folders, 약 `{_format_bytes(raw_size)}`. "
+            "용량이 크면 zip 생성과 다운로드가 오래 걸릴 수 있습니다."
+        )
+        if raw_size > 2 * 1024**3:
+            st.warning(
+                "선택한 raw bundle이 2 GiB보다 큽니다. 브라우저/Streamlit 환경에 따라 다운로드가 실패할 수 있습니다. "
+                "실패하면 `logs/raw` 폴더를 파일 탐색기에서 직접 압축해 공유하세요."
+            )
+        if st.button("Build Registry + Raw Bundle ZIP", width="stretch", disabled=not raw_dirs):
+            try:
+                with st.spinner("registry DB와 선택한 logs/raw를 zip으로 묶는 중입니다..."):
+                    bundle_path = _build_registry_raw_bundle(db_path, raw_dirs)
+            except Exception as error:
+                st.error(f"Raw bundle export failed: {error}")
+            else:
+                st.session_state["registry_raw_bundle_path"] = str(bundle_path)
+                st.success(f"Raw bundle ready: `{bundle_path}` ({_format_bytes(bundle_path.stat().st_size)})")
+
+        bundle_value = st.session_state.get("registry_raw_bundle_path")
+        bundle_path = Path(bundle_value) if bundle_value else None
+        if bundle_path and bundle_path.exists():
+            with bundle_path.open("rb") as handle:
+                st.download_button(
+                    "Download Registry + Raw Bundle ZIP",
+                    data=handle,
+                    file_name=bundle_path.name,
+                    mime="application/zip",
+                    width="stretch",
+                )
+
+        st.divider()
         uploaded_db = st.file_uploader(
             "Import Registry DB",
             type=["db", "sqlite", "sqlite3"],
@@ -813,9 +955,28 @@ def _trace_has_multi_display_evidence(trace: dict) -> bool:
 def _trace_display_points(trace: dict) -> list[dict]:
     confirmed = _nested_get(trace, "display_output", "confirmed_tracks", default=[]) or []
     tentative = _nested_get(trace, "display_output", "tentative_tracks", default=[]) or []
+    confirmed_points = [
+        {**point, "state": point.get("state") or "confirmed", "display_stage": "confirmed"}
+        for point in confirmed
+        if isinstance(point, dict)
+    ]
+    tentative_points = [
+        {**point, "state": point.get("state") or "tentative", "display_stage": "tentative"}
+        for point in tentative
+        if isinstance(point, dict)
+    ]
     if _trace_has_multi_display_evidence(trace):
-        return list(confirmed) + list(tentative)
-    return list(confirmed)
+        return confirmed_points + tentative_points
+    return confirmed_points
+
+
+def _trace_display_confirmed_points(trace: dict) -> list[dict]:
+    confirmed = _nested_get(trace, "display_output", "confirmed_tracks", default=[]) or []
+    return [
+        {**point, "state": point.get("state") or "confirmed", "display_stage": "confirmed"}
+        for point in confirmed
+        if isinstance(point, dict)
+    ]
 
 
 def _trace_display_count(trace: dict) -> int:
@@ -824,6 +985,10 @@ def _trace_display_count(trace: dict) -> int:
         tentative = int(_nested_get(trace, "display_output", "tentative_count", default=0) or 0)
         return confirmed + tentative
     return confirmed
+
+
+def _trace_display_confirmed_count(trace: dict) -> int:
+    return int(_nested_get(trace, "display_output", "confirmed_count", default=0) or 0)
 
 
 def _stage_multitarget_kpis(trace_rows: list[dict], *, expected_max: int = 2) -> dict:
@@ -1000,6 +1165,8 @@ def _trace_stage_points(trace: dict, stage: str) -> list[dict]:
                 continue
             points.extend(summary.get("component_points") or [])
         return [point for point in points if isinstance(point, dict)]
+    if stage == "rd_cfar_guard":
+        return list(_nested_get(detection, "rd_cfar_output_guard", "output_top", default=[]) or [])
     if stage == "final_merge":
         return list(_nested_get(detection, "candidate_merge_final", "after_top", default=[]) or [])
     if stage == "dbscan":
@@ -1011,8 +1178,26 @@ def _trace_stage_points(trace: dict, stage: str) -> list[dict]:
         return list(_nested_get(detection, "dbscan", "output_top", default=[]) or [])
     if stage == "tracker_input":
         return list(tracker.get("measurements") or [])
+    if stage == "tracks_confirmed":
+        tracks = _nested_get(tracker, "track_lifecycle", "tracks_after_prune", default=[]) or []
+        return [
+            track for track in tracks
+            if isinstance(track, dict)
+            and str(track.get("state") or "").lower() != "tentative"
+        ]
     if stage == "tracks":
         return list(_nested_get(tracker, "track_lifecycle", "tracks_after_prune", default=[]) or [])
+    if stage == "display_confirmed":
+        return _trace_display_confirmed_points(trace)
+    if stage == "display_all":
+        confirmed = _trace_display_confirmed_points(trace)
+        tentative = _nested_get(trace, "display_output", "tentative_tracks", default=[]) or []
+        tentative_points = [
+            {**point, "state": point.get("state") or "tentative", "display_stage": "tentative"}
+            for point in tentative
+            if isinstance(point, dict)
+        ]
+        return confirmed + tentative_points
     if stage == "display":
         return _trace_display_points(trace)
     return []
@@ -1046,6 +1231,8 @@ def _trace_stage_count(trace: dict, stage: str) -> int:
                 continue
             total += int(summary.get("component_point_count") or summary.get("point_count") or 0)
         return total
+    if stage == "rd_cfar_guard":
+        return int(_nested_get(detection, "rd_cfar_output_guard", "output_count", default=0) or 0)
     if stage == "final_merge":
         return int(_nested_get(detection, "candidate_merge_final", "after_count", default=0) or 0)
     if stage == "dbscan":
@@ -1057,12 +1244,21 @@ def _trace_stage_count(trace: dict, stage: str) -> int:
         return int(_nested_get(detection, "dbscan", "output_count", default=0) or 0)
     if stage == "tracker_input":
         return int(_nested_get(trace, "tracker_input_filter", "tracker_input_count", default=0) or 0)
+    if stage == "tracks_confirmed":
+        tracks = _trace_stage_points(trace, "tracks_confirmed")
+        return len(tracks)
     if stage == "prediction":
         return int(_nested_get(tracker, "kalman_prediction", "track_count", default=0) or 0)
     if stage == "association":
         return int(_nested_get(tracker, "association", "matched_count", default=0) or 0)
     if stage == "update":
         return int(_nested_get(tracker, "kalman_update", "updated_count", default=0) or 0)
+    if stage == "display_confirmed":
+        return _trace_display_confirmed_count(trace)
+    if stage == "display_all":
+        confirmed = _trace_display_confirmed_count(trace)
+        tentative = int(_nested_get(trace, "display_output", "tentative_count", default=0) or 0)
+        return confirmed + tentative
     if stage == "display":
         return _trace_display_count(trace)
     return 0
@@ -1253,34 +1449,37 @@ def _render_detection_tracking_comparison(trace_rows: list[dict]) -> None:
         "RDA dense points": ("rda_dense", "#667085"),
         "CFAR seeds": ("cfar_seed", "#2869a6"),
         "Blob grouping points": ("blob_grouping", "#9b6a2f"),
-        "Score-filtered output": ("score_filtered", "#0b7285"),
         "Blob-centered candidates": ("blob_center", "#8d63c7"),
-        "DBSCAN output before score filter": ("dbscan", "#0e8a7e"),
+        "RD/CFAR guarded output": ("rd_cfar_guard", "#af3d0f"),
+        "Score-filtered output": ("score_filtered", "#0b7285"),
         "Tracker input": ("tracker_input", "#6155b8"),
-        "Legacy body-center patch": ("body_center", "#c05d9f"),
-        "Merged candidates": ("final_merge", "#5176b8"),
-        "Raw angle candidates": ("angle", "#2d8f7a"),
+        "Debug: raw angle candidates": ("angle", "#2d8f7a"),
+        "Debug: legacy body-center patch": ("body_center", "#c05d9f"),
+        "Debug: merged candidates": ("final_merge", "#5176b8"),
+        "Debug: DBSCAN before score filter": ("dbscan", "#0e8a7e"),
     }
     tracking_options = {
-        "Display output": ("display", "#1b7a4c"),
-        "Tracker state": ("tracks", "#172232"),
+        "Display accepted tracks": ("display_confirmed", "#1b7a4c"),
+        "Tracker confirmed state": ("tracks_confirmed", "#172232"),
+        "Debug: all tracker history": ("tracks", "#596273"),
+        "Debug: display + tentative": ("display_all", "#6c8c4c"),
     }
     control_cols = st.columns(2)
     with control_cols[0]:
         detection_label = st.selectbox(
             "Detection reference",
             list(detection_options.keys()),
-            index=0,
-            help="tracking으로 들어가기 전 기준 stage입니다. RDA blob 보정 효과는 Blob-centered candidates와 Score-filtered output을 비교하세요.",
-            key="detection_reference_v2",
+            index=list(detection_options.keys()).index("Tracker input"),
+            help="현재 알고리즘 기준으로 tracker에 실제 전달되는 값은 Tracker input입니다. Debug 단계는 버려진 후보 확인용입니다.",
+            key="detection_reference_v3",
         )
     with control_cols[1]:
         tracking_label = st.selectbox(
             "Tracking output",
             list(tracking_options.keys()),
             index=0,
-            help="최종 표시 기준은 Display output, tracker 내부 상태 기준은 Tracker state입니다.",
-            key="tracking_output_v2",
+            help="최종 표시 기준은 Display accepted tracks입니다. Debug 옵션은 tentative/짧은 track까지 포함합니다.",
+            key="tracking_output_v3",
         )
 
     detection_stage, detection_color = detection_options[detection_label]
@@ -1600,19 +1799,31 @@ def _render_stage_sequence_overview(trace_rows: list[dict]) -> None:
     stage_options = [
         ("rda_dense", "RDA dense points", "#667085"),
         ("cfar_seed", "CFAR seeds", "#2869a6"),
-        ("angle", "Raw angle candidates", "#2d8f7a"),
-        ("body_center", "Legacy body-center patch", "#c05d9f"),
         ("blob_grouping", "Blob grouping points", "#9b6a2f"),
         ("blob_center", "Blob-centered candidates", "#8d63c7"),
-        ("final_merge", "Merged candidates", "#5176b8"),
-        ("dbscan", "DBSCAN before score filter", "#0e8a7e"),
+        ("rd_cfar_guard", "RD/CFAR guarded output", "#af3d0f"),
         ("score_filtered", "Score-filtered output", "#0b7285"),
         ("tracker_input", "Tracker input", "#6155b8"),
-        ("tracks", "Tracker state", "#172232"),
-        ("display", "Display output", "#1b7a4c"),
+        ("display_confirmed", "Display accepted tracks", "#1b7a4c"),
+        ("tracks_confirmed", "Tracker confirmed state", "#172232"),
+        ("angle", "Debug: raw angle candidates", "#2d8f7a"),
+        ("body_center", "Debug: legacy body-center patch", "#c05d9f"),
+        ("final_merge", "Debug: merged candidates", "#5176b8"),
+        ("dbscan", "Debug: DBSCAN before score filter", "#0e8a7e"),
+        ("tracks", "Debug: all tracker history", "#596273"),
+        ("display_all", "Debug: display + tentative", "#6c8c4c"),
     ]
     label_to_stage = {label: (stage, label, color) for stage, label, color in stage_options}
-    default_labels = ["RDA dense points", "CFAR seeds", "Raw angle candidates", "Blob grouping points", "Blob-centered candidates", "Tracker state", "Display output"]
+    default_labels = [
+        "RDA dense points",
+        "CFAR seeds",
+        "Blob grouping points",
+        "Blob-centered candidates",
+        "RD/CFAR guarded output",
+        "Score-filtered output",
+        "Tracker input",
+        "Display accepted tracks",
+    ]
     selected_labels = st.multiselect(
         "Trajectory Stages",
         list(label_to_stage.keys()),
@@ -1620,10 +1831,10 @@ def _render_stage_sequence_overview(trace_rows: list[dict]) -> None:
         help=(
             "전체 움직임을 처리 단계별 궤적으로 비교합니다. "
             "RDA dense는 threshold 이상 cube cell, CFAR seeds는 range-doppler peak를 angle로 투영한 점, "
-            "Raw angle은 angle 검증 통과 후보, Blob grouping은 같은 사람으로 묶인 cube cell입니다. "
-            "실제 반영 여부는 Score-filtered output과 Tracker input을 같이 보세요."
+            "Blob grouping/Blob-centered는 현재 RDA blob 중심화 경로입니다. "
+            "Debug 단계는 버려진 후보나 tentative track 이력까지 보는 용도라 최종 출력과 다를 수 있습니다."
         ),
-        key="stage_trajectory_stages_v3",
+        key="stage_trajectory_stages_v4",
     )
     selected_stages = [label_to_stage[label] for label in selected_labels] or [label_to_stage["Score-filtered output"]]
 
@@ -1673,12 +1884,14 @@ def _render_trace_funnel(trace: dict) -> None:
         ("Legacy Body", _nested_get(detection, "body_center_refinement", "refined_count", default=0), "#c05d9f"),
         ("Blob Points", _trace_stage_count(trace, "blob_grouping"), "#9b6a2f"),
         ("RDA Blob", _nested_get(detection, "blob_center_refinement", "output_count", default=0), "#8d63c7"),
+        ("RD/CFAR Guard", _nested_get(detection, "rd_cfar_output_guard", "output_count", default=0), "#af3d0f"),
         ("Final Merge", _nested_get(detection, "candidate_merge_final", "after_count", default=0), "#5176b8"),
         ("DBSCAN", _nested_get(detection, "dbscan", "output_count", default=0), "#0e8a7e"),
+        ("R-D Ambig.", _nested_get(detection, "range_doppler_ambiguity_suppression", "after_count", default=0), "#b54708"),
         ("Score Filter", score_filtered_count, "#0b7285"),
         ("Tracker In", _nested_get(trace, "tracker_input_filter", "tracker_input_count", default=0), "#6155b8"),
         ("Matched", _nested_get(tracker, "association", "matched_count", default=0), "#8d63c7"),
-        ("Display", _nested_get(trace, "display_output", "confirmed_count", default=0), "#1b7a4c"),
+        ("Accepted Display", _nested_get(trace, "display_output", "confirmed_count", default=0), "#1b7a4c"),
     ]
     numeric_counts = [max(0.0, _as_float(count, 0.0) or 0.0) for _, count, _ in stages]
     max_count = max(numeric_counts) if numeric_counts else 1.0
@@ -1709,6 +1922,7 @@ def _render_trace_spatial_view_svg_legacy(trace: dict) -> None:
         ("angle", "Angle", "#2d8f7a", 4.8, 0.45),
         ("body_center", "Body", "#c05d9f", 5.4, 0.72),
         ("blob_center", "RDA Blob", "#8d63c7", 6.2, 0.88),
+        ("rd_cfar_guard", "RD Guard", "#af3d0f", 6.8, 0.90),
         ("final_merge", "Merge", "#5176b8", 5.8, 0.76),
         ("dbscan", "DBSCAN", "#0e8a7e", 7.2, 0.92),
         ("score_filtered", "Score", "#0b7285", 7.8, 0.94),
@@ -2058,7 +2272,10 @@ def _load_compare_final_trajectory(session_id: str) -> dict:
             "manifest": manifest,
         }
 
-    for stage, label in [("display", "Display output"), ("tracks", "Tracker state")]:
+    for stage, label in [
+        ("display_confirmed", "Display accepted tracks"),
+        ("tracks_confirmed", "Tracker confirmed state"),
+    ]:
         trajectory = _collect_stage_trajectory(trace_rows, stage)
         if trajectory:
             return {
@@ -2240,18 +2457,42 @@ def _render_sequence_trajectory_overlay(trace_rows: list[dict], selected_stages:
         fig,
         caption=(
             "각 패널은 stage별 후보 중 score/confidence가 가장 큰 대표점 1개만 연결합니다. "
-            "Angle/Body/DBSCAN은 score filter 전 후보라서 버려진 ghost가 보일 수 있습니다. "
-            "실제 tracker에 들어가는 결과는 Score-filtered output, Tracker state, Display output으로 확인하세요. "
-            "2명 교차 분리 판단은 위의 Multi-object Track Trajectory를 기준으로 보세요."
+            "기본 선택 단계는 현재 알고리즘 흐름과 같은 순서입니다. "
+            "Debug 단계는 score filter 전 후보나 tentative 이력을 포함할 수 있어 최종 출력과 다르게 보입니다. "
+            "실제 tracker 입력은 Tracker input, 최종 표시 결과는 Display accepted tracks를 기준으로 보세요."
         ),
     )
 
 
 def _render_multi_track_trajectory_overlay(trace_rows: list[dict]) -> None:
-    stage_specs = [
-        ("tracks", "Tracker state by track_id"),
-        ("display", "Display output by track_id"),
-    ]
+    st.markdown("### Multi-object Track Trajectory")
+    debug_history = st.checkbox(
+        "Show debug track history",
+        value=False,
+        help=(
+            "끄면 현재 알고리즘 최종 출력에 가까운 confirmed/display accepted track만 보여줍니다. "
+            "켜면 tentative, 짧게 태어난 ghost track까지 포함해 디버그합니다."
+        ),
+        key="show_debug_track_history_v1",
+    )
+    min_track_frames = st.slider(
+        "Min frames per track",
+        min_value=1,
+        max_value=20,
+        value=1 if debug_history else 4,
+        help="짧게 태어난 ghost/tentative track을 최종 궤적 그림에서 숨기는 표시 필터입니다. 원 데이터는 바꾸지 않습니다.",
+        key="multi_track_min_frames_v1",
+    )
+    if debug_history:
+        stage_specs = [
+            ("tracks", "Debug: all tracker history by track_id"),
+            ("display_all", "Debug: display + tentative by track_id"),
+        ]
+    else:
+        stage_specs = [
+            ("tracks_confirmed", "Tracker confirmed by track_id"),
+            ("display_confirmed", "Display accepted by track_id"),
+        ]
     panels = []
     for stage, label in stage_specs:
         trajectories = _collect_stage_track_trajectories(trace_rows, stage)
@@ -2261,13 +2502,13 @@ def _render_multi_track_trajectory_overlay(trace_rows: list[dict]) -> None:
                 trajectories.items(),
                 key=lambda item: (-len(item[1]), item[0]),
             )
-            if rows
+            if rows and len(rows) >= int(min_track_frames)
         }
         if trajectories:
             panels.append((stage, label, trajectories))
 
     if not panels:
-        st.caption("track_id가 있는 multi-object trajectory 데이터가 없습니다.")
+        st.caption("표시 기준을 통과한 track_id trajectory가 없습니다. 디버그 이력을 보려면 Show debug track history를 켜거나 Min frames를 낮춰 주세요.")
         return
 
     all_points = [
@@ -2283,8 +2524,9 @@ def _render_multi_track_trajectory_overlay(trace_rows: list[dict]) -> None:
     columns = len(panels)
     fig, plt = _make_figure(width=5.4 * columns, height=4.4)
     axes = fig.subplots(1, columns, squeeze=False)
+    title_suffix = "debug all histories" if debug_history else "algorithm accepted output"
     fig.suptitle(
-        "Multi-object Track Trajectory",
+        f"Multi-object Track Trajectory ({title_suffix})",
         x=0.01,
         ha="left",
         fontsize=13,
@@ -2327,8 +2569,8 @@ def _render_multi_track_trajectory_overlay(trace_rows: list[dict]) -> None:
     _render_matplotlib_figure(
         fig,
         caption=(
-            "기존 stage 궤적은 프레임별 대표점 1개를 그립니다. "
-            "이 그래프는 confirmed/tentative track을 track_id별로 분리해 2명 교차 시 ID 유지 여부를 봅니다."
+            "기본값은 현재 알고리즘의 accepted confirmed/display track만 track_id별로 그립니다. "
+            "짧게 태어난 ghost/tentative track은 디버그 모드에서 따로 확인하세요."
         ),
     )
     _render_table(stat_rows, key="multi-track-trajectory-stats", height=220)
@@ -2362,14 +2604,16 @@ def _render_trace_spatial_view(trace: dict) -> None:
     stage_specs = [
         ("rda_dense", "RDA Dense", "#667085", 160, 18, 0.32),
         ("cfar_seed", "CFAR Seed", "#2869a6", 48, 30, 0.52),
-        ("angle", "Raw Angle", "#2d8f7a"),
-        ("body_center", "Legacy Body", "#c05d9f"),
         ("blob_grouping", "Blob Points", "#9b6a2f", 160, 16, 0.30),
         ("blob_center", "RDA Blob", "#8d63c7"),
-        ("final_merge", "Merge", "#5176b8"),
-        ("dbscan", "DBSCAN", "#0e8a7e"),
+        ("rd_cfar_guard", "RD/CFAR Guard", "#af3d0f"),
+        ("score_filtered", "Score Filter", "#0b7285"),
         ("tracker_input", "Tracker In", "#6155b8"),
-        ("display", "Display", "#1b7a4c"),
+        ("display_confirmed", "Accepted Display", "#1b7a4c"),
+        ("angle", "Debug Raw Angle", "#2d8f7a"),
+        ("body_center", "Debug Legacy Body", "#c05d9f"),
+        ("final_merge", "Debug Merge", "#5176b8"),
+        ("dbscan", "Debug DBSCAN", "#0e8a7e"),
     ]
     point_sets = []
     all_points = []
@@ -2415,14 +2659,14 @@ def _render_trace_spatial_view(trace: dict) -> None:
     ax.scatter([0.0], [0.0], s=70, color="#172232", marker="s", label="radar", zorder=6)
     ax.set_xlim(-x_abs * 1.12, x_abs * 1.12)
     ax.set_ylim(0.0, y_max * 1.08)
-    ax.set_title("Candidate Spatial Evolution", loc="left", fontsize=12, fontweight="bold", color="#163044")
+    ax.set_title("Current Pipeline Spatial Evolution", loc="left", fontsize=12, fontweight="bold", color="#163044")
     ax.set_xlabel("x: radar-left (-) / radar-right (+) (m)")
     ax.set_ylabel("y: forward (m)")
     ax.grid(True, color="#e5edf2", linewidth=0.8)
     ax.spines[["top", "right"]].set_visible(False)
     ax.set_facecolor("#fbfdfe")
     ax.legend(loc="best", frameon=False, fontsize=8)
-    _render_matplotlib_figure(fig, caption="선택 frame에서 stage별 후보가 x/y 평면 어디에 남았는지 보여 줍니다.")
+    _render_matplotlib_figure(fig, caption="선택 frame에서 현재 알고리즘 경로를 먼저 그리고, Debug stage는 버려진 후보 확인용으로 함께 표시합니다.")
 
 
 def _run_filters(
@@ -4273,6 +4517,36 @@ def _stage_page() -> None:
         ),
     )
     selected_ablation_mode = mode_options[selected_ablation_label]
+    tdm_col, sign_col = st.columns([2, 1])
+    with tdm_col:
+        selected_tdm_mode = st.selectbox(
+            "TDM Doppler Compensation",
+            ["current tuning", "force off", "force on"],
+            index=0,
+            help=(
+                "TDM-MIMO TX 슬롯 시간차 보정을 stage cache replay에 강제로 적용하거나 끕니다. "
+                "같은 raw에서 off/on을 각각 생성하면 Doppler phase 보정 효과를 비교할 수 있습니다."
+            ),
+        )
+    with sign_col:
+        selected_tdm_phase_sign = st.selectbox(
+            "TDM Phase Sign",
+            [1.0, -1.0],
+            index=0,
+            help="force on일 때만 의미가 있습니다. 부호가 반대면 angle ghost가 더 커질 수 있습니다.",
+        )
+    if selected_tdm_mode == "current tuning":
+        selected_tdm_override = None
+        selected_tdm_variant = None
+        selected_tdm_phase_override = None
+    elif selected_tdm_mode == "force off":
+        selected_tdm_override = False
+        selected_tdm_variant = "tdm_off"
+        selected_tdm_phase_override = None
+    else:
+        selected_tdm_override = True
+        selected_tdm_phase_override = float(selected_tdm_phase_sign)
+        selected_tdm_variant = f"tdm_on_{'pos' if selected_tdm_phase_sign > 0 else 'neg'}"
     st.caption(
         "`baseline`: 현재 기본 처리 | `rda_candidates`: Doppler slice 후보 + DBSCAN 끔 | "
         "`person_blob`: Doppler patch 기반 사람 덩어리 중심화 | "
@@ -4281,10 +4555,21 @@ def _stage_page() -> None:
         "`multi_tracker_relaxed`: 후보 보호 + tracker 완화 | "
         "`no_*`: 단계별 끄기 실험"
     )
-    manifest = stage_cache.load_stage_cache_manifest(PROJECT_ROOT, selected_session, selected_ablation_mode)
-    cache_paths = stage_cache.stage_cache_paths(PROJECT_ROOT, selected_session, selected_ablation_mode)
-    stage_cache_enabled = bool(detail.get("capture_id"))
-    if not stage_cache_enabled:
+    manifest = stage_cache.load_stage_cache_manifest(
+        PROJECT_ROOT,
+        selected_session,
+        selected_ablation_mode,
+        selected_tdm_variant,
+    )
+    cache_paths = stage_cache.stage_cache_paths(
+        PROJECT_ROOT,
+        selected_session,
+        selected_ablation_mode,
+        selected_tdm_variant,
+    )
+    raw_capture_status = stage_cache.raw_capture_status_for_run(PROJECT_ROOT, detail)
+    stage_cache_enabled = bool(raw_capture_status.get("usable"))
+    if not detail.get("capture_id"):
         st.info(
             "이 세션은 raw capture가 연결되어 있지 않아 stage cache를 만들 수 없습니다. "
             "Stage Cache는 `Capture Link`가 있는 replay/live 세션에서만 생성할 수 있습니다."
@@ -4292,6 +4577,32 @@ def _stage_page() -> None:
         if raw_linked_runs:
             recommended = ", ".join(row["session_id"] for row in raw_linked_runs[:5])
             st.caption(f"예시 raw-linked run: {recommended}")
+    elif not stage_cache_enabled:
+        st.warning(
+            "이 세션의 raw capture 폴더는 있지만 replay에 필요한 파일이 부족해서 "
+            "Stage Cache를 만들 수 없습니다. `Force Rebuild`는 기존 raw를 다시 처리할 뿐, "
+            "없는 raw index/data 파일을 새로 만들지는 못합니다."
+        )
+        checked = raw_capture_status.get("checked") or []
+        with st.expander("Raw capture 확인 결과", expanded=False):
+            if checked:
+                for item in checked[:8]:
+                    missing = ", ".join(item.get("missing") or [])
+                    st.write(
+                        f"- `{item.get('path')}`: {item.get('status')}"
+                        + (f" | missing: `{missing}`" if missing else "")
+                    )
+            else:
+                st.write("- raw capture 후보 경로를 찾지 못했습니다.")
+            st.caption("필수 파일: `capture_manifest.json`, `raw_frames_index.jsonl`, `raw_frames.i16`")
+        if raw_linked_runs:
+            recommended = ", ".join(
+                row["session_id"]
+                for row in raw_linked_runs[:8]
+                if row.get("session_id") != selected_session
+            )
+            if recommended:
+                st.caption(f"다른 raw-linked run을 선택해 보세요: {recommended}")
 
     build_col, force_col = st.columns([3, 1])
     with build_col:
@@ -4319,16 +4630,29 @@ def _stage_page() -> None:
                     frame_limit=(int(frame_limit) or None),
                     force=bool(force_rebuild),
                     ablation_mode=selected_ablation_mode,
+                    variant_label=selected_tdm_variant,
+                    tdm_compensation_override=selected_tdm_override,
+                    tdm_phase_sign_override=selected_tdm_phase_override,
                 )
             st.success(
                 f"stage cache ready: frames={manifest.get('frame_count', 0)} | "
                 f"capture={manifest.get('capture_id') or detail.get('capture_id') or 'n/a'}"
             )
             _rerun()
+        except FileNotFoundError as error:
+            st.warning(
+                "stage cache를 만들 수 없습니다. 선택한 세션의 raw capture가 없거나 불완전합니다. "
+                f"상세: {error}"
+            )
         except Exception as error:
             st.error(f"stage cache 생성 중 오류가 발생했습니다: {error}")
 
-    manifest = stage_cache.load_stage_cache_manifest(PROJECT_ROOT, selected_session, selected_ablation_mode)
+    manifest = stage_cache.load_stage_cache_manifest(
+        PROJECT_ROOT,
+        selected_session,
+        selected_ablation_mode,
+        selected_tdm_variant,
+    )
     if manifest:
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Cached Frames", manifest.get("frame_count", 0))
@@ -4352,9 +4676,16 @@ def _stage_page() -> None:
                 }
         )
     else:
-        st.info("아직 stage cache가 없습니다. 위 버튼으로 raw replay cache를 생성해 주세요.")
+        if stage_cache_enabled:
+            st.info("아직 stage cache가 없습니다. 위 버튼으로 raw replay cache를 생성해 주세요.")
+        else:
+            st.info(
+                "아직 stage cache가 없습니다. 다만 이 세션은 replay에 필요한 raw 파일이 부족해서 "
+                "Force Rebuild로 생성할 수 없습니다. 다른 raw-linked run을 선택하거나 새로 측정해야 합니다."
+            )
 
-    _render_stage_ablation_comparison(selected_session, mode_options)
+    if stage_cache_enabled:
+        _render_stage_ablation_comparison(selected_session, mode_options)
 
     stage_data = (detail.get("summary") or {}).get("diagnostics", {}).get("preferred_stage_timings_ms", {})
     timings = stage_data.get("timings", {})
@@ -4387,12 +4718,22 @@ def _stage_page() -> None:
     if not manifest:
         return
 
-    frames = stage_cache.load_stage_cache_frames(PROJECT_ROOT, selected_session, selected_ablation_mode)
+    frames = stage_cache.load_stage_cache_frames(
+        PROJECT_ROOT,
+        selected_session,
+        selected_ablation_mode,
+        selected_tdm_variant,
+    )
     if not frames:
         st.warning("stage cache manifest는 있지만 frame record가 비어 있습니다. 다시 생성해 보는 편이 좋습니다.")
         return
 
-    trace_rows = stage_cache.load_stage_traces(PROJECT_ROOT, selected_session, selected_ablation_mode)
+    trace_rows = stage_cache.load_stage_traces(
+        PROJECT_ROOT,
+        selected_session,
+        selected_ablation_mode,
+        selected_tdm_variant,
+    )
     st.markdown("### Whole Sequence Stage View")
     st.caption(
         "raw를 다시 처리한 뒤 stage별 출력 궤적을 전체 이동 기준으로 비교합니다. "
@@ -4406,8 +4747,14 @@ def _stage_page() -> None:
         selected_session,
         selected_ordinal,
         selected_ablation_mode,
+        selected_tdm_variant,
     )
-    feature_rows = stage_cache.load_stage_features(PROJECT_ROOT, selected_session, selected_ablation_mode)
+    feature_rows = stage_cache.load_stage_features(
+        PROJECT_ROOT,
+        selected_session,
+        selected_ablation_mode,
+        selected_tdm_variant,
+    )
     feature_record = next(
         (row for row in feature_rows if int(row.get("ordinal", -1)) == int(selected_ordinal)),
         {},

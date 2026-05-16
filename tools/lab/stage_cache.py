@@ -166,7 +166,22 @@ def _source_capture_candidates(project_root: Path, value: str | Path | None) -> 
     return candidates
 
 
-def _resolve_capture_dir(project_root: Path, run_detail: dict) -> Path:
+RAW_CAPTURE_REQUIRED_FILES = ("capture_manifest.json", "raw_frames_index.jsonl", "raw_frames.i16")
+
+
+def _raw_capture_missing_files(capture_dir: Path) -> list[str]:
+    missing: list[str] = []
+    for filename in RAW_CAPTURE_REQUIRED_FILES:
+        file_path = capture_dir / filename
+        if not file_path.exists():
+            missing.append(filename)
+            continue
+        if filename != "capture_manifest.json" and file_path.stat().st_size <= 0:
+            missing.append(f"{filename} (empty)")
+    return missing
+
+
+def _capture_candidate_paths(project_root: Path, run_detail: dict) -> list[Path]:
     capture_candidates = []
     if run_detail.get("capture_id"):
         capture_candidates.extend(
@@ -192,14 +207,95 @@ def _resolve_capture_dir(project_root: Path, run_detail: dict) -> Path:
         if value is not None
     )
 
+    unique_candidates: list[Path] = []
+    seen: set[str] = set()
     for candidate in capture_candidates:
-        if candidate.exists():
-            return candidate
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_candidates.append(candidate)
+    return unique_candidates
 
-    raise FileNotFoundError(
-        "This run does not have a resolvable raw capture directory. "
-        "Check capture linking or record a session with raw capture enabled."
+
+def raw_capture_status_for_run(project_root: Path, run_detail: dict) -> dict:
+    checked: list[dict] = []
+    for candidate in _capture_candidate_paths(project_root, run_detail):
+        if not candidate.exists():
+            checked.append(
+                {
+                    "path": str(candidate),
+                    "usable": False,
+                    "status": "missing_directory",
+                    "missing": ["directory"],
+                }
+            )
+            continue
+        missing = _raw_capture_missing_files(candidate)
+        if missing:
+            checked.append(
+                {
+                    "path": str(candidate),
+                    "usable": False,
+                    "status": "incomplete_raw_capture",
+                    "missing": missing,
+                }
+            )
+            continue
+        return {
+            "usable": True,
+            "status": "ready",
+            "path": str(candidate),
+            "missing": [],
+            "checked": checked
+            + [
+                {
+                    "path": str(candidate),
+                    "usable": True,
+                    "status": "ready",
+                    "missing": [],
+                }
+            ],
+        }
+
+    return {
+        "usable": False,
+        "status": "no_usable_raw_capture",
+        "path": None,
+        "missing": [],
+        "checked": checked,
+    }
+
+
+def _format_capture_status_error(status: dict) -> str:
+    checked = status.get("checked") or []
+    if not checked:
+        return (
+            "This run does not have a resolvable raw capture directory. "
+            "Record a session with raw capture enabled or choose a raw-linked replay run."
+        )
+    details = []
+    for item in checked[:5]:
+        missing = ", ".join(item.get("missing") or [])
+        suffix = f" missing={missing}" if missing else ""
+        details.append(f"{item.get('path')} [{item.get('status')}]{suffix}")
+    if len(checked) > 5:
+        details.append(f"... {len(checked) - 5} more candidate(s)")
+    return (
+        "No usable replay raw capture was found. Stage Cache needs "
+        "`capture_manifest.json`, `raw_frames_index.jsonl`, and `raw_frames.i16`. "
+        "Checked: "
+        + " | ".join(details)
     )
+
+
+def _resolve_capture_dir(project_root: Path, run_detail: dict) -> Path:
+    status = raw_capture_status_for_run(project_root, run_detail)
+    if status.get("usable") and status.get("path"):
+        return Path(status["path"])
+
+    raise FileNotFoundError(_format_capture_status_error(status))
+
 
 
 def _merge_runtime_summary(run_detail: dict, capture_manifest: dict) -> dict:
@@ -649,6 +745,23 @@ def _build_runtime_components(
         getattr(runtime_config, "angle_source", angle_source or "collapsed_rai") or "collapsed_rai"
     ).strip().lower()
     detection_params["angle_source"] = resolved_angle_source
+    detection_params.setdefault("range_doppler_ambiguity_suppression_enabled", True)
+    detection_params.setdefault("range_doppler_ambiguity_range_tolerance_m", 0.32)
+    detection_params.setdefault("range_doppler_ambiguity_doppler_bins", 2)
+    detection_params.setdefault("range_doppler_ambiguity_min_angle_delta_deg", 14.0)
+    detection_params.setdefault("range_doppler_ambiguity_min_separation_m", 0.70)
+    detection_params.setdefault("range_doppler_ambiguity_mirror_x_tolerance_m", 0.50)
+    detection_params.setdefault("range_doppler_ambiguity_mirror_y_tolerance_m", 0.45)
+    detection_params.setdefault("range_doppler_ambiguity_min_abs_angle_deg", 4.0)
+    detection_params.setdefault("rd_cfar_output_guard_enabled", True)
+    detection_params.setdefault("rd_cfar_output_guard_max_references", 16)
+    detection_params.setdefault("rd_cfar_output_guard_min_reference_score_ratio", 0.05)
+    detection_params.setdefault("rd_cfar_output_guard_range_tolerance_m", 0.50)
+    detection_params.setdefault("rd_cfar_output_guard_doppler_bins", 3)
+    detection_params.setdefault("rd_cfar_output_guard_prefer_references", True)
+    detection_params.setdefault("rd_cfar_output_guard_replace_shifted", True)
+    detection_params.setdefault("rd_cfar_output_guard_replace_shift_m", 0.35)
+    detection_params.setdefault("rd_cfar_output_guard_fallback_to_references", True)
 
     tracker_enabled = True
     tracker_overrides = {}
@@ -671,35 +784,54 @@ def _build_runtime_components(
         detection_params["angle_source"] = "doppler_slice_rai"
         detection_params["blob_center_refinement_enabled"] = True
         detection_params["blob_center_max_candidates"] = 36
-        detection_params["blob_center_min_points"] = 2
+        detection_params["blob_center_min_points"] = 4
         detection_params["blob_center_min_score_ratio"] = 0.04
-        detection_params["blob_center_cluster_radius_m"] = 0.65
+        detection_params["blob_center_cluster_radius_m"] = 0.55
         detection_params["blob_center_cluster_radius_range_scale"] = 0.04
         detection_params["blob_center_cluster_radius_bands"] = [
-            {"r_min": 0.0, "r_max": 1.5, "radius_m": 0.55},
-            {"r_min": 1.5, "r_max": 3.0, "radius_m": 0.72},
-            {"r_min": 3.0, "r_max": None, "radius_m": 0.90},
+            {"r_min": 0.0, "r_max": 1.5, "radius_m": 0.45},
+            {"r_min": 1.5, "r_max": 3.0, "radius_m": 0.58},
+            {"r_min": 3.0, "r_max": None, "radius_m": 0.72},
         ]
-        detection_params["blob_center_doppler_radius_bins"] = 10
+        detection_params["blob_center_doppler_radius_bins"] = 4
         detection_params["blob_center_method"] = "weighted_median_trimmed"
-        detection_params["blob_center_trim_radius_m"] = 0.85
+        detection_params["blob_center_trim_radius_m"] = 0.65
         detection_params["blob_center_floor_quantile"] = 0.65
         detection_params["blob_center_peak_blend"] = 0.0
         detection_params["blob_center_single_min_score_ratio"] = 0.12
         detection_params["blob_center_single_range_window_m"] = 1.05
         detection_params["blob_center_single_side_deadband_m"] = 0.15
         detection_params["blob_center_cube_range_radius_m"] = 0.45
-        detection_params["blob_center_cube_angle_radius_deg"] = 18.0
-        detection_params["blob_center_cube_relative_floor"] = 0.32
+        detection_params["blob_center_cube_angle_radius_deg"] = 12.0
+        detection_params["blob_center_cube_relative_floor"] = 0.38
         detection_params["blob_center_dense_enabled"] = True
         detection_params["blob_center_dense_quantile"] = 0.995
         detection_params["blob_center_dense_min_normalized_power"] = 0.08
         detection_params["blob_center_dense_max_points"] = 2400
-        detection_params["blob_center_dense_min_points"] = 6
+        detection_params["blob_center_dense_min_points"] = 8
         detection_params["blob_center_dense_grouping_mode"] = "rd_primary"
-        detection_params["blob_center_dense_angle_radius_deg"] = 18.0
+        detection_params["blob_center_dense_angle_radius_deg"] = 12.0
         detection_params["blob_center_dense_angle_floor_quantile"] = 0.70
-        detection_params["blob_center_dense_angle_relative_floor"] = 0.25
+        detection_params["blob_center_dense_angle_relative_floor"] = 0.38
+        detection_params["blob_center_anchor_max_shift_m"] = 0.38
+        detection_params["blob_center_anchor_blend"] = 0.82
+        detection_params["range_doppler_ambiguity_suppression_enabled"] = True
+        detection_params["range_doppler_ambiguity_range_tolerance_m"] = 0.32
+        detection_params["range_doppler_ambiguity_doppler_bins"] = 2
+        detection_params["range_doppler_ambiguity_min_angle_delta_deg"] = 14.0
+        detection_params["range_doppler_ambiguity_min_separation_m"] = 0.70
+        detection_params["range_doppler_ambiguity_mirror_x_tolerance_m"] = 0.50
+        detection_params["range_doppler_ambiguity_mirror_y_tolerance_m"] = 0.45
+        detection_params["range_doppler_ambiguity_min_abs_angle_deg"] = 4.0
+        detection_params["rd_cfar_output_guard_enabled"] = True
+        detection_params["rd_cfar_output_guard_max_references"] = 16
+        detection_params["rd_cfar_output_guard_min_reference_score_ratio"] = 0.05
+        detection_params["rd_cfar_output_guard_range_tolerance_m"] = 0.50
+        detection_params["rd_cfar_output_guard_doppler_bins"] = 3
+        detection_params["rd_cfar_output_guard_prefer_references"] = True
+        detection_params["rd_cfar_output_guard_replace_shifted"] = True
+        detection_params["rd_cfar_output_guard_replace_shift_m"] = 0.35
+        detection_params["rd_cfar_output_guard_fallback_to_references"] = True
         detection_params["min_output_score"] = max(float(detection_params.get("min_output_score", 0.0) or 0.0), 0.25)
     elif ablation_mode == "person_aware_merge":
         detection_params["angle_source"] = "doppler_slice_rai"
@@ -819,6 +951,16 @@ def _build_runtime_components(
         ),
         forward_smoothing_alpha=float(runtime_summary.get("track_forward_smoothing_alpha", 1.0)),
         forward_velocity_damping=float(runtime_summary.get("track_forward_velocity_damping", 1.0)),
+        measurement_follow_enabled=bool(
+            runtime_summary.get("track_measurement_follow_enabled", False)
+        ),
+        measurement_follow_blend=float(runtime_summary.get("track_measurement_follow_blend", 0.0)),
+        measurement_follow_min_quality=float(
+            runtime_summary.get("track_measurement_follow_min_quality", 0.0)
+        ),
+        measurement_follow_max_residual_m=float(
+            runtime_summary.get("track_measurement_follow_max_residual_m", 0.0)
+        ),
         local_remeasurement_enabled=bool(
             runtime_summary.get("track_local_remeasurement_enabled", False)
         ),

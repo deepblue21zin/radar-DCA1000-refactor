@@ -167,6 +167,12 @@ TRACK_LINE_PROJECTION_MAX_SHIFT_M = float(
 )
 TRACK_FORWARD_SMOOTHING_ALPHA = float(TUNING['tracking'].get('forward_smoothing_alpha', 1.0))
 TRACK_FORWARD_VELOCITY_DAMPING = float(TUNING['tracking'].get('forward_velocity_damping', 1.0))
+TRACK_MEASUREMENT_FOLLOW_ENABLED = bool(TUNING['tracking'].get('measurement_follow_enabled', False))
+TRACK_MEASUREMENT_FOLLOW_BLEND = float(TUNING['tracking'].get('measurement_follow_blend', 0.0))
+TRACK_MEASUREMENT_FOLLOW_MIN_QUALITY = float(TUNING['tracking'].get('measurement_follow_min_quality', 0.0))
+TRACK_MEASUREMENT_FOLLOW_MAX_RESIDUAL_M = float(
+    TUNING['tracking'].get('measurement_follow_max_residual_m', 0.0)
+)
 TRACK_LOCAL_REMEASUREMENT_ENABLED = bool(TUNING['tracking'].get('local_remeasurement_enabled', False))
 TRACK_LOCAL_REMEASUREMENT_BLEND = float(TUNING['tracking'].get('local_remeasurement_blend', 0.0))
 TRACK_LOCAL_REMEASUREMENT_MAX_SHIFT_M = float(TUNING['tracking'].get('local_remeasurement_max_shift_m', 0.0))
@@ -219,6 +225,14 @@ DETECTION_TUNING = {
     'duplicate_suppression_range_scale': float(DETECTION_ALGORITHM.get('duplicate_suppression_range_scale', 0.03)),
     'duplicate_suppression_doppler_bins': int(DETECTION_ALGORITHM.get('duplicate_suppression_doppler_bins', 6)),
     'duplicate_suppression_score_ratio': float(DETECTION_ALGORITHM.get('duplicate_suppression_score_ratio', 0.82)),
+    'range_doppler_ambiguity_suppression_enabled': bool(DETECTION_ALGORITHM.get('range_doppler_ambiguity_suppression_enabled', False)),
+    'range_doppler_ambiguity_range_tolerance_m': float(DETECTION_ALGORITHM.get('range_doppler_ambiguity_range_tolerance_m', 0.30)),
+    'range_doppler_ambiguity_doppler_bins': int(DETECTION_ALGORITHM.get('range_doppler_ambiguity_doppler_bins', 2)),
+    'range_doppler_ambiguity_min_angle_delta_deg': float(DETECTION_ALGORITHM.get('range_doppler_ambiguity_min_angle_delta_deg', 16.0)),
+    'range_doppler_ambiguity_min_separation_m': float(DETECTION_ALGORITHM.get('range_doppler_ambiguity_min_separation_m', 0.75)),
+    'range_doppler_ambiguity_mirror_x_tolerance_m': float(DETECTION_ALGORITHM.get('range_doppler_ambiguity_mirror_x_tolerance_m', 0.45)),
+    'range_doppler_ambiguity_mirror_y_tolerance_m': float(DETECTION_ALGORITHM.get('range_doppler_ambiguity_mirror_y_tolerance_m', 0.45)),
+    'range_doppler_ambiguity_min_abs_angle_deg': float(DETECTION_ALGORITHM.get('range_doppler_ambiguity_min_abs_angle_deg', 4.0)),
     'object_count_estimator_enabled': bool(DETECTION_ALGORITHM.get('object_count_estimator_enabled', True)),
     'object_count_max_objects': int(DETECTION_ALGORITHM.get('object_count_max_objects', 3)),
     'object_count_min_separation_m': float(DETECTION_ALGORITHM.get('object_count_min_separation_m', 0.65)),
@@ -537,6 +551,10 @@ class MotionViewer:
             'track_line_projection_max_shift_m': TRACK_LINE_PROJECTION_MAX_SHIFT_M,
             'track_forward_smoothing_alpha': TRACK_FORWARD_SMOOTHING_ALPHA,
             'track_forward_velocity_damping': TRACK_FORWARD_VELOCITY_DAMPING,
+            'track_measurement_follow_enabled': TRACK_MEASUREMENT_FOLLOW_ENABLED,
+            'track_measurement_follow_blend': TRACK_MEASUREMENT_FOLLOW_BLEND,
+            'track_measurement_follow_min_quality': TRACK_MEASUREMENT_FOLLOW_MIN_QUALITY,
+            'track_measurement_follow_max_residual_m': TRACK_MEASUREMENT_FOLLOW_MAX_RESIDUAL_M,
             'track_local_remeasurement_enabled': TRACK_LOCAL_REMEASUREMENT_ENABLED,
             'track_local_remeasurement_blend': TRACK_LOCAL_REMEASUREMENT_BLEND,
             'track_local_remeasurement_max_shift_m': TRACK_LOCAL_REMEASUREMENT_MAX_SHIFT_M,
@@ -646,6 +664,10 @@ class MotionViewer:
             track_line_projection_max_shift_m=TRACK_LINE_PROJECTION_MAX_SHIFT_M,
             forward_smoothing_alpha=TRACK_FORWARD_SMOOTHING_ALPHA,
             forward_velocity_damping=TRACK_FORWARD_VELOCITY_DAMPING,
+            measurement_follow_enabled=TRACK_MEASUREMENT_FOLLOW_ENABLED,
+            measurement_follow_blend=TRACK_MEASUREMENT_FOLLOW_BLEND,
+            measurement_follow_min_quality=TRACK_MEASUREMENT_FOLLOW_MIN_QUALITY,
+            measurement_follow_max_residual_m=TRACK_MEASUREMENT_FOLLOW_MAX_RESIDUAL_M,
             local_remeasurement_enabled=TRACK_LOCAL_REMEASUREMENT_ENABLED,
             local_remeasurement_blend=TRACK_LOCAL_REMEASUREMENT_BLEND,
             local_remeasurement_max_shift_m=TRACK_LOCAL_REMEASUREMENT_MAX_SHIFT_M,

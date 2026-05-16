@@ -237,6 +237,18 @@ def _scan_raw_index(index_path: Path) -> dict:
     return stats
 
 
+def _raw_replay_missing_files(capture_dir: Path) -> list[str]:
+    missing: list[str] = []
+    for filename in ("capture_manifest.json", "raw_frames_index.jsonl", "raw_frames.i16"):
+        path = capture_dir / filename
+        if not path.exists():
+            missing.append(filename)
+            continue
+        if filename != "capture_manifest.json" and path.stat().st_size <= 0:
+            missing.append(f"{filename} (empty)")
+    return missing
+
+
 def _connect(project_root: Path) -> sqlite3.Connection:
     db_path = database_path(project_root)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -365,13 +377,23 @@ def _capture_id_from_path(path_value: Any, raw_root: Path) -> str | None:
 def _build_capture_record(project_root: Path, capture_dir: Path) -> dict:
     manifest = _load_json(capture_dir / "capture_manifest.json")
     stats = _scan_raw_index(capture_dir / "raw_frames_index.jsonl")
-    quality = _quality_from_stats(
-        stats["frame_count"],
-        stats["invalid_rate"],
-        stats["max_udp_gap_count"],
-        stats["max_out_of_sequence_count"],
-        stats["max_byte_mismatch_count"],
-    )
+    missing_raw_files = _raw_replay_missing_files(capture_dir)
+    if missing_raw_files:
+        quality = {
+            "category": "unusable",
+            "label": "raw missing",
+            "tone": "danger",
+            "suitability": "stage cache 불가",
+            "detail": "replay에 필요한 raw 파일이 없습니다: " + ", ".join(missing_raw_files),
+        }
+    else:
+        quality = _quality_from_stats(
+            stats["frame_count"],
+            stats["invalid_rate"],
+            stats["max_udp_gap_count"],
+            stats["max_out_of_sequence_count"],
+            stats["max_byte_mismatch_count"],
+        )
     source_session_dir = manifest.get("source_session_dir")
     return {
         "capture_id": str(manifest.get("session_id") or capture_dir.name),
