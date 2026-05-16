@@ -1,6 +1,6 @@
 """Lightweight multi-target Kalman tracker for radar cluster centroids."""
 
-from math import atan2, cos, degrees, hypot, radians
+from math import atan2, cos, degrees, hypot, isfinite, radians
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -58,6 +58,10 @@ class MultiTargetTracker:
         track_line_projection_max_shift_m=0.16,
         forward_smoothing_alpha=1.0,
         forward_velocity_damping=1.0,
+        measurement_follow_enabled=False,
+        measurement_follow_blend=0.0,
+        measurement_follow_min_quality=0.0,
+        measurement_follow_max_residual_m=0.0,
         local_remeasurement_enabled=False,
         local_remeasurement_blend=0.0,
         local_remeasurement_max_shift_m=0.0,
@@ -149,6 +153,12 @@ class MultiTargetTracker:
             raise ValueError("forward_smoothing_alpha must be in (0, 1].")
         if not (0.0 < forward_velocity_damping <= 1.0):
             raise ValueError("forward_velocity_damping must be in (0, 1].")
+        if not (0.0 <= measurement_follow_blend <= 1.0):
+            raise ValueError("measurement_follow_blend must be in [0, 1].")
+        if not (0.0 <= measurement_follow_min_quality <= 1.0):
+            raise ValueError("measurement_follow_min_quality must be in [0, 1].")
+        if measurement_follow_max_residual_m < 0:
+            raise ValueError("measurement_follow_max_residual_m must be non-negative.")
         if not (0.0 <= local_remeasurement_blend <= 1.0):
             raise ValueError("local_remeasurement_blend must be in [0, 1].")
         if local_remeasurement_max_shift_m < 0:
@@ -222,6 +232,10 @@ class MultiTargetTracker:
         self.track_line_projection_max_shift_m = float(track_line_projection_max_shift_m)
         self.forward_smoothing_alpha = float(forward_smoothing_alpha)
         self.forward_velocity_damping = float(forward_velocity_damping)
+        self.measurement_follow_enabled = bool(measurement_follow_enabled)
+        self.measurement_follow_blend = float(measurement_follow_blend)
+        self.measurement_follow_min_quality = float(measurement_follow_min_quality)
+        self.measurement_follow_max_residual_m = float(measurement_follow_max_residual_m)
         self.local_remeasurement_enabled = bool(local_remeasurement_enabled)
         self.local_remeasurement_blend = float(local_remeasurement_blend)
         self.local_remeasurement_max_shift_m = float(local_remeasurement_max_shift_m)
@@ -712,6 +726,35 @@ class MultiTargetTracker:
             return float(x_m), float(y_m), 0.0
         adjusted = measurement + (shift_vec * (applied_shift / shift_m))
         return float(adjusted[0]), float(adjusted[1]), float(applied_shift)
+
+    def _follow_measurement_state(
+        self,
+        x_m: float,
+        y_m: float,
+        measurement: dict,
+        measurement_quality: float,
+        residual_m: float,
+    ) -> tuple[float, float, float, float]:
+        if not self.measurement_follow_enabled or self.measurement_follow_blend <= 0.0:
+            return float(x_m), float(y_m), 0.0, 0.0
+        if float(measurement_quality) < self.measurement_follow_min_quality:
+            return float(x_m), float(y_m), 0.0, 0.0
+        if (
+            self.measurement_follow_max_residual_m > 0.0
+            and float(residual_m) > self.measurement_follow_max_residual_m
+        ):
+            return float(x_m), float(y_m), 0.0, 0.0
+
+        target_x = float(measurement["x_m"])
+        target_y = float(measurement["y_m"])
+        if not (isfinite(target_x) and isfinite(target_y)):
+            return float(x_m), float(y_m), 0.0, 0.0
+
+        blend = float(self.measurement_follow_blend)
+        adjusted_x = float(x_m) + ((target_x - float(x_m)) * blend)
+        adjusted_y = float(y_m) + ((target_y - float(y_m)) * blend)
+        shift_m = float(hypot(adjusted_x - float(x_m), adjusted_y - float(y_m)))
+        return adjusted_x, adjusted_y, shift_m, blend
 
     def _local_remeasurement_patch_for_range(self, range_m: float) -> tuple[int, int, float]:
         range_radius_bins = 1
@@ -1311,8 +1354,17 @@ class MultiTargetTracker:
                 stabilized_x,
                 stabilized_y,
             )
-            track.kf.x[0][0] = projected_x
-            track.kf.x[1][0] = projected_y
+            followed_x, followed_y, measurement_follow_shift_m, measurement_follow_blend = (
+                self._follow_measurement_state(
+                    projected_x,
+                    projected_y,
+                    measurement,
+                    measurement_quality,
+                    measurement_residual_m,
+                )
+            )
+            track.kf.x[0][0] = followed_x
+            track.kf.x[1][0] = followed_y
             track.kf.x[2][0] = stabilized_vx
             track.kf.x[3][0] = stabilized_vy
             self._append_track_path_history(
@@ -1348,6 +1400,8 @@ class MultiTargetTracker:
                         "measurement_quality": round(float(measurement_quality), 4),
                         "measurement_residual_m": round(float(measurement_residual_m), 4),
                         "line_projection_shift_m": round(float(line_projection_shift_m), 4),
+                        "measurement_follow_shift_m": round(float(measurement_follow_shift_m), 4),
+                        "measurement_follow_blend": round(float(measurement_follow_blend), 4),
                         "updated_track": self._trace_track(track),
                     }
                 )

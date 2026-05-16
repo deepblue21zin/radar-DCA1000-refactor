@@ -20,6 +20,7 @@ from .radar_runtime import (
 )
 from .tracking import MultiTargetTracker
 from .virtual_array import (
+    apply_tdm_mimo_doppler_phase_compensation,
     cached_iwr6843isk_virtual_array,
     geometry_range_angle_from_fft as _runtime_geometry_range_angle_from_fft,
 )
@@ -187,6 +188,25 @@ def select_tracker_input_for_frame(
 
 def project_range_angle_cube(range_doppler_fft, runtime_config):
     projection = str(getattr(runtime_config, "angle_projection", "fft1d") or "fft1d").strip().lower()
+    angle_input_fft = range_doppler_fft
+    if bool(getattr(runtime_config, "tdm_mimo_doppler_compensation_enabled", False)):
+        angle_input_fft = apply_tdm_mimo_doppler_phase_compensation(
+            range_doppler_fft,
+            tx_num=int(getattr(runtime_config, "tx_num", 1)),
+            phase_sign=float(
+                getattr(runtime_config, "tdm_mimo_doppler_compensation_phase_sign", 1.0)
+            ),
+            reference_tx_slot=int(
+                getattr(runtime_config, "tdm_mimo_doppler_compensation_reference_tx_slot", 0)
+            ),
+            slot_time_model=str(
+                getattr(
+                    runtime_config,
+                    "tdm_mimo_doppler_compensation_slot_time_model",
+                    "uniform_tx_slot",
+                )
+            ),
+        )
     if projection in ("iwr6843isk_geometry_2d", "isk_geometry_2d", "geometry_2d"):
         model = cached_iwr6843isk_virtual_array(
             str(runtime_config.config_path),
@@ -194,7 +214,7 @@ def project_range_angle_cube(range_doppler_fft, runtime_config):
             int(runtime_config.tx_num),
         )
         rai_cube = geometry_range_angle_from_fft(
-            range_doppler_fft,
+            angle_input_fft,
             raw_order=model.raw_order,
             x_lambda=model.x_lambda,
             z_lambda=model.z_lambda,
@@ -213,7 +233,7 @@ def project_range_angle_cube(range_doppler_fft, runtime_config):
         raise ValueError(f"Unsupported angle_projection: {projection}")
 
     rai_cube = DSP.range_angle_from_fft(
-        range_doppler_fft,
+        angle_input_fft,
         mode=1,
         angle_fft_size=runtime_config.angle_fft_size,
     )
@@ -465,6 +485,23 @@ def process_frame_packet(
             "angle_source": getattr(runtime_config, "angle_source", "collapsed_rai"),
             "channel_calibration_enabled": bool(
                 getattr(runtime_config, "channel_calibration_enabled", False)
+            ),
+            "tdm_mimo_doppler_compensation_enabled": bool(
+                getattr(runtime_config, "tdm_mimo_doppler_compensation_enabled", False)
+            ),
+            "tdm_mimo_doppler_compensation_phase_sign": round(
+                float(getattr(runtime_config, "tdm_mimo_doppler_compensation_phase_sign", 1.0)),
+                3,
+            ),
+            "tdm_mimo_doppler_compensation_slot_time_model": str(
+                getattr(
+                    runtime_config,
+                    "tdm_mimo_doppler_compensation_slot_time_model",
+                    "uniform_tx_slot",
+                )
+            ),
+            "tdm_mimo_doppler_compensation_reference_tx_slot": int(
+                getattr(runtime_config, "tdm_mimo_doppler_compensation_reference_tx_slot", 0)
             ),
             "shape": [int(dim) for dim in np.asarray(rai_cube).shape],
         }

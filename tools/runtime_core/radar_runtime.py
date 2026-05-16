@@ -57,6 +57,10 @@ class RadarRuntimeConfig:
     angle_source: str = "collapsed_rai"
     channel_calibration_enabled: bool = False
     channel_calibration_coefficients: tuple = ()
+    tdm_mimo_doppler_compensation_enabled: bool = False
+    tdm_mimo_doppler_compensation_phase_sign: float = 1.0
+    tdm_mimo_doppler_compensation_slot_time_model: str = "uniform_tx_slot"
+    tdm_mimo_doppler_compensation_reference_tx_slot: int = 0
 
     @property
     def virtual_antennas(self):
@@ -111,6 +115,10 @@ def parse_runtime_config(
     angle_source="collapsed_rai",
     channel_calibration_enabled=False,
     channel_calibration_coefficients=None,
+    tdm_mimo_doppler_compensation_enabled=False,
+    tdm_mimo_doppler_compensation_phase_sign=1.0,
+    tdm_mimo_doppler_compensation_slot_time_model="uniform_tx_slot",
+    tdm_mimo_doppler_compensation_reference_tx_slot=0,
 ):
     config_path = Path(config_path)
     channel_cfg = None
@@ -183,6 +191,16 @@ def parse_runtime_config(
         angle_source=str(angle_source or "collapsed_rai").strip().lower(),
         channel_calibration_enabled=bool(channel_calibration_enabled),
         channel_calibration_coefficients=_parse_complex_coefficients(channel_calibration_coefficients),
+        tdm_mimo_doppler_compensation_enabled=bool(tdm_mimo_doppler_compensation_enabled),
+        tdm_mimo_doppler_compensation_phase_sign=float(
+            tdm_mimo_doppler_compensation_phase_sign
+        ),
+        tdm_mimo_doppler_compensation_slot_time_model=str(
+            tdm_mimo_doppler_compensation_slot_time_model or "uniform_tx_slot"
+        ).strip().lower(),
+        tdm_mimo_doppler_compensation_reference_tx_slot=int(
+            tdm_mimo_doppler_compensation_reference_tx_slot
+        ),
     )
 
 

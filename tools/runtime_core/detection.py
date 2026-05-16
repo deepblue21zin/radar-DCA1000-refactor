@@ -39,6 +39,67 @@ def _nearest_axis_bin(axis_values, value):
     return int(np.argmin(np.abs(np.asarray(axis_values) - value)))
 
 
+def _candidate_with_xy(candidate, runtime_config, x_m, y_m, *, score=None):
+    range_m = float(hypot(float(x_m), float(y_m)))
+    angle_rad = float(atan2(float(x_m), max(float(y_m), 1e-6)))
+    return DetectionCandidate(
+        range_bin=_nearest_axis_bin(runtime_config.range_axis_m, range_m),
+        doppler_bin=int(candidate.doppler_bin),
+        angle_bin=_nearest_axis_bin(runtime_config.angle_axis_rad, angle_rad),
+        range_m=range_m,
+        angle_deg=float(np.degrees(angle_rad)),
+        x_m=float(x_m),
+        y_m=float(y_m),
+        rdi_peak=float(candidate.rdi_peak),
+        rai_peak=float(candidate.rai_peak),
+        score=float(candidate.score if score is None else score),
+    )
+
+
+def _anchor_blob_candidate(
+    center,
+    anchor,
+    runtime_config,
+    *,
+    max_shift_m=0.45,
+    blend=0.75,
+):
+    if center is None or anchor is None:
+        return center, {"enabled": False, "reason": "missing_center_or_anchor"}
+
+    max_shift_m = max(0.0, float(max_shift_m))
+    blend = float(np.clip(float(blend), 0.0, 1.0))
+    dx = float(center.x_m) - float(anchor.x_m)
+    dy = float(center.y_m) - float(anchor.y_m)
+    distance_m = float(hypot(dx, dy))
+    clamped = False
+    if max_shift_m > 0.0 and distance_m > max_shift_m:
+        scale = max_shift_m / max(distance_m, 1e-9)
+        dx *= scale
+        dy *= scale
+        clamped = True
+
+    limited_x = float(anchor.x_m) + dx
+    limited_y = float(anchor.y_m) + dy
+    x_m = (1.0 - blend) * limited_x + blend * float(anchor.x_m)
+    y_m = (1.0 - blend) * limited_y + blend * float(anchor.y_m)
+    score = max(float(center.score), float(anchor.score))
+    anchored = _candidate_with_xy(center, runtime_config, x_m, y_m, score=score)
+    return anchored, {
+        "enabled": True,
+        "anchor": _trace_candidate(anchor),
+        "pre_anchor_center": _trace_candidate(center),
+        "pre_anchor_shift_m": round(distance_m, 4),
+        "max_shift_m": round(max_shift_m, 4),
+        "blend": round(blend, 4),
+        "clamped": bool(clamped),
+        "post_anchor_shift_m": round(
+            float(hypot(float(anchored.x_m) - float(anchor.x_m), float(anchored.y_m) - float(anchor.y_m))),
+            4,
+        ),
+    }
+
+
 def _angle_centroid_radius_for_range(range_m, radius_bands, default_radius=1):
     if not radius_bands:
         return int(default_radius)
@@ -1055,6 +1116,8 @@ def _rd_primary_dense_blob_centers_from_rda_cube(
     center_method="weighted_median_trimmed",
     anchor_range_bins=8,
     anchor_doppler_bins=10,
+    anchor_max_shift_m=0.45,
+    anchor_blend=0.75,
     angle_radius_deg=18.0,
     angle_floor_quantile=0.70,
     angle_relative_floor=0.25,
@@ -1094,27 +1157,49 @@ def _rd_primary_dense_blob_centers_from_rda_cube(
     anchors = list(anchor_candidates or [])
     anchor_range_bins = max(0, int(anchor_range_bins))
     anchor_doppler_bins = max(0, int(anchor_doppler_bins))
+    anchor_max_shift_m = max(0.0, float(anchor_max_shift_m))
+    anchor_blend = float(np.clip(float(anchor_blend), 0.0, 1.0))
 
-    def _component_is_anchored(component):
+    def _component_best_anchor(component):
         if not anchors:
-            return True
+            return None
         ranges = [int(row + range_lower) for _, row in component]
         dopplers = [int(depth) for depth, _ in component]
         range_min = min(ranges) - anchor_range_bins
         range_max = max(ranges) + anchor_range_bins
+        best = None
         for anchor in anchors:
             anchor_range = int(getattr(anchor, "range_bin", -9999))
             if not (range_min <= anchor_range <= range_max):
                 continue
             anchor_doppler = int(getattr(anchor, "doppler_bin", -9999))
+            best_doppler_distance = None
             for doppler_bin in dopplers:
-                if _doppler_bin_distance(anchor_doppler, doppler_bin, runtime_config.doppler_fft_size) <= anchor_doppler_bins:
-                    return True
-        return False
+                doppler_distance = _doppler_bin_distance(
+                    anchor_doppler,
+                    doppler_bin,
+                    runtime_config.doppler_fft_size,
+                )
+                if best_doppler_distance is None or doppler_distance < best_doppler_distance:
+                    best_doppler_distance = doppler_distance
+            if best_doppler_distance is None or best_doppler_distance > anchor_doppler_bins:
+                continue
+            range_distance = min(abs(anchor_range - int(value)) for value in ranges)
+            score = (
+                int(best_doppler_distance),
+                int(range_distance),
+                -float(_candidate_strength(anchor)),
+            )
+            if best is None or score < best[0]:
+                best = (score, anchor)
+        if best is None:
+            return None
+        return best[1]
 
     blob_candidates = []
     for component in components:
-        if not _component_is_anchored(component):
+        anchor = _component_best_anchor(component)
+        if anchors and anchor is None:
             continue
         center_result = _rd_primary_component_center_from_cells(
             component,
@@ -1132,6 +1217,15 @@ def _rd_primary_dense_blob_centers_from_rda_cube(
         if center_result is None:
             continue
         center, summary = center_result
+        if anchor is not None:
+            center, anchor_summary = _anchor_blob_candidate(
+                center,
+                anchor,
+                runtime_config,
+                max_shift_m=anchor_max_shift_m,
+                blend=anchor_blend,
+            )
+            summary["anchor_constraint"] = anchor_summary
         strength = float(summary.get("power_sum", 0.0))
         blob_candidates.append((center, strength, component, summary))
 
@@ -1184,6 +1278,8 @@ def _rd_primary_dense_blob_centers_from_rda_cube(
         "angle_radius_deg": round(float(angle_radius_deg), 3),
         "angle_floor_quantile": round(float(angle_floor_quantile), 4),
         "angle_relative_floor": round(float(angle_relative_floor), 4),
+        "anchor_max_shift_m": round(float(anchor_max_shift_m), 4),
+        "anchor_blend": round(float(anchor_blend), 4),
         "groups": groups,
     }
 
@@ -1205,6 +1301,8 @@ def _dense_blob_centers_from_rda_cube(
     center_method="weighted_median_trimmed",
     anchor_range_bins=8,
     anchor_doppler_bins=10,
+    anchor_max_shift_m=0.45,
+    anchor_blend=0.75,
     grouping_mode="rd_primary",
     angle_radius_deg=18.0,
     angle_floor_quantile=0.70,
@@ -1290,6 +1388,8 @@ def _dense_blob_centers_from_rda_cube(
             center_method=center_method,
             anchor_range_bins=anchor_range_bins,
             anchor_doppler_bins=anchor_doppler_bins,
+            anchor_max_shift_m=anchor_max_shift_m,
+            anchor_blend=anchor_blend,
             angle_radius_deg=angle_radius_deg,
             angle_floor_quantile=angle_floor_quantile,
             angle_relative_floor=angle_relative_floor,
@@ -1455,6 +1555,8 @@ def _refine_blob_centers_from_candidates(
     cube_range_radius_m=None,
     cube_angle_radius_deg=None,
     cube_relative_floor=None,
+    anchor_max_shift_m=0.45,
+    anchor_blend=0.75,
 ):
     if not enabled:
         return list(candidate_pool or []), {"enabled": False}
@@ -1488,6 +1590,14 @@ def _refine_blob_centers_from_candidates(
             )
             if center_result is not None:
                 center, summary = center_result
+                center, anchor_summary = _anchor_blob_candidate(
+                    center,
+                    candidates[0],
+                    runtime_config,
+                    max_shift_m=anchor_max_shift_m,
+                    blend=anchor_blend,
+                )
+                summary["anchor_constraint"] = anchor_summary
                 return [center], {
                     "enabled": True,
                     "input_count": int(len(candidates)),
@@ -1558,6 +1668,15 @@ def _refine_blob_centers_from_candidates(
                 )
             if center_result is not None:
                 center, summary = center_result
+                anchor = max(single_members, key=_candidate_strength)
+                center, anchor_summary = _anchor_blob_candidate(
+                    center,
+                    anchor,
+                    runtime_config,
+                    max_shift_m=anchor_max_shift_m,
+                    blend=anchor_blend,
+                )
+                summary["anchor_constraint"] = anchor_summary
                 strength = float(sum(_candidate_strength(candidate) for candidate in single_members))
                 return [center], {
                     "enabled": True,
@@ -1655,6 +1774,15 @@ def _refine_blob_centers_from_candidates(
         if center_result is None:
             continue
         center, summary = center_result
+        anchor = max(members, key=_candidate_strength)
+        center, anchor_summary = _anchor_blob_candidate(
+            center,
+            anchor,
+            runtime_config,
+            max_shift_m=anchor_max_shift_m,
+            blend=anchor_blend,
+        )
+        summary["anchor_constraint"] = anchor_summary
 
         if (
             summary.get("source") != "rai_cube_patch_union"
@@ -1679,6 +1807,17 @@ def _refine_blob_centers_from_candidates(
                     members = trimmed_members
                     summary["trimmed"] = True
                     summary["trim_radius_m"] = round(float(trim_radius), 4)
+
+        if "anchor_constraint" not in summary:
+            anchor = max(members, key=_candidate_strength)
+            center, anchor_summary = _anchor_blob_candidate(
+                center,
+                anchor,
+                runtime_config,
+                max_shift_m=anchor_max_shift_m,
+                blend=anchor_blend,
+            )
+            summary["anchor_constraint"] = anchor_summary
 
         strength = float(sum(_candidate_strength(candidate) for candidate in members))
         blob_candidates.append((center, strength, members, summary))
@@ -2196,6 +2335,111 @@ def _suppress_duplicate_candidates(
     return kept, suppressed
 
 
+def _suppress_range_doppler_ambiguous_candidates(
+    candidates,
+    runtime_config,
+    enabled=True,
+    range_tolerance_m=0.30,
+    doppler_bins=2,
+    min_angle_delta_deg=16.0,
+    min_cartesian_separation_m=0.75,
+    mirror_x_tolerance_m=0.45,
+    mirror_y_tolerance_m=0.45,
+    min_abs_angle_deg=4.0,
+):
+    """Keep one angle solution for candidates that share the same R-D evidence."""
+
+    candidate_list = list(candidates or [])
+    if not enabled or len(candidate_list) <= 1:
+        return candidate_list, []
+
+    range_tolerance_m = max(0.0, float(range_tolerance_m))
+    doppler_bins = max(0, int(doppler_bins))
+    min_angle_delta_deg = max(0.0, float(min_angle_delta_deg))
+    min_cartesian_separation_m = max(0.0, float(min_cartesian_separation_m))
+    mirror_x_tolerance_m = max(0.0, float(mirror_x_tolerance_m))
+    mirror_y_tolerance_m = max(0.0, float(mirror_y_tolerance_m))
+    min_abs_angle_deg = max(0.0, float(min_abs_angle_deg))
+    if range_tolerance_m <= 0.0:
+        return candidate_list, []
+
+    ordered_indices = sorted(
+        range(len(candidate_list)),
+        key=lambda index: (
+            _candidate_strength(candidate_list[index]),
+            candidate_list[index].rdi_peak,
+            candidate_list[index].rai_peak,
+        ),
+        reverse=True,
+    )
+    keep = [True] * len(candidate_list)
+    suppressed = []
+
+    for ref_index in ordered_indices:
+        if not keep[ref_index]:
+            continue
+        reference = candidate_list[ref_index]
+        for cand_index in ordered_indices:
+            if cand_index == ref_index or not keep[cand_index]:
+                continue
+            candidate = candidate_list[cand_index]
+
+            range_delta_m = abs(float(candidate.range_m) - float(reference.range_m))
+            if range_delta_m > range_tolerance_m:
+                continue
+
+            doppler_delta_bins = _doppler_bin_distance(
+                candidate.doppler_bin,
+                reference.doppler_bin,
+                runtime_config.doppler_fft_size,
+            )
+            if doppler_delta_bins > doppler_bins:
+                continue
+
+            angle_delta_deg = abs(float(candidate.angle_deg) - float(reference.angle_deg))
+            cartesian_distance_m = float(
+                hypot(candidate.x_m - reference.x_m, candidate.y_m - reference.y_m)
+            )
+            angle_sign_split = (
+                np.sign(candidate.angle_deg) != np.sign(reference.angle_deg)
+                and abs(float(candidate.angle_deg)) >= min_abs_angle_deg
+                and abs(float(reference.angle_deg)) >= min_abs_angle_deg
+            )
+            mirror_like = (
+                angle_sign_split
+                and abs(float(candidate.x_m) + float(reference.x_m)) <= mirror_x_tolerance_m
+                and abs(float(candidate.y_m) - float(reference.y_m)) <= mirror_y_tolerance_m
+            )
+            wide_angle_split = (
+                angle_delta_deg >= min_angle_delta_deg
+                and cartesian_distance_m >= min_cartesian_separation_m
+            )
+            if not (mirror_like or wide_angle_split):
+                continue
+
+            keep[cand_index] = False
+            suppressed.append(
+                {
+                    "candidate": _trace_candidate(candidate),
+                    "kept": _trace_candidate(reference),
+                    "reason": "mirror_like" if mirror_like else "same_range_doppler_angle_split",
+                    "range_delta_m": round(float(range_delta_m), 4),
+                    "doppler_bins": int(doppler_delta_bins),
+                    "angle_delta_deg": round(float(angle_delta_deg), 3),
+                    "cartesian_distance_m": round(float(cartesian_distance_m), 4),
+                    "candidate_strength": round(float(_candidate_strength(candidate)), 4),
+                    "kept_strength": round(float(_candidate_strength(reference)), 4),
+                }
+            )
+
+    kept = [candidate for index, candidate in enumerate(candidate_list) if keep[index]]
+    kept.sort(
+        key=lambda candidate: (candidate.score, candidate.rdi_peak, candidate.rai_peak),
+        reverse=True,
+    )
+    return kept, suppressed
+
+
 def _candidate_angle_map(rai_map, rai_cube, doppler_bin, angle_source):
     source = str(angle_source or "collapsed_rai").strip().lower()
     if source in {"doppler_slice_rai", "doppler_slice", "rda_slice"} and rai_cube is not None:
@@ -2426,6 +2670,207 @@ def _trace_projected_cfar_seeds(
     return seeds
 
 
+def _projected_cfar_seed_candidates(
+    ordered_indices,
+    power_map,
+    rai_map,
+    rai_cube,
+    runtime_config,
+    detection_region,
+    min_range_bin,
+    *,
+    angle_source,
+    max_points=12,
+    min_score_ratio=0.05,
+):
+    if ordered_indices is None:
+        return []
+
+    power_max = float(np.max(power_map)) if np.asarray(power_map).size else 0.0
+    if power_max <= 0.0:
+        return []
+
+    references = []
+    for range_bin_rel, doppler_bin in list(ordered_indices)[: max(1, int(max_points))]:
+        range_bin = int(range_bin_rel + min_range_bin)
+        if not (0 <= range_bin < len(runtime_config.range_axis_m)):
+            continue
+
+        score = float(power_map[int(range_bin_rel), int(doppler_bin)] / max(power_max, 1e-6))
+        if score < float(min_score_ratio):
+            continue
+
+        range_m = float(runtime_config.range_axis_m[range_bin])
+        angle_mask = _angle_roi_mask(
+            range_m,
+            runtime_config.angle_axis_rad,
+            detection_region,
+        )
+        if not np.any(angle_mask):
+            continue
+
+        candidate_rai_map, _resolved_angle_source = _candidate_angle_map(
+            rai_map,
+            rai_cube,
+            int(doppler_bin),
+            angle_source,
+        )
+        if range_bin >= candidate_rai_map.shape[0]:
+            continue
+
+        angle_profile = np.asarray(candidate_rai_map[range_bin], dtype=np.float64)
+        masked_angle_profile = np.where(angle_mask, angle_profile, 0.0)
+        angle_bin = int(np.argmax(masked_angle_profile))
+        rai_peak = float(masked_angle_profile[angle_bin])
+        if rai_peak <= 0.0:
+            continue
+
+        angle_rad = float(runtime_config.angle_axis_rad[angle_bin])
+        references.append(
+            DetectionCandidate(
+                range_bin=int(range_bin),
+                doppler_bin=int(doppler_bin),
+                angle_bin=int(angle_bin),
+                range_m=float(range_m),
+                angle_deg=float(np.degrees(angle_rad)),
+                x_m=float(range_m * np.sin(angle_rad)),
+                y_m=float(range_m * np.cos(angle_rad)),
+                rdi_peak=float(np.sqrt(max(float(power_map[int(range_bin_rel), int(doppler_bin)]), 0.0))),
+                rai_peak=float(rai_peak),
+                score=float(score),
+            )
+        )
+
+    references.sort(
+        key=lambda candidate: (candidate.score, candidate.rdi_peak, candidate.rai_peak),
+        reverse=True,
+    )
+    return references
+
+
+def _rd_cfar_reference_guard(
+    candidates,
+    references,
+    runtime_config,
+    *,
+    enabled=False,
+    prefer_references=False,
+    max_output_candidates=0,
+    range_tolerance_m=0.45,
+    doppler_bins=3,
+    replace_shifted=True,
+    replace_shift_m=0.45,
+    fallback_to_references=True,
+):
+    trace = {
+        "enabled": bool(enabled),
+        "input_count": int(len(candidates)),
+        "reference_count": int(len(references)),
+        "output_count": int(len(candidates)),
+        "kept_count": int(len(candidates)),
+        "replaced_count": 0,
+        "dropped_count": 0,
+        "range_tolerance_m": round(float(range_tolerance_m), 4),
+        "doppler_bins": int(doppler_bins),
+        "prefer_references": bool(prefer_references),
+        "max_output_candidates": int(max_output_candidates),
+        "replace_shifted": bool(replace_shifted),
+        "replace_shift_m": round(float(replace_shift_m), 4),
+        "fallback_to_references": bool(fallback_to_references),
+        "references": _trace_candidates(references[:12]),
+        "pairs": [],
+        "dropped": [],
+    }
+    if not enabled:
+        return list(candidates), trace
+    if not candidates:
+        trace["output_count"] = 0
+        trace["kept_count"] = 0
+        return [], trace
+    if not references:
+        trace["reason"] = "no_references"
+        return list(candidates), trace
+
+    fft_size = getattr(runtime_config, "doppler_fft_size", 0)
+    range_tolerance_m = max(0.0, float(range_tolerance_m))
+    doppler_bins = max(0, int(doppler_bins))
+    replace_shift_m = max(0.0, float(replace_shift_m))
+    output_limit = int(max_output_candidates)
+    if output_limit <= 0:
+        output_limit = max(1, len(candidates))
+
+    guarded = []
+    used_reference_keys = set()
+    dropped = []
+    pairs = []
+
+    for candidate in candidates:
+        best_reference = None
+        best_cost = None
+        for reference in references:
+            range_delta_m = abs(float(candidate.range_m) - float(reference.range_m))
+            doppler_delta = _doppler_bin_distance(candidate.doppler_bin, reference.doppler_bin, fft_size)
+            if range_delta_m > range_tolerance_m or doppler_delta > doppler_bins:
+                continue
+            xy_shift_m = float(hypot(float(candidate.x_m) - float(reference.x_m), float(candidate.y_m) - float(reference.y_m)))
+            cost = range_delta_m + 0.04 * float(doppler_delta) + 0.15 * xy_shift_m
+            if best_cost is None or cost < best_cost:
+                best_reference = reference
+                best_cost = cost
+
+        if best_reference is None:
+            dropped.append(candidate)
+            if len(trace["dropped"]) < 12:
+                trace["dropped"].append(_trace_candidate(candidate))
+            continue
+
+        xy_shift_m = float(hypot(float(candidate.x_m) - float(best_reference.x_m), float(candidate.y_m) - float(best_reference.y_m)))
+        replacement_used = bool(prefer_references or (replace_shifted and xy_shift_m > replace_shift_m))
+        output_candidate = best_reference if replacement_used else candidate
+        reference_key = (int(best_reference.range_bin), int(best_reference.doppler_bin), int(best_reference.angle_bin))
+        output_key = (int(output_candidate.range_bin), int(output_candidate.doppler_bin), int(output_candidate.angle_bin))
+        duplicate_key = reference_key if replacement_used else output_key
+        if duplicate_key in used_reference_keys:
+            continue
+        used_reference_keys.add(duplicate_key)
+        guarded.append(output_candidate)
+        if len(pairs) < 12:
+            pairs.append(
+                {
+                    "before": _trace_candidate(candidate),
+                    "reference": _trace_candidate(best_reference),
+                    "after": _trace_candidate(output_candidate),
+                    "xy_shift_m": round(xy_shift_m, 4),
+                    "replaced": bool(replacement_used),
+                }
+            )
+
+    if prefer_references and len(guarded) < output_limit:
+        for reference in references:
+            reference_key = (int(reference.range_bin), int(reference.doppler_bin), int(reference.angle_bin))
+            if reference_key in used_reference_keys:
+                continue
+            used_reference_keys.add(reference_key)
+            guarded.append(reference)
+            if len(guarded) >= output_limit:
+                break
+
+    if not guarded and fallback_to_references:
+        guarded = list(references[: max(1, min(len(references), output_limit))])
+        trace["fallback_used"] = True
+    else:
+        trace["fallback_used"] = False
+
+    guarded = list(guarded[:output_limit])
+    trace["output_count"] = int(len(guarded))
+    trace["kept_count"] = int(len(guarded))
+    trace["replaced_count"] = int(sum(1 for pair in pairs if pair.get("replaced")))
+    trace["dropped_count"] = int(len(dropped))
+    trace["pairs"] = pairs
+    trace["output_top"] = _trace_candidates(guarded)
+    return guarded, trace
+
+
 def detect_targets(
     rdi_map,
     rai_map,
@@ -2450,6 +2895,23 @@ def detect_targets(
     duplicate_suppression_range_scale=0.03,
     duplicate_suppression_doppler_bins=6,
     duplicate_suppression_score_ratio=0.82,
+    range_doppler_ambiguity_suppression_enabled=False,
+    range_doppler_ambiguity_range_tolerance_m=0.30,
+    range_doppler_ambiguity_doppler_bins=2,
+    range_doppler_ambiguity_min_angle_delta_deg=16.0,
+    range_doppler_ambiguity_min_separation_m=0.75,
+    range_doppler_ambiguity_mirror_x_tolerance_m=0.45,
+    range_doppler_ambiguity_mirror_y_tolerance_m=0.45,
+    range_doppler_ambiguity_min_abs_angle_deg=4.0,
+    rd_cfar_output_guard_enabled=False,
+    rd_cfar_output_guard_max_references=12,
+    rd_cfar_output_guard_min_reference_score_ratio=0.05,
+    rd_cfar_output_guard_range_tolerance_m=0.45,
+    rd_cfar_output_guard_doppler_bins=3,
+    rd_cfar_output_guard_prefer_references=False,
+    rd_cfar_output_guard_replace_shifted=True,
+    rd_cfar_output_guard_replace_shift_m=0.45,
+    rd_cfar_output_guard_fallback_to_references=True,
     object_count_estimator_enabled=True,
     object_count_max_objects=3,
     object_count_min_separation_m=0.65,
@@ -2491,6 +2953,8 @@ def detect_targets(
     blob_center_dense_angle_radius_deg=18.0,
     blob_center_dense_angle_floor_quantile=0.70,
     blob_center_dense_angle_relative_floor=0.25,
+    blob_center_anchor_max_shift_m=0.45,
+    blob_center_anchor_blend=0.75,
     enable_body_center_refinement=True,
     enable_candidate_merge=True,
     enable_dbscan=True,
@@ -2522,6 +2986,7 @@ def detect_targets(
                     "blob_center_refinement": bool(blob_center_refinement_enabled),
                     "candidate_merge": bool(enable_candidate_merge),
                     "dbscan": bool(enable_dbscan),
+                    "rd_cfar_output_guard": bool(rd_cfar_output_guard_enabled),
                 },
                 "reject_reasons": {},
             }
@@ -2589,6 +3054,18 @@ def detect_targets(
 
     candidate_scores = power_map[candidate_indices[:, 0], candidate_indices[:, 1]]
     ordered_indices = candidate_indices[np.argsort(candidate_scores)[::-1]]
+    rd_cfar_reference_candidates = _projected_cfar_seed_candidates(
+        ordered_indices,
+        power_map,
+        rai_map,
+        rai_cube,
+        runtime_config,
+        detection_region,
+        min_range_bin,
+        angle_source=angle_source,
+        max_points=rd_cfar_output_guard_max_references,
+        min_score_ratio=rd_cfar_output_guard_min_reference_score_ratio,
+    )
     if trace_enabled:
         projected_seeds = _trace_projected_cfar_seeds(
             ordered_indices,
@@ -2909,6 +3386,8 @@ def detect_targets(
                 center_method=blob_center_method,
                 anchor_range_bins=max(3, int(round((blob_center_cube_range_radius_m or 0.35) / max(float(np.median(np.diff(runtime_config.range_axis_m))), 1e-6)))) if len(runtime_config.range_axis_m) > 1 else 6,
                 anchor_doppler_bins=blob_center_doppler_radius_bins,
+                anchor_max_shift_m=blob_center_anchor_max_shift_m,
+                anchor_blend=blob_center_anchor_blend,
                 grouping_mode=blob_center_dense_grouping_mode,
                 angle_radius_deg=blob_center_dense_angle_radius_deg,
                 angle_floor_quantile=blob_center_dense_angle_floor_quantile,
@@ -2945,6 +3424,8 @@ def detect_targets(
                 cube_range_radius_m=blob_center_cube_range_radius_m,
                 cube_angle_radius_deg=blob_center_cube_angle_radius_deg,
                 cube_relative_floor=blob_center_cube_relative_floor,
+                anchor_max_shift_m=blob_center_anchor_max_shift_m,
+                anchor_blend=blob_center_anchor_blend,
             )
             if dense_blob_trace is not None:
                 blob_center_trace["dense_component_attempt"] = dense_blob_trace
@@ -2975,6 +3456,28 @@ def detect_targets(
         }
         trace["blob_center_refinement"] = blob_center_trace
         pre_merge_final = list(candidate_pool)
+    pre_rd_cfar_guard_pool = list(candidate_pool)
+    candidate_pool, rd_cfar_guard_trace = _rd_cfar_reference_guard(
+        candidate_pool,
+        rd_cfar_reference_candidates,
+        runtime_config,
+        enabled=rd_cfar_output_guard_enabled,
+        range_tolerance_m=rd_cfar_output_guard_range_tolerance_m,
+        doppler_bins=rd_cfar_output_guard_doppler_bins,
+        prefer_references=rd_cfar_output_guard_prefer_references,
+        max_output_candidates=int(detection_region.max_targets),
+        replace_shifted=rd_cfar_output_guard_replace_shifted,
+        replace_shift_m=rd_cfar_output_guard_replace_shift_m,
+        fallback_to_references=rd_cfar_output_guard_fallback_to_references,
+    )
+    if trace_enabled:
+        rd_cfar_guard_trace["before_top"] = _trace_candidates(pre_rd_cfar_guard_pool)
+        trace["rd_cfar_output_guard"] = rd_cfar_guard_trace
+        pre_merge_final = list(candidate_pool)
+    if not candidate_pool:
+        if trace_enabled:
+            trace["early_exit"] = "rd_cfar_output_guard_empty"
+        return []
     if enable_candidate_merge:
         candidate_pool = _merge_candidate_pool(
             candidate_pool,
@@ -3066,6 +3569,37 @@ def detect_targets(
     if not clustered_detections:
         if trace_enabled:
             trace["early_exit"] = "duplicate_suppression_empty"
+        return []
+    pre_ambiguity_suppression = list(clustered_detections)
+    clustered_detections, suppressed_ambiguous = _suppress_range_doppler_ambiguous_candidates(
+        clustered_detections,
+        runtime_config,
+        enabled=range_doppler_ambiguity_suppression_enabled,
+        range_tolerance_m=range_doppler_ambiguity_range_tolerance_m,
+        doppler_bins=range_doppler_ambiguity_doppler_bins,
+        min_angle_delta_deg=range_doppler_ambiguity_min_angle_delta_deg,
+        min_cartesian_separation_m=range_doppler_ambiguity_min_separation_m,
+        mirror_x_tolerance_m=range_doppler_ambiguity_mirror_x_tolerance_m,
+        mirror_y_tolerance_m=range_doppler_ambiguity_mirror_y_tolerance_m,
+        min_abs_angle_deg=range_doppler_ambiguity_min_abs_angle_deg,
+    )
+    if trace_enabled:
+        trace["range_doppler_ambiguity_suppression"] = {
+            "enabled": bool(range_doppler_ambiguity_suppression_enabled),
+            "before_count": int(len(pre_ambiguity_suppression)),
+            "after_count": int(len(clustered_detections)),
+            "suppressed_count": int(len(suppressed_ambiguous)),
+            "range_tolerance_m": round(float(range_doppler_ambiguity_range_tolerance_m), 4),
+            "doppler_bins": int(range_doppler_ambiguity_doppler_bins),
+            "min_angle_delta_deg": round(float(range_doppler_ambiguity_min_angle_delta_deg), 3),
+            "min_separation_m": round(float(range_doppler_ambiguity_min_separation_m), 4),
+            "mirror_x_tolerance_m": round(float(range_doppler_ambiguity_mirror_x_tolerance_m), 4),
+            "mirror_y_tolerance_m": round(float(range_doppler_ambiguity_mirror_y_tolerance_m), 4),
+            "suppressed": suppressed_ambiguous[:12],
+        }
+    if not clustered_detections:
+        if trace_enabled:
+            trace["early_exit"] = "range_doppler_ambiguity_suppression_empty"
         return []
     pre_score_filter = list(clustered_detections)
     min_output_score = max(0.0, float(min_output_score))

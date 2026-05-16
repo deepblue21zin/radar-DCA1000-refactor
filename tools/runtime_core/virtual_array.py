@@ -126,6 +126,54 @@ def cached_iwr6843isk_virtual_array(config_path: str, rx_num: int = 4, tx_num: i
     return build_iwr6843isk_virtual_array(config_path, rx_num=rx_num, tx_num=tx_num)
 
 
+def apply_tdm_mimo_doppler_phase_compensation(
+    range_doppler_fft: np.ndarray,
+    *,
+    tx_num: int,
+    phase_sign: float = 1.0,
+    reference_tx_slot: int = 0,
+    slot_time_model: str = "uniform_tx_slot",
+) -> np.ndarray:
+    """Compensate TDM-MIMO TX-slot Doppler phase before AoA projection.
+
+    frame_to_radar_cube stores virtual channels as RX-major / TX-slot-fast, so
+    channel % tx_num gives the TX slot used by that raw virtual channel. The
+    input Doppler axis is unshifted, matching DSP.shared_range_doppler_fft.
+    """
+    cube = np.asarray(range_doppler_fft)
+    if cube.ndim != 3:
+        raise ValueError("Expected range_doppler_fft with shape [doppler, range, channels].")
+
+    tx_num = int(tx_num)
+    if tx_num <= 1 or float(phase_sign) == 0.0:
+        return cube
+
+    slot_time_model = str(slot_time_model or "uniform_tx_slot").strip().lower()
+    if slot_time_model not in {"uniform_tx_slot", "uniform"}:
+        raise ValueError(f"Unsupported TDM-MIMO slot_time_model: {slot_time_model}")
+
+    doppler_count, _, channel_count = cube.shape
+    if doppler_count <= 1 or channel_count <= 0 or channel_count % tx_num != 0:
+        return cube
+
+    reference_tx_slot = int(reference_tx_slot)
+    if reference_tx_slot < 0 or reference_tx_slot >= tx_num:
+        reference_tx_slot = 0
+
+    signed_doppler_bins = np.fft.fftfreq(doppler_count) * float(doppler_count)
+    channel_tx_slots = np.arange(channel_count, dtype=np.float64) % float(tx_num)
+    tx_slot_offsets = (channel_tx_slots - float(reference_tx_slot)) / float(tx_num)
+    phase = (
+        2.0
+        * np.pi
+        * signed_doppler_bins[:, np.newaxis]
+        * tx_slot_offsets[np.newaxis, :]
+        / float(doppler_count)
+    )
+    correction = np.exp(-1j * float(phase_sign) * phase).astype(np.complex64)
+    return cube * correction[:, np.newaxis, :]
+
+
 @lru_cache(maxsize=16)
 def _cached_geometry_steering(
     x_lambda: tuple[float, ...],
