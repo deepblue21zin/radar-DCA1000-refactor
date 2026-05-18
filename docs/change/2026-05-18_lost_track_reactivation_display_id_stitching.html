@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>2026-05-18 lost track reactivation 및 display ID stitching</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.6; margin: 28px; color: #1f2933; }
+    h1 { font-size: 1.5rem; margin-bottom: 0.4rem; }
+    h2 { font-size: 1.05rem; margin-top: 1.4rem; }
+    code { background: #eef2f7; padding: 0.1rem 0.3rem; border-radius: 4px; }
+    ul { padding-left: 1.3rem; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
+    th, td { border: 1px solid #d8dee9; padding: 0.45rem 0.55rem; text-align: left; }
+    th { background: #f3f6fa; }
+  </style>
+</head>
+<body>
+  <h1>lost track reactivation 및 display ID stitching</h1>
+
+  <h2>목적</h2>
+  <p>
+    멀티 타겟에서 한 사람이 잠깐 끊긴 뒤 새 <code>track_id</code>로 다시 태어나면서
+    표시 궤적이 여러 ID로 분할되거나, 같은 ID의 비연속 구간이 긴 직선으로 이어지는 문제를 줄인다.
+    내부 tracker ID와 영상/표시용 stable ID를 분리해 디버깅 가능성과 표시 안정성을 함께 확보한다.
+  </p>
+
+  <h2>수정 파일</h2>
+  <ul>
+    <li><code>tools/runtime_core/tracking.py</code></li>
+    <li><code>tools/runtime_core/tracking_core/types.py</code></li>
+    <li><code>tools/runtime_core/real_time_process.py</code></li>
+    <li><code>tools/runtime_core/runtime_settings.py</code></li>
+    <li><code>real-time/live_motion_viewer.py</code></li>
+    <li><code>tools/lab/stage_cache.py</code></li>
+    <li><code>tools/lab/app.py</code></li>
+    <li><code>config/live_motion_tuning_isk.json</code></li>
+  </ul>
+
+  <h2>변경 내용</h2>
+  <ul>
+    <li><code>recent_lost_track_memory_frames</code>로 최근 LOST track을 삭제하지 않고 보관하는 기간을 추가했다.</li>
+    <li><code>reactivation_gate_m</code>, <code>reactivation_direction_weight</code>, <code>reactivation_doppler_gate_bins</code>를 association 비용에 반영해 새 후보가 잃어버린 track 근처면 기존 ID로 복구되도록 했다.</li>
+    <li><code>TrackEstimate.display_id</code>를 추가하고, <code>display_id_stitching_enabled</code>가 켜졌을 때 표시용 stable ID를 별도 배정한다.</li>
+    <li>live viewer, raw replay stage cache, serialized trace에 <code>display_id</code>가 남도록 연결했다.</li>
+    <li>Streamlit Stage Debug의 multi-object plot에서 display 단계는 <code>display_id</code> 기준으로 묶고, 프레임 gap 또는 큰 위치 jump가 있으면 같은 ID라도 선을 끊어 표시한다.</li>
+    <li>Stage Cache schema를 12로 올려 기존 cache가 자동 재생성되도록 했다.</li>
+    <li>기본 튜닝에 lost memory 24프레임, reactivation gate 0.85m, display stitching 36프레임/0.9m를 추가했다.</li>
+    <li>Streamlit 장시간 실행 중 <code>tracking_core.types</code>가 stale 상태로 남아 <code>display_id</code> 필드를 모르는 문제를 막기 위해 Stage Cache reload 범위에 하위 types 모듈을 포함했다.</li>
+    <li>예전 <code>TrackEstimate</code> 객체가 섞여도 <code>dataclasses.replace</code> 실패 없이 <code>display_id</code>를 붙이는 fallback을 추가했다.</li>
+    <li>Streamlit app rerun 시 <code>stage_cache</code> 모듈도 reload해 Force Generate가 stale 모듈을 덜 물도록 했다.</li>
+  </ul>
+
+  <h2>검증 명령 또는 확인 방법</h2>
+  <ul>
+    <li><code>python -m json.tool config/live_motion_tuning_isk.json</code></li>
+    <li><code>ast.parse</code> 기반 문법 검사: tracking, types, real_time_process, runtime_settings, stage_cache, app, live_motion_viewer</li>
+    <li><code>git diff --check -- ...</code></li>
+    <li><code>python -m tools.lab.stage_cache --session 20260518_205535 --force</code></li>
+    <li><code>python -m tools.lab.stage_cache --session 20260518_203201 --force</code></li>
+    <li><code>python -m tools.lab.stage_cache --session 20260518_203125 --force</code></li>
+    <li><code>python -m tools.lab.stage_cache --session 20260518_203049 --force</code></li>
+    <li><code>python -m tools.lab.stage_cache --session 20260518_205535 --force</code> 재검증: <code>TrackEstimate.__init__ display_id</code> 오류 재현 없음</li>
+    <li>합성 tracker 시나리오로 LOST 후 근접 후보가 기존 <code>track_id</code>로 복구되는지 확인했다.</li>
+  </ul>
+
+  <h2>결과</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>세션</th>
+        <th>tracker ID 수</th>
+        <th>display ID 수</th>
+        <th>display worst p95 step</th>
+        <th>비고</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>20260518_205535</td><td>3</td><td>3</td><td>0.1061m</td><td>schema 12 재생성, display 선 끊김 4개 구간은 plot에서 분리 표시</td></tr>
+      <tr><td>20260518_203201</td><td>3</td><td>3</td><td>0.1746m</td><td>기존 다중 ID 분할 화면 후보, display max step 0.1801m</td></tr>
+      <tr><td>20260518_203125</td><td>1</td><td>1</td><td>0.1001m</td><td>단일 보행 안정</td></tr>
+      <tr><td>20260518_203049</td><td>1</td><td>1</td><td>0.0959m</td><td>단일 보행 안정</td></tr>
+    </tbody>
+  </table>
+  <p>
+    합성 검증에서는 LOST track 보관/복구가 켜진 경우 새 후보가 기존 <code>track_id=1</code>로 복구되었고,
+    보관/복구가 꺼진 경우 내부 <code>track_id=2</code>로 새로 태어나되 표시용 <code>display_id=1</code>로 stitch 되었다.
+  </p>
+  <p>
+    추가 오류 확인 결과, Streamlit에서 발생한
+    <code>TrackEstimate.__init__() got an unexpected keyword argument 'display_id'</code>는
+    오래 살아 있던 Python 프로세스가 하위 dataclass 모듈을 reload하지 않아 생긴 stale module 문제였다.
+    reload 범위와 fallback을 보강한 뒤 <code>20260518_205535</code> stage cache 250프레임 재생성이 성공했고,
+    <code>display_output.confirmed_tracks</code>에 <code>display_id</code>가 저장되는 것을 확인했다.
+  </p>
+
+  <h2>남은 위험 또는 다음 후보</h2>
+  <ul>
+    <li>실제 사람이 교차하거나 매우 가까워지는 구간에서는 display ID stitching gate가 너무 크면 다른 사람에게 ID가 붙을 수 있다. 교차 시에는 doppler gate와 direction weight를 더 보수적으로 조정해야 한다.</li>
+    <li>현재 표시 plot은 큰 gap/jump를 선으로 잇지 않지만, 영상에서 끊긴 구간을 보간해 자연스럽게 움직이는 기능은 별도 display interpolation 단계로 분리하는 것이 안전하다.</li>
+    <li>reactivation event가 실제 로그에서 얼마나 발생하는지 보려면 교차/가림이 더 강한 멀티 타겟 raw를 추가로 확보해 비교해야 한다.</li>
+  </ul>
+</body>
+</html>

@@ -4,6 +4,7 @@ import base64
 from datetime import datetime, timedelta
 import html
 import io
+import importlib
 import json
 import sqlite3
 import subprocess
@@ -27,6 +28,8 @@ except ImportError as error:  # pragma: no cover
 
 from tools.lab import analytics, registry, stage_cache, wandb_sync
 from tools.tuning_loop.run_loop import ISK_SCENARIOS, PARAMETER_SPECS
+
+stage_cache = importlib.reload(stage_cache)
 
 
 EVAL_TASKS_DIR = PROJECT_ROOT / "docs" / "evals" / "tasks"
@@ -261,8 +264,14 @@ def _recent_raw_capture_dirs(capture_dirs: list[Path], days: int) -> tuple[list[
         return [], None
     timestamps = {path: _capture_dir_timestamp(path) for path in capture_dirs}
     latest = max(timestamps.values())
-    cutoff = latest - timedelta(days=max(int(days), 1))
-    return [path for path in capture_dirs if timestamps[path] >= cutoff], latest
+    day_count = max(int(days), 1)
+    start_date = latest.date() - timedelta(days=day_count - 1)
+    end_date = latest.date()
+    return [
+        path
+        for path in capture_dirs
+        if start_date <= timestamps[path].date() <= end_date
+    ], latest
 
 
 def _directory_size_bytes(path: Path) -> int:
@@ -276,13 +285,19 @@ def _directory_size_bytes(path: Path) -> int:
     return total
 
 
-def _build_registry_raw_bundle(db_path: Path, capture_dirs: list[Path]) -> Path:
+def _build_registry_raw_bundle(
+    db_path: Path,
+    capture_dirs: list[Path],
+    *,
+    raw_selection: dict | None = None,
+) -> Path:
     RAW_BUNDLE_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     bundle_path = RAW_BUNDLE_EXPORT_DIR / _raw_bundle_export_name()
     manifest = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "project_root": str(PROJECT_ROOT),
         "registry_db": str(db_path),
+        "raw_selection": raw_selection or {},
         "raw_capture_count": len(capture_dirs),
         "raw_capture_ids": [path.name for path in capture_dirs],
     }
@@ -300,6 +315,18 @@ def _build_registry_raw_bundle(db_path: Path, capture_dirs: list[Path]) -> Path:
                 archive_name = file_path.relative_to(PROJECT_ROOT).as_posix()
                 archive.write(file_path, archive_name)
     return bundle_path
+
+
+def _raw_bundle_selection_key(scope: str, recent_days: int, raw_dirs: list[Path]) -> str:
+    return json.dumps(
+        {
+            "scope": scope,
+            "recent_days": recent_days if scope == "최근 N일 raw만" else None,
+            "raw_capture_ids": [path.name for path in raw_dirs],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
 
 def _validate_registry_db(path: Path) -> None:
@@ -346,7 +373,7 @@ def _render_registry_share_tools() -> None:
     db_path = registry.database_path(PROJECT_ROOT)
     with st.expander("DB Import / Export", expanded=False):
         st.caption(
-            "DB 단독 export는 라벨, annotation, 세션 인덱스만 공유합니다. raw logs는 아래 raw bundle zip으로 따로 묶을 수 있습니다."
+            "DB 단독 export는 라벨, annotation, 세션 인덱스만 공유합니다. 날짜 설정은 아래 raw bundle zip에만 적용됩니다."
         )
         if db_path.exists():
             st.download_button(
@@ -370,29 +397,47 @@ def _render_registry_share_tools() -> None:
         )
         recent_days = int(
             st.number_input(
-                "최근 raw 기간",
+                "최근 raw 날짜 수",
                 min_value=1,
                 max_value=365,
                 value=4,
                 step=1,
-                help="가장 최근 capture 날짜를 기준으로 N일 이내 raw만 zip에 포함합니다.",
+                help="가장 최근 capture 날짜를 기준으로 N개 캘린더 날짜를 포함합니다. 예: 2이면 최신 날짜와 그 전날 raw를 묶습니다.",
                 disabled=scope != "최근 N일 raw만",
                 key="registry-raw-bundle-days",
             )
         )
+        raw_selection: dict
         if scope == "최근 N일 raw만":
             raw_dirs, latest_raw_at = _recent_raw_capture_dirs(all_raw_dirs, recent_days)
+            if latest_raw_at:
+                start_date = latest_raw_at.date() - timedelta(days=recent_days - 1)
+                selected_dates = sorted({_capture_dir_timestamp(path).date() for path in raw_dirs})
+                raw_selection = {
+                    "scope": "recent_calendar_days",
+                    "recent_days": recent_days,
+                    "latest_capture_at": latest_raw_at.isoformat(timespec="seconds"),
+                    "start_date": start_date.isoformat(),
+                    "end_date": latest_raw_at.date().isoformat(),
+                    "selected_dates": [value.isoformat() for value in selected_dates],
+                }
+            else:
+                raw_selection = {"scope": "recent_calendar_days", "recent_days": recent_days}
             scope_text = (
-                f"최근 `{recent_days}`일 raw"
+                f"최근 `{recent_days}`개 날짜 raw"
                 + (f" (기준 최신 capture: `{latest_raw_at:%Y-%m-%d %H:%M:%S}`)" if latest_raw_at else "")
             )
         else:
             raw_dirs = all_raw_dirs
+            raw_selection = {"scope": "all_raw"}
             scope_text = "전체 raw"
+        selection_key = _raw_bundle_selection_key(scope, recent_days, raw_dirs)
+        if st.session_state.get("registry_raw_bundle_key") != selection_key:
+            st.session_state.pop("registry_raw_bundle_path", None)
         raw_size = sum(_directory_size_bytes(path) for path in raw_dirs)
         st.caption(
             f"Raw bundle 대상: {scope_text}, `{len(raw_dirs)}` / `{len(all_raw_dirs)}` capture folders, 약 `{_format_bytes(raw_size)}`. "
-            "용량이 크면 zip 생성과 다운로드가 오래 걸릴 수 있습니다."
+            "범위를 바꾼 뒤에는 다시 Build해야 새 ZIP이 만들어집니다."
         )
         if raw_size > 2 * 1024**3:
             st.warning(
@@ -402,11 +447,16 @@ def _render_registry_share_tools() -> None:
         if st.button("Build Registry + Raw Bundle ZIP", width="stretch", disabled=not raw_dirs):
             try:
                 with st.spinner("registry DB와 선택한 logs/raw를 zip으로 묶는 중입니다..."):
-                    bundle_path = _build_registry_raw_bundle(db_path, raw_dirs)
+                    bundle_path = _build_registry_raw_bundle(
+                        db_path,
+                        raw_dirs,
+                        raw_selection=raw_selection,
+                    )
             except Exception as error:
                 st.error(f"Raw bundle export failed: {error}")
             else:
                 st.session_state["registry_raw_bundle_path"] = str(bundle_path)
+                st.session_state["registry_raw_bundle_key"] = selection_key
                 st.success(f"Raw bundle ready: `{bundle_path}` ({_format_bytes(bundle_path.stat().st_size)})")
 
         bundle_value = st.session_state.get("registry_raw_bundle_path")
@@ -979,6 +1029,25 @@ def _trace_display_confirmed_points(trace: dict) -> list[dict]:
     ]
 
 
+def _trace_display_raw_confirmed_points(trace: dict) -> list[dict]:
+    events = _nested_get(trace, "tracker", "display_output_smoothing", "events", default=[]) or []
+    points = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        points.append(
+            {
+                "track_id": event.get("track_id"),
+                "x_m": event.get("raw_x_m"),
+                "y_m": event.get("raw_y_m"),
+                "state": "confirmed",
+                "display_stage": "pre_smoothing",
+                "output_smoothing_shift_m": event.get("shift_m"),
+            }
+        )
+    return points
+
+
 def _trace_display_count(trace: dict) -> int:
     confirmed = int(_nested_get(trace, "display_output", "confirmed_count", default=0) or 0)
     if _trace_has_multi_display_evidence(trace):
@@ -1172,10 +1241,31 @@ def _trace_stage_points(trace: dict, stage: str) -> list[dict]:
     if stage == "dbscan":
         return list(_nested_get(detection, "dbscan", "output_top", default=[]) or [])
     if stage == "score_filtered":
+        score_filtered = _nested_get(detection, "output_score_filter", "output_top", default=[]) or []
+        if score_filtered:
+            return list(score_filtered)
+        angle_bias_before = _nested_get(detection, "angle_bias_correction", "before_top", default=[]) or []
+        if angle_bias_before:
+            return list(angle_bias_before)
         final_output = _nested_get(detection, "final_output", "top_detections", default=[]) or []
         if final_output:
             return list(final_output)
         return list(_nested_get(detection, "dbscan", "output_top", default=[]) or [])
+    if stage == "angle_corrected":
+        corrected = _nested_get(detection, "angle_bias_correction", "after_top", default=[]) or []
+        if corrected:
+            return list(corrected)
+        return list(_nested_get(detection, "final_output", "top_detections", default=[]) or [])
+    if stage == "range_angle_corrected":
+        corrected = _nested_get(detection, "range_angle_correction", "after_top", default=[]) or []
+        if corrected:
+            return list(corrected)
+        return _trace_stage_points(trace, "angle_corrected")
+    if stage == "line_deskew":
+        deskewed = _nested_get(detection, "line_deskew_correction", "after_top", default=[]) or []
+        if deskewed:
+            return list(deskewed)
+        return _trace_stage_points(trace, "range_angle_corrected")
     if stage == "tracker_input":
         return list(tracker.get("measurements") or [])
     if stage == "tracks_confirmed":
@@ -1185,6 +1275,11 @@ def _trace_stage_points(trace: dict, stage: str) -> list[dict]:
             if isinstance(track, dict)
             and str(track.get("state") or "").lower() != "tentative"
         ]
+    if stage == "display_raw_confirmed":
+        raw_points = _trace_display_raw_confirmed_points(trace)
+        if raw_points:
+            return raw_points
+        return _trace_stage_points(trace, "display_confirmed")
     if stage == "tracks":
         return list(_nested_get(tracker, "track_lifecycle", "tracks_after_prune", default=[]) or [])
     if stage == "display_confirmed":
@@ -1239,14 +1334,34 @@ def _trace_stage_count(trace: dict, stage: str) -> int:
         return int(_nested_get(detection, "dbscan", "output_count", default=0) or 0)
     if stage == "score_filtered":
         final_count = _nested_get(detection, "final_output", "output_count", default=None)
+        score_count = _nested_get(detection, "output_score_filter", "after_count", default=None)
+        if score_count is not None:
+            return int(score_count or 0)
         if final_count is not None:
             return int(final_count or 0)
         return int(_nested_get(detection, "dbscan", "output_count", default=0) or 0)
+    if stage == "angle_corrected":
+        corrected_count = _nested_get(detection, "angle_bias_correction", "after_count", default=None)
+        if corrected_count is not None:
+            return int(corrected_count or 0)
+        return int(_nested_get(detection, "final_output", "output_count", default=0) or 0)
+    if stage == "range_angle_corrected":
+        corrected_count = _nested_get(detection, "range_angle_correction", "after_count", default=None)
+        if corrected_count is not None:
+            return int(corrected_count or 0)
+        return _trace_stage_count(trace, "angle_corrected")
+    if stage == "line_deskew":
+        deskewed_count = _nested_get(detection, "line_deskew_correction", "after_count", default=None)
+        if deskewed_count is not None:
+            return int(deskewed_count or 0)
+        return _trace_stage_count(trace, "range_angle_corrected")
     if stage == "tracker_input":
         return int(_nested_get(trace, "tracker_input_filter", "tracker_input_count", default=0) or 0)
     if stage == "tracks_confirmed":
         tracks = _trace_stage_points(trace, "tracks_confirmed")
         return len(tracks)
+    if stage == "display_raw_confirmed":
+        return len(_trace_stage_points(trace, "display_raw_confirmed"))
     if stage == "prediction":
         return int(_nested_get(tracker, "kalman_prediction", "track_count", default=0) or 0)
     if stage == "association":
@@ -1317,8 +1432,13 @@ _TRACK_TRAJECTORY_COLORS = [
 ]
 
 
-def _track_id_from_point(point: dict):
-    for key in ("track_id", "id", "trackId"):
+def _track_id_from_point(point: dict, *, prefer_display_id: bool = False):
+    keys = (
+        ("display_id", "stable_id", "track_id", "id", "trackId")
+        if prefer_display_id
+        else ("track_id", "id", "trackId")
+    )
+    for key in keys:
         value = point.get(key)
         if value is not None:
             return value
@@ -1334,7 +1454,10 @@ def _collect_stage_track_trajectories(
         for point in _trace_stage_points(trace, stage):
             if not isinstance(point, dict):
                 continue
-            track_id = _track_id_from_point(point)
+            track_id = _track_id_from_point(
+                point,
+                prefer_display_id=stage in {"display_confirmed", "display_all", "display"},
+            )
             if track_id is None:
                 continue
             x_m = _as_float(point.get("x_m"))
@@ -1382,6 +1505,36 @@ def _track_trajectory_stats(rows: list[dict], total_frames: int) -> dict:
         "y_range_m": f"{float(np.min(ys)):.2f}..{float(np.max(ys)):.2f}",
         "mean_confidence": f"{float(np.mean(confidences)):.3f}" if confidences else "",
     }
+
+
+def _split_track_trajectory_segments(
+    rows: list[dict],
+    *,
+    max_frame_gap: int = 3,
+    max_jump_m: float = 0.75,
+) -> list[list[dict]]:
+    segments: list[list[dict]] = []
+    current: list[dict] = []
+    previous = None
+    for row in rows:
+        split = False
+        if previous is not None:
+            frame_gap = int(row.get("index", 0)) - int(previous.get("index", 0))
+            jump_m = float(
+                np.hypot(
+                    float(row["x_m"]) - float(previous["x_m"]),
+                    float(row["y_m"]) - float(previous["y_m"]),
+                )
+            )
+            split = frame_gap > max_frame_gap or jump_m > max_jump_m
+        if split and current:
+            segments.append(current)
+            current = []
+        current.append(row)
+        previous = row
+    if current:
+        segments.append(current)
+    return segments
 
 
 def _trajectory_by_index(trajectory: list[dict]) -> dict[int, dict]:
@@ -1452,6 +1605,9 @@ def _render_detection_tracking_comparison(trace_rows: list[dict]) -> None:
         "Blob-centered candidates": ("blob_center", "#8d63c7"),
         "RD/CFAR guarded output": ("rd_cfar_guard", "#af3d0f"),
         "Score-filtered output": ("score_filtered", "#0b7285"),
+        "Angle-corrected candidates": ("angle_corrected", "#c2410c"),
+        "Range-angle corrected candidates": ("range_angle_corrected", "#a855f7"),
+        "Line-deskew diagnostic": ("line_deskew", "#b83280"),
         "Tracker input": ("tracker_input", "#6155b8"),
         "Debug: raw angle candidates": ("angle", "#2d8f7a"),
         "Debug: legacy body-center patch": ("body_center", "#c05d9f"),
@@ -1460,6 +1616,7 @@ def _render_detection_tracking_comparison(trace_rows: list[dict]) -> None:
     }
     tracking_options = {
         "Display accepted tracks": ("display_confirmed", "#1b7a4c"),
+        "Display raw before smoothing": ("display_raw_confirmed", "#7a8794"),
         "Tracker confirmed state": ("tracks_confirmed", "#172232"),
         "Debug: all tracker history": ("tracks", "#596273"),
         "Debug: display + tentative": ("display_all", "#6c8c4c"),
@@ -1803,7 +1960,11 @@ def _render_stage_sequence_overview(trace_rows: list[dict]) -> None:
         ("blob_center", "Blob-centered candidates", "#8d63c7"),
         ("rd_cfar_guard", "RD/CFAR guarded output", "#af3d0f"),
         ("score_filtered", "Score-filtered output", "#0b7285"),
+        ("angle_corrected", "Angle-corrected candidates", "#c2410c"),
+        ("range_angle_corrected", "Range-angle corrected candidates", "#a855f7"),
+        ("line_deskew", "Line-deskew diagnostic", "#b83280"),
         ("tracker_input", "Tracker input", "#6155b8"),
+        ("display_raw_confirmed", "Display raw before smoothing", "#7a8794"),
         ("display_confirmed", "Display accepted tracks", "#1b7a4c"),
         ("tracks_confirmed", "Tracker confirmed state", "#172232"),
         ("angle", "Debug: raw angle candidates", "#2d8f7a"),
@@ -1821,6 +1982,9 @@ def _render_stage_sequence_overview(trace_rows: list[dict]) -> None:
         "Blob-centered candidates",
         "RD/CFAR guarded output",
         "Score-filtered output",
+        "Angle-corrected candidates",
+        "Range-angle corrected candidates",
+        "Line-deskew diagnostic",
         "Tracker input",
         "Display accepted tracks",
     ]
@@ -1889,6 +2053,9 @@ def _render_trace_funnel(trace: dict) -> None:
         ("DBSCAN", _nested_get(detection, "dbscan", "output_count", default=0), "#0e8a7e"),
         ("R-D Ambig.", _nested_get(detection, "range_doppler_ambiguity_suppression", "after_count", default=0), "#b54708"),
         ("Score Filter", score_filtered_count, "#0b7285"),
+        ("Angle Bias", _nested_get(detection, "angle_bias_correction", "after_count", default=0), "#c2410c"),
+        ("Range-Angle", _nested_get(detection, "range_angle_correction", "after_count", default=0), "#a855f7"),
+        ("Line Deskew", _nested_get(detection, "line_deskew_correction", "after_count", default=0), "#b83280"),
         ("Tracker In", _nested_get(trace, "tracker_input_filter", "tracker_input_count", default=0), "#6155b8"),
         ("Matched", _nested_get(tracker, "association", "matched_count", default=0), "#8d63c7"),
         ("Accepted Display", _nested_get(trace, "display_output", "confirmed_count", default=0), "#1b7a4c"),
@@ -1926,6 +2093,9 @@ def _render_trace_spatial_view_svg_legacy(trace: dict) -> None:
         ("final_merge", "Merge", "#5176b8", 5.8, 0.76),
         ("dbscan", "DBSCAN", "#0e8a7e", 7.2, 0.92),
         ("score_filtered", "Score", "#0b7285", 7.8, 0.94),
+        ("angle_corrected", "Angle Bias", "#c2410c", 8.0, 0.94),
+        ("range_angle_corrected", "Range Angle", "#a855f7", 8.05, 0.94),
+        ("line_deskew", "Line Deskew", "#b83280", 8.1, 0.94),
         ("tracker_input", "Tracker In", "#6155b8", 8.2, 0.95),
         ("tracks", "Track", "#172232", 9.0, 0.95),
     ]
@@ -2060,6 +2230,25 @@ def _render_trace_flow(trace: dict) -> None:
     blob_center_count = _nested_get(trace, "detection", "blob_center_refinement", "output_count", default=0)
     merge_after = _nested_get(trace, "detection", "candidate_merge_final", "after_count", default=0)
     dbscan_out = _nested_get(trace, "detection", "dbscan", "output_count", default=0)
+    angle_corrected = _nested_get(trace, "detection", "angle_bias_correction", "after_count", default=0)
+    range_angle_corrected = _nested_get(
+        trace,
+        "detection",
+        "range_angle_correction",
+        "after_count",
+        default=0,
+    )
+    range_angle_applied = bool(
+        _nested_get(
+            trace,
+            "detection",
+            "range_angle_correction",
+            "applied_to_tracker",
+            default=False,
+        )
+    )
+    tracker_input_source_count = range_angle_corrected if range_angle_applied else angle_corrected
+    line_deskewed = _nested_get(trace, "detection", "line_deskew_correction", "after_count", default=0)
     tracker_in = _nested_get(trace, "tracker_input_filter", "tracker_input_count", default=0)
     predicted = _nested_get(trace, "tracker", "kalman_prediction", "track_count", default=0)
     matched = _nested_get(trace, "tracker", "association", "matched_count", default=0)
@@ -2084,6 +2273,9 @@ def _render_trace_flow(trace: dict) -> None:
         {"stage": "RDA blob center", "value": blob_center_count, "meaning": "connected component blob centers"},
         {"stage": "candidate merge", "value": merge_after, "meaning": "after final merge"},
         {"stage": "DBSCAN", "value": dbscan_out, "meaning": "clusters"},
+        {"stage": "angle bias correction", "value": angle_corrected, "meaning": "piecewise angle-only coordinate correction"},
+        {"stage": "range-angle correction", "value": range_angle_corrected, "meaning": "range/angle table correction preview"},
+        {"stage": "line deskew diagnostic", "value": line_deskewed, "meaning": "recent trajectory line projection preview"},
         {"stage": "tracker input", "value": tracker_in, "meaning": "measurements"},
         {"stage": "prediction", "value": predicted, "meaning": "predicted tracks"},
         {"stage": "association", "value": matched, "meaning": "matched pairs"},
@@ -2116,7 +2308,10 @@ def _render_trace_flow(trace: dict) -> None:
         {"stage": "RDA blob-center refinement", "input": _nested_get(trace, "detection", "blob_center_refinement", "input_count", default=0), "output": blob_center_count, "meaning": "range/angle/doppler cube patch 연결 성분 중심 후보"},
         {"stage": "candidate merge", "input": _nested_get(trace, "detection", "candidate_merge_final", "before_count", default=0), "output": merge_after, "meaning": "거리/도플러 기준으로 가까운 후보 결합"},
         {"stage": "DBSCAN clustering", "input": _nested_get(trace, "detection", "dbscan", "input_count", default=0), "output": dbscan_out, "meaning": "최종 detection cluster 구성"},
-        {"stage": "tracker input filter", "input": dbscan_out, "output": tracker_in, "meaning": "invalid frame 정책과 birth block 적용"},
+        {"stage": "angle bias correction", "input": dbscan_out, "output": angle_corrected, "meaning": "좌/중/우 각도 구간별 보정값을 tracker 입력 좌표에 적용"},
+        {"stage": "range-angle correction", "input": angle_corrected, "output": range_angle_corrected, "meaning": "거리와 정규화 각도별 보정 table을 보간한 preview. diagnostic_only이면 tracker에는 적용하지 않음"},
+        {"stage": "line deskew diagnostic", "input": range_angle_corrected, "output": line_deskewed, "meaning": "최근 후보 궤적 중심선으로 약하게 투영한 비교용 좌표. diagnostic_only이면 tracker에는 적용하지 않음"},
+        {"stage": "tracker input filter", "input": tracker_input_source_count, "output": tracker_in, "meaning": "invalid frame 정책과 birth block 적용"},
         {"stage": "Kalman prediction", "input": "existing tracks", "output": predicted, "meaning": "기존 track의 현재 frame 예측"},
         {"stage": "association", "input": f"tracks={predicted}, meas={tracker_in}", "output": matched, "meaning": "예측 track과 measurement 매칭"},
         {"stage": "Kalman update", "input": matched, "output": updated, "meaning": "매칭된 track 상태 업데이트"},
@@ -2486,12 +2681,12 @@ def _render_multi_track_trajectory_overlay(trace_rows: list[dict]) -> None:
     if debug_history:
         stage_specs = [
             ("tracks", "Debug: all tracker history by track_id"),
-            ("display_all", "Debug: display + tentative by track_id"),
+            ("display_all", "Debug: display + tentative by display_id"),
         ]
     else:
         stage_specs = [
             ("tracks_confirmed", "Tracker confirmed by track_id"),
-            ("display_confirmed", "Display accepted by track_id"),
+            ("display_confirmed", "Display accepted by display_id"),
         ]
     panels = []
     for stage, label in stage_specs:
@@ -2539,17 +2734,30 @@ def _render_multi_track_trajectory_overlay(trace_rows: list[dict]) -> None:
         ax = axes[0][panel_index]
         for color_index, (track_id, rows) in enumerate(list(trajectories.items())[:8]):
             color = _TRACK_TRAJECTORY_COLORS[color_index % len(_TRACK_TRAJECTORY_COLORS)]
-            tx = [point["x_m"] for point in rows]
-            ty = [point["y_m"] for point in rows]
-            ax.plot(tx, ty, color=color, linewidth=2.0, marker="o", markersize=2.2, label=f"id {track_id}")
-            ax.scatter([tx[0]], [ty[0]], s=42, color=color, edgecolors="white", linewidth=0.8, zorder=5)
-            ax.scatter([tx[-1]], [ty[-1]], s=54, color=color, edgecolors="#172232", linewidth=1.0, zorder=5)
-            ax.text(tx[-1], ty[-1], f" {track_id}", color=color, fontsize=8, va="center")
+            segments = _split_track_trajectory_segments(rows)
+            for segment_index, segment in enumerate(segments):
+                tx = [point["x_m"] for point in segment]
+                ty = [point["y_m"] for point in segment]
+                ax.plot(
+                    tx,
+                    ty,
+                    color=color,
+                    linewidth=2.0,
+                    marker="o",
+                    markersize=2.2,
+                    label=f"id {track_id}" if segment_index == 0 else None,
+                )
+            tx_all = [point["x_m"] for point in rows]
+            ty_all = [point["y_m"] for point in rows]
+            ax.scatter([tx_all[0]], [ty_all[0]], s=42, color=color, edgecolors="white", linewidth=0.8, zorder=5)
+            ax.scatter([tx_all[-1]], [ty_all[-1]], s=54, color=color, edgecolors="#172232", linewidth=1.0, zorder=5)
+            ax.text(tx_all[-1], ty_all[-1], f" {track_id}", color=color, fontsize=8, va="center")
             stats = _track_trajectory_stats(rows, len(trace_rows))
             stat_rows.append(
                 {
-                    "stage": label.replace(" by track_id", ""),
-                    "track_id": track_id,
+                    "stage": label.replace(" by track_id", "").replace(" by display_id", ""),
+                    "id": track_id,
+                    "segments": len(segments),
                     **stats,
                 }
             )
@@ -2569,8 +2777,8 @@ def _render_multi_track_trajectory_overlay(trace_rows: list[dict]) -> None:
     _render_matplotlib_figure(
         fig,
         caption=(
-            "기본값은 현재 알고리즘의 accepted confirmed/display track만 track_id별로 그립니다. "
-            "짧게 태어난 ghost/tentative track은 디버그 모드에서 따로 확인하세요."
+            "기본값은 tracker 내부 ID와 표시용 display ID를 분리해 그립니다. "
+            "프레임 간격이 크거나 위치가 크게 뛴 구간은 같은 ID라도 선을 끊어 표시합니다."
         ),
     )
     _render_table(stat_rows, key="multi-track-trajectory-stats", height=220)
@@ -2608,6 +2816,9 @@ def _render_trace_spatial_view(trace: dict) -> None:
         ("blob_center", "RDA Blob", "#8d63c7"),
         ("rd_cfar_guard", "RD/CFAR Guard", "#af3d0f"),
         ("score_filtered", "Score Filter", "#0b7285"),
+        ("angle_corrected", "Angle Bias", "#c2410c"),
+        ("range_angle_corrected", "Range Angle", "#a855f7"),
+        ("line_deskew", "Line Deskew", "#b83280"),
         ("tracker_input", "Tracker In", "#6155b8"),
         ("display_confirmed", "Accepted Display", "#1b7a4c"),
         ("angle", "Debug Raw Angle", "#2d8f7a"),
@@ -2656,6 +2867,19 @@ def _render_trace_spatial_view(trace: dict) -> None:
         if None in (bx, by, axv, ay):
             continue
         ax.plot([bx, axv], [by, ay], color="#c05d9f", alpha=0.35, linestyle="--", linewidth=1.0)
+    correction_pairs = _nested_get(trace, "detection", "angle_bias_correction", "pairs", default=[]) or []
+    for pair in correction_pairs[:10]:
+        before = pair.get("before") if isinstance(pair, dict) else None
+        after = pair.get("after") if isinstance(pair, dict) else None
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            continue
+        bx = _as_float(before.get("x_m"))
+        by = _as_float(before.get("y_m"))
+        axv = _as_float(after.get("x_m"))
+        ay = _as_float(after.get("y_m"))
+        if None in (bx, by, axv, ay):
+            continue
+        ax.plot([bx, axv], [by, ay], color="#c2410c", alpha=0.45, linestyle=":", linewidth=1.2)
     ax.scatter([0.0], [0.0], s=70, color="#172232", marker="s", label="radar", zorder=6)
     ax.set_xlim(-x_abs * 1.12, x_abs * 1.12)
     ax.set_ylim(0.0, y_max * 1.08)
@@ -4474,10 +4698,12 @@ def _stage_page() -> None:
         st.warning("raw capture가 연결된 run이 아직 없습니다. live 측정 시 raw capture를 먼저 남겨 주세요.")
         return
 
+    runs_by_id = {row["session_id"]: row for row in runs if row.get("session_id")}
     selected_session = st.selectbox(
         "Run for Stage Debug",
         [row["session_id"] for row in selectable_runs],
         index=0,
+        format_func=lambda session_id: _run_select_label(session_id, runs_by_id),
     )
     detail = registry.fetch_run_detail(PROJECT_ROOT, selected_session)
     if detail is None:
@@ -4664,6 +4890,57 @@ def _stage_page() -> None:
             f"generated_at={manifest.get('generated_at') or 'n/a'} | "
             f"cache_dir=`{cache_paths['cache_dir']}`"
         )
+        runtime_info = manifest.get("runtime") or {}
+        st.caption(
+            "angle_bias_correction="
+            f"{'on' if runtime_info.get('angle_bias_correction_enabled') else 'off'} "
+            f"(mode={runtime_info.get('angle_bias_correction_mode') or 'n/a'}, "
+            f"L={runtime_info.get('angle_bias_left_deg', 0):+g}, "
+            f"C={runtime_info.get('angle_bias_center_deg', 0):+g}, "
+            f"R={runtime_info.get('angle_bias_right_deg', 0):+g}, "
+            f"band={runtime_info.get('angle_bias_center_band_deg', 0):g} deg, "
+            f"source={runtime_info.get('angle_bias_correction_source') or 'n/a'})"
+        )
+        st.caption(
+            "line_deskew_correction="
+            f"{'on' if runtime_info.get('line_deskew_correction_enabled') else 'off'} "
+            f"(diagnostic_only={runtime_info.get('line_deskew_correction_diagnostic_only', True)}, "
+            f"gain={runtime_info.get('line_deskew_gain', 0):g}, "
+            f"max_shift={runtime_info.get('line_deskew_max_shift_m', 0):g}m, "
+            f"min_history={runtime_info.get('line_deskew_min_history_frames', 0)}, "
+            f"source={runtime_info.get('line_deskew_correction_source') or 'n/a'})"
+        )
+        st.caption(
+            "range_angle_correction="
+            f"{'on' if runtime_info.get('range_angle_correction_enabled') else 'off'} "
+            f"(diagnostic_only={runtime_info.get('range_angle_correction_diagnostic_only', True)}, "
+            f"area=±{runtime_info.get('range_angle_reference_half_width_m', 0):g}m/"
+            f"{runtime_info.get('range_angle_reference_forward_m', 0):g}m, "
+            f"max_delta={runtime_info.get('range_angle_correction_max_delta_deg', 0):g}deg, "
+            f"source={runtime_info.get('range_angle_correction_source') or 'n/a'})"
+        )
+        trace_consistency = manifest.get("trace_consistency") or {}
+        if int(manifest.get("schema_version") or 0) < 10:
+            st.warning(
+                "이 stage cache는 최신 range-angle/line 보정 trace 검사가 없는 이전 schema입니다. "
+                "Force Rebuild로 다시 생성해 주세요."
+            )
+        elif runtime_info.get("angle_bias_correction_enabled"):
+            x_flips = int(trace_consistency.get("angle_bias_x_sign_flip_count") or 0)
+            angle_flips = int(trace_consistency.get("angle_bias_angle_sign_flip_count") or 0)
+            missing = int(trace_consistency.get("angle_bias_missing_frames") or 0)
+            pairs = int(trace_consistency.get("angle_bias_pair_count") or 0)
+            if missing or x_flips or angle_flips:
+                st.error(
+                    "Angle bias trace consistency failed: "
+                    f"missing={missing}, angle_flips={angle_flips}, x_flips={x_flips}. "
+                    "Streamlit 서버를 재시작한 뒤 Force Rebuild 해 주세요."
+                )
+            else:
+                st.caption(
+                    "angle_bias_trace_check="
+                    f"ok (pairs={pairs}, angle_flips=0, x_flips=0)"
+                )
         with st.expander("Stage Cache Files", expanded=False):
             _render_file_links(
                 {

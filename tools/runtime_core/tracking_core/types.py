@@ -28,6 +28,7 @@ class TrackEstimate:
     measurement_quality: float = 1.0
     measurement_residual_m: float = 0.0
     is_primary: bool = False
+    display_id: int | None = None
 
 
 @dataclass
@@ -47,4 +48,3 @@ class Track:
     rai_peak: float
     last_measurement_quality: float = 1.0
     last_measurement_residual_m: float = 0.0
-

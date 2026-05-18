@@ -1,5 +1,6 @@
 """Lightweight multi-target Kalman tracker for radar cluster centroids."""
 
+from dataclasses import replace
 from math import atan2, cos, degrees, hypot, isfinite, radians
 from typing import Dict, List, Optional, Tuple
 
@@ -58,6 +59,7 @@ class MultiTargetTracker:
         track_line_projection_max_shift_m=0.16,
         forward_smoothing_alpha=1.0,
         forward_velocity_damping=1.0,
+        motion_correction_strength=1.0,
         measurement_follow_enabled=False,
         measurement_follow_blend=0.0,
         measurement_follow_min_quality=0.0,
@@ -82,6 +84,20 @@ class MultiTargetTracker:
         max_object_count=0,
         expected_object_count=None,
         crossing_hold_frames=0,
+        output_smoothing_enabled=False,
+        output_smoothing_alpha=1.0,
+        output_smoothing_max_step_m=0.0,
+        output_smoothing_reset_m=1.2,
+        output_smoothing_min_hits=3,
+        recent_lost_track_memory_frames=0,
+        reactivation_gate_m=0.0,
+        reactivation_direction_weight=0.0,
+        reactivation_doppler_gate_bins=0,
+        display_id_stitching_enabled=False,
+        display_id_stitching_gate_m=0.75,
+        display_id_stitching_memory_frames=30,
+        display_id_stitching_direction_weight=0.25,
+        display_id_stitching_doppler_gate_bins=0,
     ):
         if process_var <= 0:
             raise ValueError("process_var must be positive.")
@@ -153,6 +169,8 @@ class MultiTargetTracker:
             raise ValueError("forward_smoothing_alpha must be in (0, 1].")
         if not (0.0 < forward_velocity_damping <= 1.0):
             raise ValueError("forward_velocity_damping must be in (0, 1].")
+        if not (0.0 <= motion_correction_strength <= 1.0):
+            raise ValueError("motion_correction_strength must be in [0, 1].")
         if not (0.0 <= measurement_follow_blend <= 1.0):
             raise ValueError("measurement_follow_blend must be in [0, 1].")
         if not (0.0 <= measurement_follow_min_quality <= 1.0):
@@ -187,6 +205,30 @@ class MultiTargetTracker:
             raise ValueError("expected_object_count must be positive or None.")
         if crossing_hold_frames < 0:
             raise ValueError("crossing_hold_frames must be non-negative.")
+        if not (0.0 < output_smoothing_alpha <= 1.0):
+            raise ValueError("output_smoothing_alpha must be in (0, 1].")
+        if output_smoothing_max_step_m < 0:
+            raise ValueError("output_smoothing_max_step_m must be non-negative.")
+        if output_smoothing_reset_m < 0:
+            raise ValueError("output_smoothing_reset_m must be non-negative.")
+        if output_smoothing_min_hits < 1:
+            raise ValueError("output_smoothing_min_hits must be at least 1.")
+        if recent_lost_track_memory_frames < 0:
+            raise ValueError("recent_lost_track_memory_frames must be non-negative.")
+        if reactivation_gate_m < 0:
+            raise ValueError("reactivation_gate_m must be non-negative.")
+        if reactivation_direction_weight < 0:
+            raise ValueError("reactivation_direction_weight must be non-negative.")
+        if reactivation_doppler_gate_bins < 0:
+            raise ValueError("reactivation_doppler_gate_bins must be non-negative.")
+        if display_id_stitching_gate_m < 0:
+            raise ValueError("display_id_stitching_gate_m must be non-negative.")
+        if display_id_stitching_memory_frames < 0:
+            raise ValueError("display_id_stitching_memory_frames must be non-negative.")
+        if display_id_stitching_direction_weight < 0:
+            raise ValueError("display_id_stitching_direction_weight must be non-negative.")
+        if display_id_stitching_doppler_gate_bins < 0:
+            raise ValueError("display_id_stitching_doppler_gate_bins must be non-negative.")
 
         kalman_filter, q_discrete_white_noise = _load_filterpy()
         self._KalmanFilter = kalman_filter
@@ -232,6 +274,7 @@ class MultiTargetTracker:
         self.track_line_projection_max_shift_m = float(track_line_projection_max_shift_m)
         self.forward_smoothing_alpha = float(forward_smoothing_alpha)
         self.forward_velocity_damping = float(forward_velocity_damping)
+        self.motion_correction_strength = float(motion_correction_strength)
         self.measurement_follow_enabled = bool(measurement_follow_enabled)
         self.measurement_follow_blend = float(measurement_follow_blend)
         self.measurement_follow_min_quality = float(measurement_follow_min_quality)
@@ -259,12 +302,31 @@ class MultiTargetTracker:
             None if expected_object_count is None else int(expected_object_count)
         )
         self.crossing_hold_frames = int(crossing_hold_frames)
+        self.output_smoothing_enabled = bool(output_smoothing_enabled)
+        self.output_smoothing_alpha = float(output_smoothing_alpha)
+        self.output_smoothing_max_step_m = float(output_smoothing_max_step_m)
+        self.output_smoothing_reset_m = float(output_smoothing_reset_m)
+        self.output_smoothing_min_hits = int(output_smoothing_min_hits)
+        self.recent_lost_track_memory_frames = int(recent_lost_track_memory_frames)
+        self.reactivation_gate_m = float(reactivation_gate_m)
+        self.reactivation_direction_weight = float(reactivation_direction_weight)
+        self.reactivation_doppler_gate_bins = int(reactivation_doppler_gate_bins)
+        self.display_id_stitching_enabled = bool(display_id_stitching_enabled)
+        self.display_id_stitching_gate_m = float(display_id_stitching_gate_m)
+        self.display_id_stitching_memory_frames = int(display_id_stitching_memory_frames)
+        self.display_id_stitching_direction_weight = float(display_id_stitching_direction_weight)
+        self.display_id_stitching_doppler_gate_bins = int(display_id_stitching_doppler_gate_bins)
 
         self._tracks: List[_Track] = []
         self._next_track_id = 1
         self._last_frame_ts: Optional[float] = None
         self._primary_track_id: Optional[int] = None
         self._track_path_history: Dict[int, List[Tuple[float, float]]] = {}
+        self._output_smoothing_state: Dict[int, Tuple[float, float]] = {}
+        self._display_frame_index = 0
+        self._display_id_by_track_id: Dict[int, int] = {}
+        self._display_id_memory: Dict[int, dict] = {}
+        self._next_display_id = 1
 
     def _active_track_limit(self) -> int:
         if self.expected_object_count is not None:
@@ -294,18 +356,25 @@ class MultiTargetTracker:
 
     def _prune_excess_tracks_by_count(self) -> list[int]:
         limit = self._active_track_limit()
-        if limit <= 0 or len(self._tracks) <= limit:
+        candidate_tracks = (
+            [track for track in self._tracks if track.state != TrackState.LOST]
+            if self.recent_lost_track_memory_frames > 0
+            else list(self._tracks)
+        )
+        if limit <= 0 or len(candidate_tracks) <= limit:
             return []
-        ordered = sorted(self._tracks, key=self._track_keep_key, reverse=True)
+        ordered = sorted(candidate_tracks, key=self._track_keep_key, reverse=True)
         keep_ids = {int(track.track_id) for track in ordered[:limit]}
         deleted_ids = [
             int(track.track_id)
-            for track in self._tracks
+            for track in candidate_tracks
             if int(track.track_id) not in keep_ids
         ]
         if deleted_ids:
+            deleted_id_set = set(deleted_ids)
             self._tracks = [
-                track for track in self._tracks if int(track.track_id) in keep_ids
+                track for track in self._tracks
+                if int(track.track_id) not in deleted_id_set
             ]
         return sorted(deleted_ids)
 
@@ -324,6 +393,7 @@ class MultiTargetTracker:
         measurement_quality = float(np.clip(measurement_quality, 0.05, 1.0))
         quality_scale = 1.0 / measurement_quality
         variance = self.measurement_var * min(extra_scale, 4.0) * confidence_scale * quality_scale
+        variance *= self._measurement_variance_correction_scale()
         lateral_variance = float(variance)
         if self.angle_resolution_rad > 0.0:
             lateral_step_m = max(float(range_m), 0.5) * self.angle_resolution_rad
@@ -333,6 +403,16 @@ class MultiTargetTracker:
             lateral_variance *= lateral_scale
         forward_variance = float(variance) * self.forward_measurement_scale
         return np.diag(np.asarray([lateral_variance, forward_variance], dtype=float))
+
+    def _correction_strength(self) -> float:
+        return float(np.clip(self.motion_correction_strength, 0.0, 1.0))
+
+    def _relax_toward_measurement(self, value: float) -> float:
+        strength = self._correction_strength()
+        return 1.0 - (strength * (1.0 - float(value)))
+
+    def _measurement_variance_correction_scale(self) -> float:
+        return 0.35 + (0.65 * self._correction_strength())
 
     def _build_kf(self, measurement: dict):
         kf = self._KalmanFilter(dim_x=4, dim_z=2)
@@ -662,14 +742,19 @@ class MultiTargetTracker:
         range_m: float,
     ) -> tuple[float, float]:
         delta_x = float(updated_x) - float(predicted_x)
-        deadband = self._lateral_deadband_for_range(range_m)
+        correction_strength = self._correction_strength()
+        deadband = self._lateral_deadband_for_range(range_m) * correction_strength
         if abs(delta_x) <= deadband:
-            stabilized_x = float(predicted_x) + (delta_x * 0.15)
+            stabilized_x = float(predicted_x) + (
+                delta_x * self._relax_toward_measurement(0.15)
+            )
         else:
             stabilized_x = float(predicted_x) + (
-                delta_x * self._lateral_alpha_for_range(range_m)
+                delta_x * self._relax_toward_measurement(self._lateral_alpha_for_range(range_m))
             )
-        stabilized_vx = float(updated_vx) * self.lateral_velocity_damping
+        stabilized_vx = float(updated_vx) * self._relax_toward_measurement(
+            self.lateral_velocity_damping
+        )
         return stabilized_x, stabilized_vx
 
     def _stabilize_forward_state(
@@ -679,8 +764,12 @@ class MultiTargetTracker:
         updated_vy: float,
     ) -> tuple[float, float]:
         delta_y = float(updated_y) - float(predicted_y)
-        stabilized_y = float(predicted_y) + (delta_y * self.forward_smoothing_alpha)
-        stabilized_vy = float(updated_vy) * self.forward_velocity_damping
+        stabilized_y = float(predicted_y) + (
+            delta_y * self._relax_toward_measurement(self.forward_smoothing_alpha)
+        )
+        stabilized_vy = float(updated_vy) * self._relax_toward_measurement(
+            self.forward_velocity_damping
+        )
         return stabilized_y, stabilized_vy
 
     def _append_track_path_history(self, track_id: int, x_m: float, y_m: float) -> None:
@@ -720,8 +809,12 @@ class MultiTargetTracker:
         if shift_m <= 1e-9:
             return float(x_m), float(y_m), 0.0
 
-        requested_shift = shift_m * self.track_line_projection_blend
-        applied_shift = min(requested_shift, self.track_line_projection_max_shift_m)
+        correction_strength = self._correction_strength()
+        requested_shift = shift_m * self.track_line_projection_blend * correction_strength
+        applied_shift = min(
+            requested_shift,
+            self.track_line_projection_max_shift_m * correction_strength,
+        )
         if applied_shift <= 0:
             return float(x_m), float(y_m), 0.0
         adjusted = measurement + (shift_vec * (applied_shift / shift_m))
@@ -954,14 +1047,15 @@ class MultiTargetTracker:
             return 1.0, residual_m
 
         start_m, full_m = self._measurement_soft_gate_thresholds(track, measurement)
+        effective_floor = self._relax_toward_measurement(self.measurement_soft_gate_floor)
         if residual_m <= start_m:
             return 1.0, residual_m
         if residual_m >= full_m:
-            return self.measurement_soft_gate_floor, residual_m
+            return effective_floor, residual_m
 
         progress = (residual_m - start_m) / max(full_m - start_m, 1e-6)
-        quality = 1.0 - ((1.0 - self.measurement_soft_gate_floor) * progress)
-        return float(np.clip(quality, self.measurement_soft_gate_floor, 1.0)), residual_m
+        quality = 1.0 - ((1.0 - effective_floor) * progress)
+        return float(np.clip(quality, effective_floor, 1.0)), residual_m
 
     def _signed_doppler_bin(self, doppler_bin: int) -> float:
         if self.doppler_center_bin is None:
@@ -996,8 +1090,72 @@ class MultiTargetTracker:
 
         return self.doppler_cost_weight * penalty
 
+    def _doppler_gate_accepts(self, left_bin: int, right_bin: int, gate_bins: int) -> bool:
+        if gate_bins <= 0:
+            return True
+        left_signed = self._signed_doppler_bin(left_bin)
+        right_signed = self._signed_doppler_bin(right_bin)
+        if (
+            abs(left_signed) <= self.doppler_zero_guard_bins
+            and abs(right_signed) <= self.doppler_zero_guard_bins
+        ):
+            return True
+        return abs(left_signed - right_signed) <= float(gate_bins)
+
+    @staticmethod
+    def _direction_continuity_penalty(
+        vx_m_s: float,
+        vy_m_s: float,
+        dx_m: float,
+        dy_m: float,
+        weight: float,
+    ) -> float:
+        if weight <= 0.0:
+            return 0.0
+        speed_m_s = float(hypot(vx_m_s, vy_m_s))
+        displacement_m = float(hypot(dx_m, dy_m))
+        if speed_m_s < 0.08 or displacement_m < 0.05:
+            return 0.0
+        alignment = ((vx_m_s * dx_m) + (vy_m_s * dy_m)) / max(
+            speed_m_s * displacement_m,
+            1e-6,
+        )
+        return float(weight) * ((1.0 - float(np.clip(alignment, -1.0, 1.0))) * 0.5)
+
+    def _reactivation_assignment_cost(self, track: _Track, measurement: dict) -> float:
+        if self.reactivation_gate_m <= 0.0:
+            return np.inf
+        if track.state != TrackState.LOST and int(track.misses) <= 0:
+            return np.inf
+        if not self._doppler_gate_accepts(
+            track.doppler_bin,
+            measurement["doppler_bin"],
+            self.reactivation_doppler_gate_bins,
+        ):
+            return np.inf
+
+        dx_m = float(measurement["x_m"]) - float(track.kf.x[0][0])
+        dy_m = float(measurement["y_m"]) - float(track.kf.x[1][0])
+        distance_m = float(hypot(dx_m, dy_m))
+        gate_m = float(self.reactivation_gate_m)
+        if distance_m > gate_m:
+            return np.inf
+
+        normalized_distance = distance_m / max(gate_m, 1e-6)
+        direction_penalty = self._direction_continuity_penalty(
+            float(track.kf.x[2][0]),
+            float(track.kf.x[3][0]),
+            dx_m,
+            dy_m,
+            self.reactivation_direction_weight,
+        )
+        return float((normalized_distance * normalized_distance) + direction_penalty)
+
     def _motion_direction_reject(self, track: _Track, measurement: dict) -> bool:
         if not self.motion_direction_gate_enabled:
+            return False
+        correction_strength = self._correction_strength()
+        if correction_strength <= 0.0:
             return False
         if track.state != TrackState.CONFIRMED:
             return False
@@ -1019,7 +1177,10 @@ class MultiTargetTracker:
         ux = vx / max(speed_m_s, 1e-6)
         uy = vy / max(speed_m_s, 1e-6)
         alignment = ((dx * ux) + (dy * uy)) / max(displacement_m, 1e-6)
-        if alignment < self.motion_direction_cos_threshold:
+        effective_max_angle_deg = self.motion_direction_max_angle_deg + (
+            (180.0 - self.motion_direction_max_angle_deg) * (1.0 - correction_strength)
+        )
+        if alignment < cos(radians(effective_max_angle_deg)):
             return True
 
         cross_m = abs((dx * uy) - (dy * ux))
@@ -1027,8 +1188,8 @@ class MultiTargetTracker:
         cross_limit_m = (
             self.motion_direction_max_cross_m
             + self.motion_direction_cross_range_scale * max(range_m - 0.5, 0.0)
-        )
-        mostly_sideways = alignment < 0.35
+        ) / max(correction_strength, 0.2)
+        mostly_sideways = alignment < (0.35 * correction_strength)
         return bool(mostly_sideways and cross_m > cross_limit_m)
 
     def _mahalanobis_sq(self, track: _Track, measurement: dict) -> float:
@@ -1104,6 +1265,9 @@ class MultiTargetTracker:
                 )
                 doppler_cost = self._doppler_consistency_cost(track, measurement)
                 combined_cost = cost + doppler_cost
+                reactivation_cost = self._reactivation_assignment_cost(track, measurement)
+                if np.isfinite(reactivation_cost):
+                    combined_cost = min(combined_cost, reactivation_cost)
                 if combined_cost <= gate:
                     cost_matrix[row, col] = combined_cost
 
@@ -1214,6 +1378,302 @@ class MultiTargetTracker:
             is_primary=bool(track.track_id == self._primary_track_id),
         )
 
+    def _smooth_output_estimates(
+        self,
+        estimates: list[TrackEstimate],
+        *,
+        trace: Optional[dict] = None,
+    ) -> list[TrackEstimate]:
+        if not self.output_smoothing_enabled:
+            self._output_smoothing_state = {
+                int(item.track_id): (float(item.x_m), float(item.y_m))
+                for item in estimates
+            }
+            return estimates
+
+        active_ids = {int(item.track_id) for item in estimates}
+        self._output_smoothing_state = {
+            track_id: state
+            for track_id, state in self._output_smoothing_state.items()
+            if track_id in active_ids
+        }
+
+        events = []
+        smoothed_estimates = []
+        for estimate in estimates:
+            track_id = int(estimate.track_id)
+            raw_x = float(estimate.x_m)
+            raw_y = float(estimate.y_m)
+            previous = self._output_smoothing_state.get(track_id)
+            reset = previous is None or int(estimate.hits) < self.output_smoothing_min_hits
+
+            if previous is not None and not reset and self.output_smoothing_reset_m > 0:
+                raw_step_m = float(hypot(raw_x - previous[0], raw_y - previous[1]))
+                if raw_step_m > self.output_smoothing_reset_m:
+                    reset = True
+
+            if reset:
+                smooth_x = raw_x
+                smooth_y = raw_y
+                shift_m = 0.0
+            else:
+                alpha = float(self.output_smoothing_alpha)
+                target_x = previous[0] + ((raw_x - previous[0]) * alpha)
+                target_y = previous[1] + ((raw_y - previous[1]) * alpha)
+                step_x = target_x - previous[0]
+                step_y = target_y - previous[1]
+                step_m = float(hypot(step_x, step_y))
+                if self.output_smoothing_max_step_m > 0 and step_m > self.output_smoothing_max_step_m:
+                    scale = self.output_smoothing_max_step_m / max(step_m, 1e-9)
+                    target_x = previous[0] + (step_x * scale)
+                    target_y = previous[1] + (step_y * scale)
+                smooth_x = float(target_x)
+                smooth_y = float(target_y)
+                shift_m = float(hypot(raw_x - smooth_x, raw_y - smooth_y))
+
+            self._output_smoothing_state[track_id] = (smooth_x, smooth_y)
+            smoothed_estimates.append(
+                replace(
+                    estimate,
+                    x_m=smooth_x,
+                    y_m=smooth_y,
+                    range_m=float(hypot(smooth_x, smooth_y)),
+                    angle_deg=float(degrees(atan2(smooth_x, max(smooth_y, 1e-6)))),
+                )
+            )
+            if trace is not None and len(events) < 12:
+                events.append(
+                    {
+                        "track_id": track_id,
+                        "reset": bool(reset),
+                        "raw_x_m": round(raw_x, 4),
+                        "raw_y_m": round(raw_y, 4),
+                        "x_m": round(smooth_x, 4),
+                        "y_m": round(smooth_y, 4),
+                        "shift_m": round(shift_m, 4),
+                    }
+                )
+
+        if trace is not None:
+            trace["output_smoothing"] = {
+                "enabled": True,
+                "alpha": round(float(self.output_smoothing_alpha), 4),
+                "max_step_m": round(float(self.output_smoothing_max_step_m), 4),
+                "reset_m": round(float(self.output_smoothing_reset_m), 4),
+                "min_hits": int(self.output_smoothing_min_hits),
+                "events": events,
+            }
+        return smoothed_estimates
+
+    def _allocate_display_id(self, preferred_id: int | None = None) -> int:
+        used_ids = set(self._display_id_by_track_id.values()) | set(self._display_id_memory.keys())
+        if preferred_id is not None and int(preferred_id) not in used_ids:
+            display_id = int(preferred_id)
+            self._next_display_id = max(self._next_display_id, display_id + 1)
+            return display_id
+        while self._next_display_id in used_ids:
+            self._next_display_id += 1
+        display_id = int(self._next_display_id)
+        self._next_display_id += 1
+        return display_id
+
+    def _display_state_from_estimate(self, estimate: TrackEstimate, display_id: int) -> dict:
+        return {
+            "display_id": int(display_id),
+            "track_id": int(estimate.track_id),
+            "frame_index": int(self._display_frame_index),
+            "x_m": float(estimate.x_m),
+            "y_m": float(estimate.y_m),
+            "vx_m_s": float(estimate.vx_m_s),
+            "vy_m_s": float(estimate.vy_m_s),
+            "doppler_bin": int(estimate.doppler_bin),
+            "confidence": float(estimate.confidence),
+            "score": float(estimate.score),
+        }
+
+    @staticmethod
+    def _replace_estimate_display_id(estimate: TrackEstimate, display_id: int) -> TrackEstimate:
+        try:
+            return replace(estimate, display_id=int(display_id))
+        except TypeError:
+            cloned = replace(estimate)
+            setattr(cloned, "display_id", int(display_id))
+            return cloned
+
+    def _prune_display_id_memory(self) -> None:
+        memory_frames = int(self.display_id_stitching_memory_frames)
+        if memory_frames <= 0:
+            active_display_ids = set(self._display_id_by_track_id.values())
+            self._display_id_memory = {
+                display_id: state
+                for display_id, state in self._display_id_memory.items()
+                if display_id in active_display_ids
+            }
+            return
+        self._display_id_memory = {
+            display_id: state
+            for display_id, state in self._display_id_memory.items()
+            if (
+                self._display_frame_index - int(state.get("frame_index", self._display_frame_index))
+            ) <= memory_frames
+        }
+        remembered_display_ids = set(self._display_id_memory.keys())
+        self._display_id_by_track_id = {
+            track_id: display_id
+            for track_id, display_id in self._display_id_by_track_id.items()
+            if display_id in remembered_display_ids
+        }
+
+    def _display_stitching_cost(self, estimate: TrackEstimate, state: dict) -> float:
+        if not self.display_id_stitching_enabled or self.display_id_stitching_gate_m <= 0.0:
+            return np.inf
+        frame_gap = self._display_frame_index - int(state.get("frame_index", self._display_frame_index))
+        if frame_gap < 0 or frame_gap > self.display_id_stitching_memory_frames:
+            return np.inf
+        if not self._doppler_gate_accepts(
+            int(state.get("doppler_bin", estimate.doppler_bin)),
+            int(estimate.doppler_bin),
+            self.display_id_stitching_doppler_gate_bins,
+        ):
+            return np.inf
+
+        dx_m = float(estimate.x_m) - float(state.get("x_m", estimate.x_m))
+        dy_m = float(estimate.y_m) - float(state.get("y_m", estimate.y_m))
+        distance_m = float(hypot(dx_m, dy_m))
+        gate_m = float(self.display_id_stitching_gate_m)
+        if distance_m > gate_m:
+            return np.inf
+
+        direction_penalty = self._direction_continuity_penalty(
+            float(state.get("vx_m_s", 0.0)),
+            float(state.get("vy_m_s", 0.0)),
+            dx_m,
+            dy_m,
+            self.display_id_stitching_direction_weight,
+        )
+        age_bonus = min(max(frame_gap, 0), 8) * 0.015
+        return float((distance_m / max(gate_m, 1e-6)) + direction_penalty + age_bonus)
+
+    def _best_display_stitch_id(
+        self,
+        estimate: TrackEstimate,
+        used_display_ids: set[int],
+        active_mapped_display_ids: set[int],
+    ) -> tuple[int | None, float]:
+        best_display_id = None
+        best_cost = np.inf
+        for display_id, state in self._display_id_memory.items():
+            display_id = int(display_id)
+            if display_id in used_display_ids or display_id in active_mapped_display_ids:
+                continue
+            cost = self._display_stitching_cost(estimate, state)
+            if cost < best_cost:
+                best_display_id = display_id
+                best_cost = cost
+        return best_display_id, float(best_cost)
+
+    def _assign_display_ids(
+        self,
+        estimates: list[TrackEstimate],
+        *,
+        trace: Optional[dict] = None,
+    ) -> list[TrackEstimate]:
+        self._prune_display_id_memory()
+        if not self.display_id_stitching_enabled:
+            passthrough = [
+                self._replace_estimate_display_id(estimate, int(estimate.track_id))
+                for estimate in estimates
+            ]
+            self._display_id_by_track_id = {
+                int(estimate.track_id): int(estimate.track_id)
+                for estimate in passthrough
+            }
+            self._display_id_memory = {
+                int(estimate.track_id): self._display_state_from_estimate(
+                    estimate,
+                    int(estimate.track_id),
+                )
+                for estimate in passthrough
+            }
+            if trace is not None:
+                trace["display_id_stitching"] = {
+                    "enabled": False,
+                    "events": [],
+                }
+            return passthrough
+        if not estimates:
+            if trace is not None:
+                trace["display_id_stitching"] = {
+                    "enabled": bool(self.display_id_stitching_enabled),
+                    "events": [],
+                }
+            return estimates
+
+        active_track_ids = {int(estimate.track_id) for estimate in estimates}
+        active_mapped_display_ids = {
+            int(display_id)
+            for track_id, display_id in self._display_id_by_track_id.items()
+            if track_id in active_track_ids
+        }
+        used_display_ids: set[int] = set()
+        stitched_estimates = []
+        events = []
+
+        for estimate in estimates:
+            track_id = int(estimate.track_id)
+            display_id = self._display_id_by_track_id.get(track_id)
+            reason = "existing"
+            cost = None
+
+            if display_id in used_display_ids:
+                display_id = None
+
+            if display_id is None:
+                stitch_id, stitch_cost = self._best_display_stitch_id(
+                    estimate,
+                    used_display_ids,
+                    active_mapped_display_ids,
+                )
+                if stitch_id is not None:
+                    display_id = stitch_id
+                    reason = "stitched"
+                    cost = stitch_cost
+                else:
+                    display_id = self._allocate_display_id(preferred_id=track_id)
+                    reason = "new"
+
+            display_id = int(display_id)
+            self._display_id_by_track_id[track_id] = display_id
+            used_display_ids.add(display_id)
+            self._display_id_memory[display_id] = self._display_state_from_estimate(
+                estimate,
+                display_id,
+            )
+            stitched_estimates.append(self._replace_estimate_display_id(estimate, display_id))
+
+            if trace is not None and len(events) < 12:
+                event = {
+                    "track_id": track_id,
+                    "display_id": display_id,
+                    "reason": reason,
+                    "x_m": round(float(estimate.x_m), 4),
+                    "y_m": round(float(estimate.y_m), 4),
+                }
+                if cost is not None:
+                    event["cost"] = round(float(cost), 4)
+                events.append(event)
+
+        if trace is not None:
+            trace["display_id_stitching"] = {
+                "enabled": bool(self.display_id_stitching_enabled),
+                "gate_m": round(float(self.display_id_stitching_gate_m), 4),
+                "memory_frames": int(self.display_id_stitching_memory_frames),
+                "direction_weight": round(float(self.display_id_stitching_direction_weight), 4),
+                "doppler_gate_bins": int(self.display_id_stitching_doppler_gate_bins),
+                "events": events,
+            }
+        return stitched_estimates
+
     @staticmethod
     def _trace_measurement(measurement: dict) -> dict:
         x_m = float(measurement["x_m"])
@@ -1257,6 +1717,7 @@ class MultiTargetTracker:
         runtime_config=None,
         trace=None,
     ):
+        self._display_frame_index += 1
         measurements = [
             self._measurement_from_detection(detection)
             for detection in detections
@@ -1273,6 +1734,20 @@ class MultiTargetTracker:
                         "expected_object_count": self.expected_object_count,
                         "crossing_hold_frames": int(self.crossing_hold_frames),
                         "active_track_limit": int(self._active_track_limit()),
+                        "recent_lost_track_memory_frames": int(
+                            self.recent_lost_track_memory_frames
+                        ),
+                        "reactivation_gate_m": round(float(self.reactivation_gate_m), 4),
+                        "reactivation_direction_weight": round(
+                            float(self.reactivation_direction_weight),
+                            4,
+                        ),
+                        "reactivation_doppler_gate_bins": int(
+                            self.reactivation_doppler_gate_bins
+                        ),
+                        "display_id_stitching_enabled": bool(
+                            self.display_id_stitching_enabled
+                        ),
                     },
                     "input_detection_count": len(detections),
                     "measurement_count": len(measurements),
@@ -1508,10 +1983,14 @@ class MultiTargetTracker:
                 if int(track.track_id) not in duplicate_track_id_set
             ]
         count_pruned_track_ids = self._prune_excess_tracks_by_count()
+        missed_frame_limit = max(
+            int(self.max_missed_frames),
+            int(self.recent_lost_track_memory_frames),
+        )
         self._tracks = [
             track for track in self._tracks
             if not (track.state == TrackState.TENTATIVE and track.misses > 1)
-            and track.misses <= self.max_missed_frames
+            and track.misses <= missed_frame_limit
         ]
         after_prune_ids = {int(track.track_id) for track in self._tracks}
         deleted_ids = sorted((before_prune_ids - after_prune_ids) | set(count_pruned_track_ids))
@@ -1528,6 +2007,31 @@ class MultiTargetTracker:
             if track.misses > self.report_miss_tolerance:
                 continue
             confirmed_tracks.append(estimate)
+
+        smoothing_trace = {} if trace is not None else None
+        confirmed_tracks = self._smooth_output_estimates(
+            confirmed_tracks,
+            trace=smoothing_trace,
+        )
+        confirmed_tracks = self._assign_display_ids(
+            confirmed_tracks,
+            trace=smoothing_trace,
+        )
+        if trace is not None and smoothing_trace is not None:
+            trace["display_output_smoothing"] = smoothing_trace.get(
+                "output_smoothing",
+                {
+                    "enabled": bool(self.output_smoothing_enabled),
+                    "events": [],
+                },
+            )
+            trace["display_id_stitching"] = smoothing_trace.get(
+                "display_id_stitching",
+                {
+                    "enabled": bool(self.display_id_stitching_enabled),
+                    "events": [],
+                },
+            )
 
         if trace is not None:
             trace["track_lifecycle"] = {
@@ -1546,6 +2050,10 @@ class MultiTargetTracker:
                 "tentative_count": len(tentative_tracks),
                 "confirmed_track_ids": [int(track.track_id) for track in confirmed_tracks],
                 "tentative_track_ids": [int(track.track_id) for track in tentative_tracks],
+                "confirmed_display_ids": [
+                    int(track.display_id if track.display_id is not None else track.track_id)
+                    for track in confirmed_tracks
+                ],
             }
 
         return confirmed_tracks, tentative_tracks

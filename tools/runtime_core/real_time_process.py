@@ -91,8 +91,10 @@ def _serialize_detection(detection):
 
 
 def _serialize_track(track):
+    display_id = getattr(track, "display_id", None)
     return {
         "track_id": int(track.track_id),
+        "display_id": int(display_id if display_id is not None else track.track_id),
         "is_primary": bool(track.is_primary),
         "doppler_bin": int(track.doppler_bin),
         "range_m": round(float(track.range_m), 4),
@@ -141,6 +143,51 @@ def _round_stage_timings(stage_timings_ms):
         for key, value in (stage_timings_ms or {}).items()
         if value is not None
     }
+
+
+def _apply_xy_coordinate_correction(x_m, y_m, runtime_config):
+    yaw_deg = float(getattr(runtime_config, "xy_yaw_correction_deg", 0.0) or 0.0)
+    lateral_offset_m = float(getattr(runtime_config, "xy_lateral_offset_m", 0.0) or 0.0)
+    forward_offset_m = float(getattr(runtime_config, "xy_forward_offset_m", 0.0) or 0.0)
+    if abs(yaw_deg) <= 1e-9 and abs(lateral_offset_m) <= 1e-9 and abs(forward_offset_m) <= 1e-9:
+        return float(x_m), float(y_m)
+
+    yaw_rad = float(np.radians(yaw_deg))
+    cos_yaw = float(np.cos(yaw_rad))
+    sin_yaw = float(np.sin(yaw_rad))
+    x_value = float(x_m)
+    y_value = float(y_m)
+    corrected_x = (x_value * cos_yaw) - (y_value * sin_yaw) + lateral_offset_m
+    corrected_y = (x_value * sin_yaw) + (y_value * cos_yaw) + forward_offset_m
+    return float(corrected_x), float(corrected_y)
+
+
+def _correct_detection_coordinates(detection, runtime_config):
+    corrected_x, corrected_y = _apply_xy_coordinate_correction(
+        detection.x_m,
+        detection.y_m,
+        runtime_config,
+    )
+    if corrected_x == float(detection.x_m) and corrected_y == float(detection.y_m):
+        return detection
+    corrected_range_m = float(np.hypot(corrected_x, corrected_y))
+    corrected_angle_deg = float(np.degrees(np.arctan2(corrected_x, max(corrected_y, 1e-6))))
+    return replace(
+        detection,
+        range_m=corrected_range_m,
+        angle_deg=corrected_angle_deg,
+        x_m=corrected_x,
+        y_m=corrected_y,
+    )
+
+
+def _correct_detection_sequence(detections, runtime_config):
+    yaw_deg = float(getattr(runtime_config, "xy_yaw_correction_deg", 0.0) or 0.0)
+    lateral_offset_m = float(getattr(runtime_config, "xy_lateral_offset_m", 0.0) or 0.0)
+    forward_offset_m = float(getattr(runtime_config, "xy_forward_offset_m", 0.0) or 0.0)
+    if abs(yaw_deg) <= 1e-9 and abs(lateral_offset_m) <= 1e-9 and abs(forward_offset_m) <= 1e-9:
+        return list(detections)
+    return [_correct_detection_coordinates(item, runtime_config) for item in detections]
 
 
 def select_tracker_input_for_frame(
@@ -483,6 +530,75 @@ def process_frame_packet(
             "angle_projection": getattr(runtime_config, "angle_projection", "fft1d"),
             "doppler_axis": "fftshifted",
             "angle_source": getattr(runtime_config, "angle_source", "collapsed_rai"),
+            "angle_bias_correction_enabled": bool(
+                getattr(runtime_config, "angle_bias_correction_enabled", False)
+            ),
+            "angle_bias_correction_mode": str(
+                getattr(runtime_config, "angle_bias_correction_mode", "toward_center")
+            ),
+            "angle_bias_left_deg": round(
+                float(getattr(runtime_config, "angle_bias_left_deg", 0.0)),
+                4,
+            ),
+            "angle_bias_center_deg": round(
+                float(getattr(runtime_config, "angle_bias_center_deg", 0.0)),
+                4,
+            ),
+            "angle_bias_right_deg": round(
+                float(getattr(runtime_config, "angle_bias_right_deg", 0.0)),
+                4,
+            ),
+            "angle_bias_center_band_deg": round(
+                float(getattr(runtime_config, "angle_bias_center_band_deg", 7.0)),
+                4,
+            ),
+            "line_deskew_correction_enabled": bool(
+                getattr(runtime_config, "line_deskew_correction_enabled", False)
+            ),
+            "line_deskew_correction_diagnostic_only": bool(
+                getattr(runtime_config, "line_deskew_correction_diagnostic_only", True)
+            ),
+            "line_deskew_gain": round(
+                float(getattr(runtime_config, "line_deskew_gain", 0.3)),
+                4,
+            ),
+            "line_deskew_max_shift_m": round(
+                float(getattr(runtime_config, "line_deskew_max_shift_m", 0.08)),
+                4,
+            ),
+            "line_deskew_min_history_frames": int(
+                getattr(runtime_config, "line_deskew_min_history_frames", 20)
+            ),
+            "range_angle_correction_enabled": bool(
+                getattr(runtime_config, "range_angle_correction_enabled", False)
+            ),
+            "range_angle_correction_diagnostic_only": bool(
+                getattr(runtime_config, "range_angle_correction_diagnostic_only", True)
+            ),
+            "range_angle_reference_half_width_m": round(
+                float(
+                    getattr(
+                        runtime_config,
+                        "range_angle_correction_reference_half_width_m",
+                        3.5,
+                    )
+                ),
+                4,
+            ),
+            "range_angle_reference_forward_m": round(
+                float(
+                    getattr(
+                        runtime_config,
+                        "range_angle_correction_reference_forward_m",
+                        7.0,
+                    )
+                ),
+                4,
+            ),
+            "range_angle_correction_max_delta_deg": round(
+                float(getattr(runtime_config, "range_angle_correction_max_delta_deg", 6.0)),
+                4,
+            ),
             "channel_calibration_enabled": bool(
                 getattr(runtime_config, "channel_calibration_enabled", False)
             ),
@@ -502,6 +618,18 @@ def process_frame_packet(
             ),
             "tdm_mimo_doppler_compensation_reference_tx_slot": int(
                 getattr(runtime_config, "tdm_mimo_doppler_compensation_reference_tx_slot", 0)
+            ),
+            "xy_yaw_correction_deg": round(
+                float(getattr(runtime_config, "xy_yaw_correction_deg", 0.0) or 0.0),
+                4,
+            ),
+            "xy_lateral_offset_m": round(
+                float(getattr(runtime_config, "xy_lateral_offset_m", 0.0) or 0.0),
+                4,
+            ),
+            "xy_forward_offset_m": round(
+                float(getattr(runtime_config, "xy_forward_offset_m", 0.0) or 0.0),
+                4,
             ),
             "shape": [int(dim) for dim in np.asarray(rai_cube).shape],
         }
@@ -542,8 +670,24 @@ def process_frame_packet(
         trace=detection_trace,
         **dict(detection_params or {}),
     )
+    detections = _correct_detection_sequence(detections, runtime_config)
     stage_timings_ms["detect_ms"] = (time.perf_counter() - stage_started) * 1000.0
     if frame_trace is not None:
+        frame_trace["coordinate_correction"] = {
+            "xy_yaw_correction_deg": round(
+                float(getattr(runtime_config, "xy_yaw_correction_deg", 0.0) or 0.0),
+                4,
+            ),
+            "xy_lateral_offset_m": round(
+                float(getattr(runtime_config, "xy_lateral_offset_m", 0.0) or 0.0),
+                4,
+            ),
+            "xy_forward_offset_m": round(
+                float(getattr(runtime_config, "xy_forward_offset_m", 0.0) or 0.0),
+                4,
+            ),
+            "corrected_detection_count": len(detections),
+        }
         frame_trace["detection"] = detection_trace or {}
         frame_trace["rai_collapse_diagnostics"] = _build_rai_collapse_diagnostics(
             detection_trace=detection_trace or {},

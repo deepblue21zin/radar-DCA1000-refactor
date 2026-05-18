@@ -82,6 +82,65 @@ ANGLE_ELEVATION_MAX_DEG = float(TUNING['processing'].get('angle_elevation_max_de
 ANGLE_ELEVATION_STEP_DEG = float(TUNING['processing'].get('angle_elevation_step_deg', 4.0))
 ANGLE_PHASE_SIGN = float(TUNING['processing'].get('angle_phase_sign', -1.0))
 ANGLE_SOURCE = str(TUNING['processing'].get('angle_source', 'collapsed_rai')).strip().lower()
+COORDINATE_CORRECTION = TUNING['processing'].get('coordinate_correction', {}) or {}
+XY_YAW_CORRECTION_DEG = float(
+    COORDINATE_CORRECTION.get(
+        'yaw_deg',
+        TUNING['processing'].get('xy_yaw_correction_deg', 0.0),
+    )
+)
+XY_LATERAL_OFFSET_M = float(
+    COORDINATE_CORRECTION.get(
+        'lateral_offset_m',
+        TUNING['processing'].get('xy_lateral_offset_m', 0.0),
+    )
+)
+XY_FORWARD_OFFSET_M = float(
+    COORDINATE_CORRECTION.get(
+        'forward_offset_m',
+        TUNING['processing'].get('xy_forward_offset_m', 0.0),
+    )
+)
+ANGLE_BIAS_CORRECTION = TUNING['processing'].get('angle_bias_correction', {}) or {}
+ANGLE_BIAS_CORRECTION_ENABLED = bool(ANGLE_BIAS_CORRECTION.get('enabled', False))
+ANGLE_BIAS_CORRECTION_MODE = str(
+    ANGLE_BIAS_CORRECTION.get('mode', 'toward_center')
+).strip().lower()
+ANGLE_BIAS_LEFT_DEG = float(ANGLE_BIAS_CORRECTION.get('left_deg', 0.0))
+ANGLE_BIAS_CENTER_DEG = float(ANGLE_BIAS_CORRECTION.get('center_deg', 0.0))
+ANGLE_BIAS_RIGHT_DEG = float(ANGLE_BIAS_CORRECTION.get('right_deg', 0.0))
+ANGLE_BIAS_CENTER_BAND_DEG = float(ANGLE_BIAS_CORRECTION.get('center_band_deg', 7.0))
+LINE_DESKEW_CORRECTION = TUNING['processing'].get('line_deskew_correction', {}) or {}
+LINE_DESKEW_CORRECTION_ENABLED = bool(LINE_DESKEW_CORRECTION.get('enabled', False))
+LINE_DESKEW_CORRECTION_DIAGNOSTIC_ONLY = bool(
+    LINE_DESKEW_CORRECTION.get('diagnostic_only', True)
+)
+LINE_DESKEW_GAIN = float(LINE_DESKEW_CORRECTION.get('gain', 0.3))
+LINE_DESKEW_MAX_SHIFT_M = float(LINE_DESKEW_CORRECTION.get('max_shift_m', 0.08))
+LINE_DESKEW_MIN_HISTORY_FRAMES = int(LINE_DESKEW_CORRECTION.get('min_history_frames', 20))
+LINE_DESKEW_MAX_HISTORY_FRAMES = int(LINE_DESKEW_CORRECTION.get('max_history_frames', 90))
+LINE_DESKEW_MIN_Y_SPAN_M = float(LINE_DESKEW_CORRECTION.get('min_y_span_m', 0.35))
+RANGE_ANGLE_CORRECTION = TUNING['processing'].get('range_angle_correction', {}) or {}
+RANGE_ANGLE_CORRECTION_ENABLED = bool(RANGE_ANGLE_CORRECTION.get('enabled', False))
+RANGE_ANGLE_CORRECTION_DIAGNOSTIC_ONLY = bool(
+    RANGE_ANGLE_CORRECTION.get('diagnostic_only', True)
+)
+RANGE_ANGLE_REFERENCE_HALF_WIDTH_M = float(
+    RANGE_ANGLE_CORRECTION.get('reference_half_width_m', 3.5)
+)
+RANGE_ANGLE_REFERENCE_FORWARD_M = float(
+    RANGE_ANGLE_CORRECTION.get('reference_forward_m', 7.0)
+)
+RANGE_ANGLE_RANGE_BINS_M = RANGE_ANGLE_CORRECTION.get(
+    'range_bins_m',
+    [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+)
+RANGE_ANGLE_ANGLE_BINS_NORM = RANGE_ANGLE_CORRECTION.get(
+    'angle_bins_norm',
+    [-1.0, -0.5, 0.0, 0.5, 1.0],
+)
+RANGE_ANGLE_DELTA_TABLE_DEG = RANGE_ANGLE_CORRECTION.get('delta_table_deg', [])
+RANGE_ANGLE_MAX_DELTA_DEG = float(RANGE_ANGLE_CORRECTION.get('max_delta_deg', 6.0))
 CHANNEL_CALIBRATION = TUNING['processing'].get('channel_calibration', {}) or {}
 CHANNEL_CALIBRATION_ENABLED = bool(CHANNEL_CALIBRATION.get('enabled', False))
 CHANNEL_CALIBRATION_COEFFICIENTS = list(CHANNEL_CALIBRATION.get('coefficients', []))
@@ -167,6 +226,7 @@ TRACK_LINE_PROJECTION_MAX_SHIFT_M = float(
 )
 TRACK_FORWARD_SMOOTHING_ALPHA = float(TUNING['tracking'].get('forward_smoothing_alpha', 1.0))
 TRACK_FORWARD_VELOCITY_DAMPING = float(TUNING['tracking'].get('forward_velocity_damping', 1.0))
+TRACK_MOTION_CORRECTION_STRENGTH = float(TUNING['tracking'].get('motion_correction_strength', 1.0))
 TRACK_MEASUREMENT_FOLLOW_ENABLED = bool(TUNING['tracking'].get('measurement_follow_enabled', False))
 TRACK_MEASUREMENT_FOLLOW_BLEND = float(TUNING['tracking'].get('measurement_follow_blend', 0.0))
 TRACK_MEASUREMENT_FOLLOW_MIN_QUALITY = float(TUNING['tracking'].get('measurement_follow_min_quality', 0.0))
@@ -193,6 +253,20 @@ TRACK_MOTION_DIRECTION_CROSS_RANGE_SCALE = float(TUNING['tracking'].get('motion_
 TRACK_MAX_OBJECT_COUNT = int(TUNING['tracking'].get('max_object_count', 3))
 TRACK_EXPECTED_OBJECT_COUNT = TUNING['tracking'].get('expected_object_count')
 TRACK_CROSSING_HOLD_FRAMES = int(TUNING['tracking'].get('crossing_hold_frames', 8))
+TRACK_OUTPUT_SMOOTHING_ENABLED = bool(TUNING['tracking'].get('output_smoothing_enabled', False))
+TRACK_OUTPUT_SMOOTHING_ALPHA = float(TUNING['tracking'].get('output_smoothing_alpha', 1.0))
+TRACK_OUTPUT_SMOOTHING_MAX_STEP_M = float(TUNING['tracking'].get('output_smoothing_max_step_m', 0.0))
+TRACK_OUTPUT_SMOOTHING_RESET_M = float(TUNING['tracking'].get('output_smoothing_reset_m', 1.2))
+TRACK_OUTPUT_SMOOTHING_MIN_HITS = int(TUNING['tracking'].get('output_smoothing_min_hits', 3))
+TRACK_RECENT_LOST_MEMORY_FRAMES = int(TUNING['tracking'].get('recent_lost_track_memory_frames', 0))
+TRACK_REACTIVATION_GATE_M = float(TUNING['tracking'].get('reactivation_gate_m', 0.0))
+TRACK_REACTIVATION_DIRECTION_WEIGHT = float(TUNING['tracking'].get('reactivation_direction_weight', 0.0))
+TRACK_REACTIVATION_DOPPLER_GATE_BINS = int(TUNING['tracking'].get('reactivation_doppler_gate_bins', 0))
+TRACK_DISPLAY_ID_STITCHING_ENABLED = bool(TUNING['tracking'].get('display_id_stitching_enabled', False))
+TRACK_DISPLAY_ID_STITCHING_GATE_M = float(TUNING['tracking'].get('display_id_stitching_gate_m', 0.75))
+TRACK_DISPLAY_ID_STITCHING_MEMORY_FRAMES = int(TUNING['tracking'].get('display_id_stitching_memory_frames', 30))
+TRACK_DISPLAY_ID_STITCHING_DIRECTION_WEIGHT = float(TUNING['tracking'].get('display_id_stitching_direction_weight', 0.25))
+TRACK_DISPLAY_ID_STITCHING_DOPPLER_GATE_BINS = int(TUNING['tracking'].get('display_id_stitching_doppler_gate_bins', 0))
 DISPLAY_MIN_CONFIDENCE = float(TUNING['detection']['display_min_confidence'])
 PIPELINE_QUEUE_SIZE = int(TUNING['pipeline']['queue_size'])
 BLOCK_TRACK_BIRTH_ON_INVALID = bool(TUNING['pipeline']['block_track_birth_on_invalid'])
@@ -358,12 +432,36 @@ class MotionViewer:
             angle_elevation_step_deg=ANGLE_ELEVATION_STEP_DEG,
             angle_phase_sign=ANGLE_PHASE_SIGN,
             angle_source=ANGLE_SOURCE,
+            angle_bias_correction_enabled=ANGLE_BIAS_CORRECTION_ENABLED,
+            angle_bias_correction_mode=ANGLE_BIAS_CORRECTION_MODE,
+            angle_bias_left_deg=ANGLE_BIAS_LEFT_DEG,
+            angle_bias_center_deg=ANGLE_BIAS_CENTER_DEG,
+            angle_bias_right_deg=ANGLE_BIAS_RIGHT_DEG,
+            angle_bias_center_band_deg=ANGLE_BIAS_CENTER_BAND_DEG,
+            line_deskew_correction_enabled=LINE_DESKEW_CORRECTION_ENABLED,
+            line_deskew_correction_diagnostic_only=LINE_DESKEW_CORRECTION_DIAGNOSTIC_ONLY,
+            line_deskew_gain=LINE_DESKEW_GAIN,
+            line_deskew_max_shift_m=LINE_DESKEW_MAX_SHIFT_M,
+            line_deskew_min_history_frames=LINE_DESKEW_MIN_HISTORY_FRAMES,
+            line_deskew_max_history_frames=LINE_DESKEW_MAX_HISTORY_FRAMES,
+            line_deskew_min_y_span_m=LINE_DESKEW_MIN_Y_SPAN_M,
+            range_angle_correction_enabled=RANGE_ANGLE_CORRECTION_ENABLED,
+            range_angle_correction_diagnostic_only=RANGE_ANGLE_CORRECTION_DIAGNOSTIC_ONLY,
+            range_angle_correction_reference_half_width_m=RANGE_ANGLE_REFERENCE_HALF_WIDTH_M,
+            range_angle_correction_reference_forward_m=RANGE_ANGLE_REFERENCE_FORWARD_M,
+            range_angle_correction_range_bins_m=RANGE_ANGLE_RANGE_BINS_M,
+            range_angle_correction_angle_bins_norm=RANGE_ANGLE_ANGLE_BINS_NORM,
+            range_angle_correction_delta_table_deg=RANGE_ANGLE_DELTA_TABLE_DEG,
+            range_angle_correction_max_delta_deg=RANGE_ANGLE_MAX_DELTA_DEG,
             channel_calibration_enabled=CHANNEL_CALIBRATION_ENABLED,
             channel_calibration_coefficients=CHANNEL_CALIBRATION_COEFFICIENTS,
             tdm_mimo_doppler_compensation_enabled=TDM_MIMO_DOPPLER_COMPENSATION_ENABLED,
             tdm_mimo_doppler_compensation_phase_sign=TDM_MIMO_DOPPLER_COMPENSATION_PHASE_SIGN,
             tdm_mimo_doppler_compensation_slot_time_model=TDM_MIMO_DOPPLER_COMPENSATION_SLOT_TIME_MODEL,
             tdm_mimo_doppler_compensation_reference_tx_slot=TDM_MIMO_DOPPLER_COMPENSATION_REFERENCE_TX_SLOT,
+            xy_yaw_correction_deg=XY_YAW_CORRECTION_DEG,
+            xy_lateral_offset_m=XY_LATERAL_OFFSET_M,
+            xy_forward_offset_m=XY_FORWARD_OFFSET_M,
         )
         self.track_angle_resolution_rad = self.estimate_track_angle_resolution_rad()
         self.raw_frame_queue = Queue(maxsize=PIPELINE_QUEUE_SIZE)
@@ -471,6 +569,97 @@ class MotionViewer:
             'angle_source': getattr(self.runtime_config, 'angle_source', ANGLE_SOURCE),
             'angle_elevation_axis_deg': [round(float(v), 3) for v in self.runtime_config.angle_elevation_axis_deg.tolist()],
             'angle_phase_sign': self.runtime_config.angle_phase_sign,
+            'xy_yaw_correction_deg': getattr(self.runtime_config, 'xy_yaw_correction_deg', 0.0),
+            'xy_lateral_offset_m': getattr(self.runtime_config, 'xy_lateral_offset_m', 0.0),
+            'xy_forward_offset_m': getattr(self.runtime_config, 'xy_forward_offset_m', 0.0),
+            'angle_bias_correction_enabled': bool(
+                getattr(self.runtime_config, 'angle_bias_correction_enabled', ANGLE_BIAS_CORRECTION_ENABLED)
+            ),
+            'angle_bias_correction_mode': str(
+                getattr(self.runtime_config, 'angle_bias_correction_mode', ANGLE_BIAS_CORRECTION_MODE)
+            ),
+            'angle_bias_left_deg': float(getattr(self.runtime_config, 'angle_bias_left_deg', ANGLE_BIAS_LEFT_DEG)),
+            'angle_bias_center_deg': float(getattr(self.runtime_config, 'angle_bias_center_deg', ANGLE_BIAS_CENTER_DEG)),
+            'angle_bias_right_deg': float(getattr(self.runtime_config, 'angle_bias_right_deg', ANGLE_BIAS_RIGHT_DEG)),
+            'angle_bias_center_band_deg': float(
+                getattr(self.runtime_config, 'angle_bias_center_band_deg', ANGLE_BIAS_CENTER_BAND_DEG)
+            ),
+            'line_deskew_correction_enabled': bool(
+                getattr(self.runtime_config, 'line_deskew_correction_enabled', LINE_DESKEW_CORRECTION_ENABLED)
+            ),
+            'line_deskew_correction_diagnostic_only': bool(
+                getattr(
+                    self.runtime_config,
+                    'line_deskew_correction_diagnostic_only',
+                    LINE_DESKEW_CORRECTION_DIAGNOSTIC_ONLY,
+                )
+            ),
+            'line_deskew_gain': float(getattr(self.runtime_config, 'line_deskew_gain', LINE_DESKEW_GAIN)),
+            'line_deskew_max_shift_m': float(
+                getattr(self.runtime_config, 'line_deskew_max_shift_m', LINE_DESKEW_MAX_SHIFT_M)
+            ),
+            'line_deskew_min_history_frames': int(
+                getattr(self.runtime_config, 'line_deskew_min_history_frames', LINE_DESKEW_MIN_HISTORY_FRAMES)
+            ),
+            'range_angle_correction_enabled': bool(
+                getattr(
+                    self.runtime_config,
+                    'range_angle_correction_enabled',
+                    RANGE_ANGLE_CORRECTION_ENABLED,
+                )
+            ),
+            'range_angle_correction_diagnostic_only': bool(
+                getattr(
+                    self.runtime_config,
+                    'range_angle_correction_diagnostic_only',
+                    RANGE_ANGLE_CORRECTION_DIAGNOSTIC_ONLY,
+                )
+            ),
+            'range_angle_reference_half_width_m': float(
+                getattr(
+                    self.runtime_config,
+                    'range_angle_correction_reference_half_width_m',
+                    RANGE_ANGLE_REFERENCE_HALF_WIDTH_M,
+                )
+            ),
+            'range_angle_reference_forward_m': float(
+                getattr(
+                    self.runtime_config,
+                    'range_angle_correction_reference_forward_m',
+                    RANGE_ANGLE_REFERENCE_FORWARD_M,
+                )
+            ),
+            'range_angle_correction_max_delta_deg': float(
+                getattr(
+                    self.runtime_config,
+                    'range_angle_correction_max_delta_deg',
+                    RANGE_ANGLE_MAX_DELTA_DEG,
+                )
+            ),
+            'range_angle_range_bins_m': [
+                float(value)
+                for value in getattr(
+                    self.runtime_config,
+                    'range_angle_correction_range_bins_m',
+                    RANGE_ANGLE_RANGE_BINS_M,
+                )
+            ],
+            'range_angle_angle_bins_norm': [
+                float(value)
+                for value in getattr(
+                    self.runtime_config,
+                    'range_angle_correction_angle_bins_norm',
+                    RANGE_ANGLE_ANGLE_BINS_NORM,
+                )
+            ],
+            'range_angle_delta_table_deg': [
+                [float(item) for item in row]
+                for row in getattr(
+                    self.runtime_config,
+                    'range_angle_correction_delta_table_deg',
+                    RANGE_ANGLE_DELTA_TABLE_DEG,
+                )
+            ],
             'channel_calibration_enabled': getattr(
                 self.runtime_config,
                 'channel_calibration_enabled',
@@ -551,6 +740,7 @@ class MotionViewer:
             'track_line_projection_max_shift_m': TRACK_LINE_PROJECTION_MAX_SHIFT_M,
             'track_forward_smoothing_alpha': TRACK_FORWARD_SMOOTHING_ALPHA,
             'track_forward_velocity_damping': TRACK_FORWARD_VELOCITY_DAMPING,
+            'track_motion_correction_strength': TRACK_MOTION_CORRECTION_STRENGTH,
             'track_measurement_follow_enabled': TRACK_MEASUREMENT_FOLLOW_ENABLED,
             'track_measurement_follow_blend': TRACK_MEASUREMENT_FOLLOW_BLEND,
             'track_measurement_follow_min_quality': TRACK_MEASUREMENT_FOLLOW_MIN_QUALITY,
@@ -575,6 +765,20 @@ class MotionViewer:
             'track_max_object_count': TRACK_MAX_OBJECT_COUNT,
             'track_expected_object_count': TRACK_EXPECTED_OBJECT_COUNT,
             'track_crossing_hold_frames': TRACK_CROSSING_HOLD_FRAMES,
+            'track_output_smoothing_enabled': TRACK_OUTPUT_SMOOTHING_ENABLED,
+            'track_output_smoothing_alpha': TRACK_OUTPUT_SMOOTHING_ALPHA,
+            'track_output_smoothing_max_step_m': TRACK_OUTPUT_SMOOTHING_MAX_STEP_M,
+            'track_output_smoothing_reset_m': TRACK_OUTPUT_SMOOTHING_RESET_M,
+            'track_output_smoothing_min_hits': TRACK_OUTPUT_SMOOTHING_MIN_HITS,
+            'track_recent_lost_track_memory_frames': TRACK_RECENT_LOST_MEMORY_FRAMES,
+            'track_reactivation_gate_m': TRACK_REACTIVATION_GATE_M,
+            'track_reactivation_direction_weight': TRACK_REACTIVATION_DIRECTION_WEIGHT,
+            'track_reactivation_doppler_gate_bins': TRACK_REACTIVATION_DOPPLER_GATE_BINS,
+            'track_display_id_stitching_enabled': TRACK_DISPLAY_ID_STITCHING_ENABLED,
+            'track_display_id_stitching_gate_m': TRACK_DISPLAY_ID_STITCHING_GATE_M,
+            'track_display_id_stitching_memory_frames': TRACK_DISPLAY_ID_STITCHING_MEMORY_FRAMES,
+            'track_display_id_stitching_direction_weight': TRACK_DISPLAY_ID_STITCHING_DIRECTION_WEIGHT,
+            'track_display_id_stitching_doppler_gate_bins': TRACK_DISPLAY_ID_STITCHING_DOPPLER_GATE_BINS,
             'pipeline_queue_size': PIPELINE_QUEUE_SIZE,
             'block_track_birth_on_invalid': BLOCK_TRACK_BIRTH_ON_INVALID,
             'invalid_policy': dict(INVALID_POLICY),
@@ -664,6 +868,7 @@ class MotionViewer:
             track_line_projection_max_shift_m=TRACK_LINE_PROJECTION_MAX_SHIFT_M,
             forward_smoothing_alpha=TRACK_FORWARD_SMOOTHING_ALPHA,
             forward_velocity_damping=TRACK_FORWARD_VELOCITY_DAMPING,
+            motion_correction_strength=TRACK_MOTION_CORRECTION_STRENGTH,
             measurement_follow_enabled=TRACK_MEASUREMENT_FOLLOW_ENABLED,
             measurement_follow_blend=TRACK_MEASUREMENT_FOLLOW_BLEND,
             measurement_follow_min_quality=TRACK_MEASUREMENT_FOLLOW_MIN_QUALITY,
@@ -688,6 +893,20 @@ class MotionViewer:
             max_object_count=TRACK_MAX_OBJECT_COUNT,
             expected_object_count=TRACK_EXPECTED_OBJECT_COUNT,
             crossing_hold_frames=TRACK_CROSSING_HOLD_FRAMES,
+            output_smoothing_enabled=TRACK_OUTPUT_SMOOTHING_ENABLED,
+            output_smoothing_alpha=TRACK_OUTPUT_SMOOTHING_ALPHA,
+            output_smoothing_max_step_m=TRACK_OUTPUT_SMOOTHING_MAX_STEP_M,
+            output_smoothing_reset_m=TRACK_OUTPUT_SMOOTHING_RESET_M,
+            output_smoothing_min_hits=TRACK_OUTPUT_SMOOTHING_MIN_HITS,
+            recent_lost_track_memory_frames=TRACK_RECENT_LOST_MEMORY_FRAMES,
+            reactivation_gate_m=TRACK_REACTIVATION_GATE_M,
+            reactivation_direction_weight=TRACK_REACTIVATION_DIRECTION_WEIGHT,
+            reactivation_doppler_gate_bins=TRACK_REACTIVATION_DOPPLER_GATE_BINS,
+            display_id_stitching_enabled=TRACK_DISPLAY_ID_STITCHING_ENABLED,
+            display_id_stitching_gate_m=TRACK_DISPLAY_ID_STITCHING_GATE_M,
+            display_id_stitching_memory_frames=TRACK_DISPLAY_ID_STITCHING_MEMORY_FRAMES,
+            display_id_stitching_direction_weight=TRACK_DISPLAY_ID_STITCHING_DIRECTION_WEIGHT,
+            display_id_stitching_doppler_gate_bins=TRACK_DISPLAY_ID_STITCHING_DOPPLER_GATE_BINS,
         )
 
     def resolve_source_capture_path(self):
@@ -742,8 +961,10 @@ class MotionViewer:
         }
 
     def serialize_track(self, track):
+        display_id = getattr(track, 'display_id', None)
         return {
             'track_id': int(track.track_id),
+            'display_id': int(display_id if display_id is not None else track.track_id),
             'range_bin': int(self.range_bin_for_track(track)),
             'angle_bin': int(self.angle_bin_for_track(track)),
             'doppler_bin': int(track.doppler_bin),
@@ -1121,6 +1342,11 @@ class MotionViewer:
             int(track.hits),
         )
 
+    @staticmethod
+    def display_track_identity(track):
+        display_id = getattr(track, 'display_id', None)
+        return int(display_id if display_id is not None else track.track_id)
+
     def select_display_tracks(self, confirmed_tracks):
         current_frame = int(self.frame_index)
         selected_tracks = []
@@ -1128,20 +1354,21 @@ class MotionViewer:
         held_track_count = 0
 
         for track in confirmed_tracks:
+            track_id = self.display_track_identity(track)
             if (
                 track.misses <= TRACK_REPORT_MISS_TOLERANCE
                 and track.confidence >= DISPLAY_MIN_CONFIDENCE
             ):
                 selected_tracks.append(track)
-                selected_ids.add(int(track.track_id))
-                self.display_hysteresis_state[int(track.track_id)] = {
+                selected_ids.add(track_id)
+                self.display_hysteresis_state[track_id] = {
                     'track': replace(track),
                     'last_seen_frame': current_frame,
                     'is_primary': bool(track.is_primary),
                 }
 
         for track in confirmed_tracks:
-            track_id = int(track.track_id)
+            track_id = self.display_track_identity(track)
             if track_id in selected_ids:
                 continue
             state = self.display_hysteresis_state.get(track_id)
@@ -1167,7 +1394,7 @@ class MotionViewer:
                     'is_primary': bool(track.is_primary),
                 }
 
-        current_track_ids = {int(track.track_id) for track in confirmed_tracks}
+        current_track_ids = {self.display_track_identity(track) for track in confirmed_tracks}
         for track_id, state in list(self.display_hysteresis_state.items()):
             if track_id in selected_ids or track_id in current_track_ids:
                 continue
@@ -1628,7 +1855,7 @@ class MotionViewer:
                 self.configure_dca1000()
             self.start_workers()
             app = self.build_window()
-            if self.input_mode == 'replay' and self.auto_start:
+            if self.auto_start:
                 QtCore.QTimer.singleShot(0, self.open_radar)
             app.instance().exec_()
         except Exception as exc:
@@ -1667,7 +1894,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--auto-start",
         action="store_true",
-        help="Automatically start replay processing after the UI opens.",
+        help="Automatically start live capture or replay processing after the UI opens.",
     )
     return parser.parse_args(argv)
 

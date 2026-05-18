@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 from datetime import datetime
+import hashlib
+import importlib
 import inspect
 import json
 import math
@@ -11,6 +13,12 @@ from pathlib import Path
 import numpy as np
 
 from tools.lab import registry
+from tools.runtime_core import detection as _runtime_detection_module
+from tools.runtime_core import radar_runtime as _runtime_radar_module
+from tools.runtime_core import real_time_process as _runtime_process_module
+from tools.runtime_core import runtime_settings as _runtime_settings_module
+from tools.runtime_core import tracking as _runtime_tracking_module
+from tools.runtime_core.tracking_core import types as _runtime_tracking_types_module
 from tools.runtime_core.detection import DetectionRegion, detect_targets as _RuntimeDetectTargets
 from tools.runtime_core.radar_runtime import parse_runtime_config, radial_bin_limit
 from tools.runtime_core.real_time_process import (
@@ -24,8 +32,53 @@ from tools.runtime_core.runtime_settings import load_runtime_settings
 from tools.runtime_core.tracking import MultiTargetTracker as _RuntimeMultiTargetTracker
 
 
-STAGE_CACHE_SCHEMA_VERSION = 7
+STAGE_CACHE_SCHEMA_VERSION = 12
 STAGE_FEATURE_SCHEMA_VERSION = 1
+STAGE_CACHE_SIGNATURE_FILES = (
+    "config/live_motion_tuning_isk.json",
+    "tools/runtime_core/detection.py",
+    "tools/runtime_core/radar_runtime.py",
+    "tools/runtime_core/real_time_process.py",
+    "tools/runtime_core/runtime_settings.py",
+    "tools/lab/stage_cache.py",
+    "tools/lab/app.py",
+)
+
+
+def _refresh_runtime_module_bindings() -> None:
+    """Refresh runtime modules so Streamlit reruns do not keep stale function refs."""
+    global DetectionRegion
+    global MultiTargetTracker
+    global _RuntimeDetectTargets
+    global _RuntimeMultiTargetTracker
+    global _runtime_process_frame_packet
+    global _serialize_detection
+    global _serialize_track
+    global iter_raw_capture_frame_packets
+    global load_raw_capture
+    global load_runtime_settings
+    global parse_runtime_config
+    global radial_bin_limit
+
+    importlib.invalidate_caches()
+    importlib.reload(_runtime_settings_module)
+    importlib.reload(_runtime_radar_module)
+    importlib.reload(_runtime_tracking_types_module)
+    importlib.reload(_runtime_tracking_module)
+    importlib.reload(_runtime_detection_module)
+    importlib.reload(_runtime_process_module)
+
+    DetectionRegion = _runtime_detection_module.DetectionRegion
+    _RuntimeDetectTargets = _runtime_detection_module.detect_targets
+    _RuntimeMultiTargetTracker = _runtime_tracking_module.MultiTargetTracker
+    _runtime_process_frame_packet = _runtime_process_module.process_frame_packet
+    _serialize_detection = _runtime_process_module._serialize_detection
+    _serialize_track = _runtime_process_module._serialize_track
+    iter_raw_capture_frame_packets = _runtime_process_module.iter_raw_capture_frame_packets
+    load_raw_capture = _runtime_process_module.load_raw_capture
+    load_runtime_settings = _runtime_settings_module.load_runtime_settings
+    parse_runtime_config = _runtime_radar_module.parse_runtime_config
+    radial_bin_limit = _runtime_radar_module.radial_bin_limit
 
 
 def _filter_tracker_kwargs_for_loaded_signature(kwargs: dict) -> dict:
@@ -127,6 +180,35 @@ def _nested_get(payload: dict | None, *keys: str, default=None):
         if current is None:
             return default
     return current
+
+
+def _stage_cache_runtime_signature(project_root: Path) -> dict:
+    digest = hashlib.sha256()
+    files: list[dict] = []
+    for rel_path in STAGE_CACHE_SIGNATURE_FILES:
+        path = (project_root / rel_path).resolve()
+        file_record = {"path": rel_path, "present": bool(path.exists())}
+        digest.update(rel_path.encode("utf-8"))
+        if path.exists():
+            stat = path.stat()
+            data = path.read_bytes()
+            content_digest = hashlib.sha256(data).hexdigest()
+            file_record.update(
+                {
+                    "size": int(stat.st_size),
+                    "mtime_ns": int(stat.st_mtime_ns),
+                    "sha256": content_digest,
+                }
+            )
+            digest.update(content_digest.encode("utf-8"))
+        else:
+            digest.update(b"<missing>")
+        files.append(file_record)
+    return {
+        "algorithm": "sha256/source-files-v1",
+        "digest": digest.hexdigest(),
+        "files": files,
+    }
 
 
 def _as_path(project_root: Path, value: str | Path | None) -> Path | None:
@@ -394,9 +476,50 @@ def _overlay_current_tuning(runtime_summary: dict, current_settings: dict) -> di
         "angle_projection",
         "angle_phase_sign",
         "angle_source",
+        "coordinate_correction",
     ):
         if key in processing:
             summary[key] = processing[key]
+    angle_bias_correction = processing.get("angle_bias_correction") or {}
+    if "enabled" in angle_bias_correction:
+        summary["angle_bias_correction_enabled"] = angle_bias_correction["enabled"]
+    if "mode" in angle_bias_correction:
+        summary["angle_bias_correction_mode"] = angle_bias_correction["mode"]
+    if "left_deg" in angle_bias_correction:
+        summary["angle_bias_left_deg"] = angle_bias_correction["left_deg"]
+    if "center_deg" in angle_bias_correction:
+        summary["angle_bias_center_deg"] = angle_bias_correction["center_deg"]
+    if "right_deg" in angle_bias_correction:
+        summary["angle_bias_right_deg"] = angle_bias_correction["right_deg"]
+    if "center_band_deg" in angle_bias_correction:
+        summary["angle_bias_center_band_deg"] = angle_bias_correction["center_band_deg"]
+    line_deskew_correction = processing.get("line_deskew_correction") or {}
+    line_deskew_key_map = {
+        "enabled": "line_deskew_correction_enabled",
+        "diagnostic_only": "line_deskew_correction_diagnostic_only",
+        "gain": "line_deskew_gain",
+        "max_shift_m": "line_deskew_max_shift_m",
+        "min_history_frames": "line_deskew_min_history_frames",
+        "max_history_frames": "line_deskew_max_history_frames",
+        "min_y_span_m": "line_deskew_min_y_span_m",
+    }
+    for source_key, summary_key in line_deskew_key_map.items():
+        if source_key in line_deskew_correction:
+            summary[summary_key] = line_deskew_correction[source_key]
+    range_angle_correction = processing.get("range_angle_correction") or {}
+    range_angle_key_map = {
+        "enabled": "range_angle_correction_enabled",
+        "diagnostic_only": "range_angle_correction_diagnostic_only",
+        "reference_half_width_m": "range_angle_reference_half_width_m",
+        "reference_forward_m": "range_angle_reference_forward_m",
+        "range_bins_m": "range_angle_range_bins_m",
+        "angle_bins_norm": "range_angle_angle_bins_norm",
+        "delta_table_deg": "range_angle_delta_table_deg",
+        "max_delta_deg": "range_angle_correction_max_delta_deg",
+    }
+    for source_key, summary_key in range_angle_key_map.items():
+        if source_key in range_angle_correction:
+            summary[summary_key] = range_angle_correction[source_key]
     calibration = processing.get("channel_calibration") or {}
     if "enabled" in calibration:
         summary["channel_calibration_enabled"] = calibration["enabled"]
@@ -534,6 +657,215 @@ def _build_runtime_components(
             default=current_processing.get("angle_source", "collapsed_rai"),
         ),
     )
+    angle_bias_correction = _nested_get(
+        runtime_summary,
+        "tuning_snapshot",
+        "processing",
+        "angle_bias_correction",
+        default=current_processing.get("angle_bias_correction", {}),
+    ) or {}
+    angle_bias_correction_enabled = bool(
+        runtime_summary.get(
+            "angle_bias_correction_enabled",
+            angle_bias_correction.get("enabled", False),
+        )
+    )
+    angle_bias_correction_mode = str(
+        runtime_summary.get(
+            "angle_bias_correction_mode",
+            angle_bias_correction.get("mode", "toward_center"),
+        )
+        or "toward_center"
+    ).strip().lower()
+    angle_bias_left_deg = float(
+        runtime_summary.get("angle_bias_left_deg", angle_bias_correction.get("left_deg", 0.0))
+    )
+    angle_bias_center_deg = float(
+        runtime_summary.get("angle_bias_center_deg", angle_bias_correction.get("center_deg", 0.0))
+    )
+    angle_bias_right_deg = float(
+        runtime_summary.get("angle_bias_right_deg", angle_bias_correction.get("right_deg", 0.0))
+    )
+    angle_bias_center_band_deg = max(
+        0.0,
+        float(
+            runtime_summary.get(
+                "angle_bias_center_band_deg",
+                angle_bias_correction.get("center_band_deg", 7.0),
+            )
+        ),
+    )
+    angle_bias_correction_source = (
+        "current_tuning"
+        if "angle_bias_correction" in current_processing
+        else "logged_summary"
+    )
+    line_deskew_correction = _nested_get(
+        runtime_summary,
+        "tuning_snapshot",
+        "processing",
+        "line_deskew_correction",
+        default=current_processing.get("line_deskew_correction", {}),
+    ) or {}
+    line_deskew_correction_enabled = bool(
+        runtime_summary.get(
+            "line_deskew_correction_enabled",
+            line_deskew_correction.get("enabled", False),
+        )
+    )
+    line_deskew_correction_diagnostic_only = bool(
+        runtime_summary.get(
+            "line_deskew_correction_diagnostic_only",
+            line_deskew_correction.get("diagnostic_only", True),
+        )
+    )
+    line_deskew_gain = float(
+        runtime_summary.get("line_deskew_gain", line_deskew_correction.get("gain", 0.3))
+    )
+    line_deskew_max_shift_m = float(
+        runtime_summary.get(
+            "line_deskew_max_shift_m",
+            line_deskew_correction.get("max_shift_m", 0.08),
+        )
+    )
+    line_deskew_min_history_frames = int(
+        runtime_summary.get(
+            "line_deskew_min_history_frames",
+            line_deskew_correction.get("min_history_frames", 20),
+        )
+    )
+    line_deskew_max_history_frames = int(
+        runtime_summary.get(
+            "line_deskew_max_history_frames",
+            line_deskew_correction.get("max_history_frames", 90),
+        )
+    )
+    line_deskew_min_y_span_m = float(
+        runtime_summary.get(
+            "line_deskew_min_y_span_m",
+            line_deskew_correction.get("min_y_span_m", 0.35),
+        )
+    )
+    line_deskew_correction_source = (
+        "current_tuning"
+        if "line_deskew_correction" in current_processing
+        else "logged_summary"
+    )
+    range_angle_correction = _nested_get(
+        runtime_summary,
+        "tuning_snapshot",
+        "processing",
+        "range_angle_correction",
+        default=current_processing.get("range_angle_correction", {}),
+    ) or {}
+    range_angle_correction_enabled = bool(
+        runtime_summary.get(
+            "range_angle_correction_enabled",
+            range_angle_correction.get("enabled", False),
+        )
+    )
+    range_angle_correction_diagnostic_only = bool(
+        runtime_summary.get(
+            "range_angle_correction_diagnostic_only",
+            range_angle_correction.get("diagnostic_only", True),
+        )
+    )
+    range_angle_reference_half_width_m = float(
+        runtime_summary.get(
+            "range_angle_reference_half_width_m",
+            range_angle_correction.get("reference_half_width_m", 3.5),
+        )
+    )
+    range_angle_reference_forward_m = float(
+        runtime_summary.get(
+            "range_angle_reference_forward_m",
+            range_angle_correction.get("reference_forward_m", 7.0),
+        )
+    )
+    range_angle_range_bins_m = runtime_summary.get(
+        "range_angle_range_bins_m",
+        range_angle_correction.get(
+            "range_bins_m",
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+        ),
+    )
+    range_angle_angle_bins_norm = runtime_summary.get(
+        "range_angle_angle_bins_norm",
+        range_angle_correction.get(
+            "angle_bins_norm",
+            [-1.0, -0.5, 0.0, 0.5, 1.0],
+        ),
+    )
+    range_angle_delta_table_deg = runtime_summary.get(
+        "range_angle_delta_table_deg",
+        range_angle_correction.get("delta_table_deg", []),
+    )
+    range_angle_correction_max_delta_deg = float(
+        runtime_summary.get(
+            "range_angle_correction_max_delta_deg",
+            range_angle_correction.get("max_delta_deg", 6.0),
+        )
+    )
+    range_angle_correction_source = (
+        "current_tuning"
+        if "range_angle_correction" in current_processing
+        else "logged_summary"
+    )
+    coordinate_correction = runtime_summary.get(
+        "coordinate_correction",
+        _nested_get(
+            runtime_summary,
+            "tuning_snapshot",
+            "processing",
+            "coordinate_correction",
+            default=current_processing.get("coordinate_correction", {}),
+        ),
+    ) or {}
+    xy_yaw_correction_deg = float(
+        runtime_summary.get(
+            "xy_yaw_correction_deg",
+            coordinate_correction.get(
+                "yaw_deg",
+                _nested_get(
+                    runtime_summary,
+                    "tuning_snapshot",
+                    "processing",
+                    "xy_yaw_correction_deg",
+                    default=0.0,
+                ),
+            ),
+        )
+    )
+    xy_lateral_offset_m = float(
+        runtime_summary.get(
+            "xy_lateral_offset_m",
+            coordinate_correction.get(
+                "lateral_offset_m",
+                _nested_get(
+                    runtime_summary,
+                    "tuning_snapshot",
+                    "processing",
+                    "xy_lateral_offset_m",
+                    default=0.0,
+                ),
+            ),
+        )
+    )
+    xy_forward_offset_m = float(
+        runtime_summary.get(
+            "xy_forward_offset_m",
+            coordinate_correction.get(
+                "forward_offset_m",
+                _nested_get(
+                    runtime_summary,
+                    "tuning_snapshot",
+                    "processing",
+                    "xy_forward_offset_m",
+                    default=0.0,
+                ),
+            ),
+        )
+    )
     channel_calibration = _nested_get(
         runtime_summary,
         "tuning_snapshot",
@@ -625,6 +957,9 @@ def _build_runtime_components(
         remove_static=remove_static,
         doppler_guard_bins=doppler_guard_bins,
         lateral_axis_sign=float(lateral_axis_sign),
+        xy_yaw_correction_deg=xy_yaw_correction_deg,
+        xy_lateral_offset_m=xy_lateral_offset_m,
+        xy_forward_offset_m=xy_forward_offset_m,
     )
     runtime_config_updates = {}
     if hasattr(runtime_config, "angle_projection"):
@@ -639,6 +974,90 @@ def _build_runtime_components(
         runtime_config_updates["angle_phase_sign"] = float(angle_phase_sign)
     if hasattr(runtime_config, "angle_source"):
         runtime_config_updates["angle_source"] = str(angle_source or "collapsed_rai").strip().lower()
+    if hasattr(runtime_config, "angle_bias_correction_enabled"):
+        runtime_config_updates["angle_bias_correction_enabled"] = bool(
+            angle_bias_correction_enabled
+        )
+    if hasattr(runtime_config, "angle_bias_correction_mode"):
+        runtime_config_updates["angle_bias_correction_mode"] = str(
+            angle_bias_correction_mode or "toward_center"
+        ).strip().lower()
+    if hasattr(runtime_config, "angle_bias_left_deg"):
+        runtime_config_updates["angle_bias_left_deg"] = float(angle_bias_left_deg)
+    if hasattr(runtime_config, "angle_bias_center_deg"):
+        runtime_config_updates["angle_bias_center_deg"] = float(angle_bias_center_deg)
+    if hasattr(runtime_config, "angle_bias_right_deg"):
+        runtime_config_updates["angle_bias_right_deg"] = float(angle_bias_right_deg)
+    if hasattr(runtime_config, "angle_bias_center_band_deg"):
+        runtime_config_updates["angle_bias_center_band_deg"] = float(
+            angle_bias_center_band_deg
+        )
+    if hasattr(runtime_config, "line_deskew_correction_enabled"):
+        runtime_config_updates["line_deskew_correction_enabled"] = bool(
+            line_deskew_correction_enabled
+        )
+    if hasattr(runtime_config, "line_deskew_correction_diagnostic_only"):
+        runtime_config_updates["line_deskew_correction_diagnostic_only"] = bool(
+            line_deskew_correction_diagnostic_only
+        )
+    if hasattr(runtime_config, "line_deskew_gain"):
+        runtime_config_updates["line_deskew_gain"] = float(np.clip(line_deskew_gain, 0.0, 1.0))
+    if hasattr(runtime_config, "line_deskew_max_shift_m"):
+        runtime_config_updates["line_deskew_max_shift_m"] = max(0.0, float(line_deskew_max_shift_m))
+    if hasattr(runtime_config, "line_deskew_min_history_frames"):
+        runtime_config_updates["line_deskew_min_history_frames"] = max(
+            2,
+            int(line_deskew_min_history_frames),
+        )
+    if hasattr(runtime_config, "line_deskew_max_history_frames"):
+        runtime_config_updates["line_deskew_max_history_frames"] = max(
+            max(2, int(line_deskew_min_history_frames)),
+            int(line_deskew_max_history_frames),
+        )
+    if hasattr(runtime_config, "line_deskew_min_y_span_m"):
+        runtime_config_updates["line_deskew_min_y_span_m"] = max(0.0, float(line_deskew_min_y_span_m))
+    if hasattr(runtime_config, "range_angle_correction_enabled"):
+        runtime_config_updates["range_angle_correction_enabled"] = bool(
+            range_angle_correction_enabled
+        )
+    if hasattr(runtime_config, "range_angle_correction_diagnostic_only"):
+        runtime_config_updates["range_angle_correction_diagnostic_only"] = bool(
+            range_angle_correction_diagnostic_only
+        )
+    if hasattr(runtime_config, "range_angle_correction_reference_half_width_m"):
+        runtime_config_updates["range_angle_correction_reference_half_width_m"] = max(
+            1e-6,
+            float(range_angle_reference_half_width_m),
+        )
+    if hasattr(runtime_config, "range_angle_correction_reference_forward_m"):
+        runtime_config_updates["range_angle_correction_reference_forward_m"] = max(
+            1e-6,
+            float(range_angle_reference_forward_m),
+        )
+    if hasattr(runtime_config, "range_angle_correction_range_bins_m"):
+        runtime_config_updates["range_angle_correction_range_bins_m"] = tuple(
+            float(value) for value in (range_angle_range_bins_m or [])
+        )
+    if hasattr(runtime_config, "range_angle_correction_angle_bins_norm"):
+        runtime_config_updates["range_angle_correction_angle_bins_norm"] = tuple(
+            float(value) for value in (range_angle_angle_bins_norm or [])
+        )
+    if hasattr(runtime_config, "range_angle_correction_delta_table_deg"):
+        runtime_config_updates["range_angle_correction_delta_table_deg"] = tuple(
+            tuple(float(item) for item in row)
+            for row in (range_angle_delta_table_deg or [])
+        )
+    if hasattr(runtime_config, "range_angle_correction_max_delta_deg"):
+        runtime_config_updates["range_angle_correction_max_delta_deg"] = max(
+            0.0,
+            float(range_angle_correction_max_delta_deg),
+        )
+    if hasattr(runtime_config, "xy_yaw_correction_deg"):
+        runtime_config_updates["xy_yaw_correction_deg"] = float(xy_yaw_correction_deg)
+    if hasattr(runtime_config, "xy_lateral_offset_m"):
+        runtime_config_updates["xy_lateral_offset_m"] = float(xy_lateral_offset_m)
+    if hasattr(runtime_config, "xy_forward_offset_m"):
+        runtime_config_updates["xy_forward_offset_m"] = float(xy_forward_offset_m)
     if hasattr(runtime_config, "channel_calibration_enabled"):
         runtime_config_updates["channel_calibration_enabled"] = bool(channel_calibration_enabled)
     if hasattr(runtime_config, "channel_calibration_coefficients"):
@@ -951,6 +1370,9 @@ def _build_runtime_components(
         ),
         forward_smoothing_alpha=float(runtime_summary.get("track_forward_smoothing_alpha", 1.0)),
         forward_velocity_damping=float(runtime_summary.get("track_forward_velocity_damping", 1.0)),
+        motion_correction_strength=float(
+            runtime_summary.get("track_motion_correction_strength", 1.0)
+        ),
         measurement_follow_enabled=bool(
             runtime_summary.get("track_measurement_follow_enabled", False)
         ),
@@ -1005,6 +1427,48 @@ def _build_runtime_components(
         max_object_count=int(_tracking_value(runtime_summary, "max_object_count", 3) or 0),
         expected_object_count=_tracking_value(runtime_summary, "expected_object_count", None),
         crossing_hold_frames=int(_tracking_value(runtime_summary, "crossing_hold_frames", 8) or 0),
+        output_smoothing_enabled=bool(
+            _tracking_value(runtime_summary, "output_smoothing_enabled", False)
+        ),
+        output_smoothing_alpha=float(
+            _tracking_value(runtime_summary, "output_smoothing_alpha", 1.0)
+        ),
+        output_smoothing_max_step_m=float(
+            _tracking_value(runtime_summary, "output_smoothing_max_step_m", 0.0)
+        ),
+        output_smoothing_reset_m=float(
+            _tracking_value(runtime_summary, "output_smoothing_reset_m", 1.2)
+        ),
+        output_smoothing_min_hits=int(
+            _tracking_value(runtime_summary, "output_smoothing_min_hits", 3) or 3
+        ),
+        recent_lost_track_memory_frames=int(
+            _tracking_value(runtime_summary, "recent_lost_track_memory_frames", 0) or 0
+        ),
+        reactivation_gate_m=float(
+            _tracking_value(runtime_summary, "reactivation_gate_m", 0.0) or 0.0
+        ),
+        reactivation_direction_weight=float(
+            _tracking_value(runtime_summary, "reactivation_direction_weight", 0.0) or 0.0
+        ),
+        reactivation_doppler_gate_bins=int(
+            _tracking_value(runtime_summary, "reactivation_doppler_gate_bins", 0) or 0
+        ),
+        display_id_stitching_enabled=bool(
+            _tracking_value(runtime_summary, "display_id_stitching_enabled", False)
+        ),
+        display_id_stitching_gate_m=float(
+            _tracking_value(runtime_summary, "display_id_stitching_gate_m", 0.75) or 0.0
+        ),
+        display_id_stitching_memory_frames=int(
+            _tracking_value(runtime_summary, "display_id_stitching_memory_frames", 30) or 0
+        ),
+        display_id_stitching_direction_weight=float(
+            _tracking_value(runtime_summary, "display_id_stitching_direction_weight", 0.25) or 0.0
+        ),
+        display_id_stitching_doppler_gate_bins=int(
+            _tracking_value(runtime_summary, "display_id_stitching_doppler_gate_bins", 0) or 0
+        ),
     )
 
     min_range_bin = (
@@ -1032,6 +1496,9 @@ def _build_runtime_components(
         "roi_min_forward_m": roi_min_forward_m,
         "lateral_axis_sign_source": lateral_axis_sign_source,
         "angle_phase_sign_source": angle_phase_sign_source,
+        "angle_bias_correction_source": angle_bias_correction_source,
+        "line_deskew_correction_source": line_deskew_correction_source,
+        "range_angle_correction_source": range_angle_correction_source,
         "tdm_compensation_source": tdm_compensation_source,
         "tdm_phase_sign_source": tdm_phase_sign_source,
         "ablation_mode": ablation_mode,
@@ -1238,6 +1705,225 @@ def _round_or_none(value, digits=4):
     if not np.isfinite(value):
         return None
     return round(value, digits)
+
+
+def _point_xy(point: dict | None) -> tuple[float, float] | None:
+    if not isinstance(point, dict):
+        return None
+    try:
+        x_m = float(point.get("x_m"))
+        y_m = float(point.get("y_m"))
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(x_m) or not np.isfinite(y_m):
+        return None
+    return x_m, y_m
+
+
+def _point_rank(point: dict) -> float:
+    for key in ("score", "confidence", "rdi_peak", "rai_peak"):
+        try:
+            value = float(point.get(key))
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            return value
+    return 0.0
+
+
+def _line_deskew_settings(runtime_config) -> dict:
+    min_history = max(2, int(getattr(runtime_config, "line_deskew_min_history_frames", 20)))
+    max_history = max(
+        min_history,
+        int(getattr(runtime_config, "line_deskew_max_history_frames", 90)),
+    )
+    return {
+        "enabled": bool(getattr(runtime_config, "line_deskew_correction_enabled", False)),
+        "diagnostic_only": bool(
+            getattr(runtime_config, "line_deskew_correction_diagnostic_only", True)
+        ),
+        "gain": float(np.clip(float(getattr(runtime_config, "line_deskew_gain", 0.3)), 0.0, 1.0)),
+        "max_shift_m": max(0.0, float(getattr(runtime_config, "line_deskew_max_shift_m", 0.08))),
+        "min_history_frames": min_history,
+        "max_history_frames": max_history,
+        "min_y_span_m": max(0.0, float(getattr(runtime_config, "line_deskew_min_y_span_m", 0.35))),
+    }
+
+
+def _line_deskew_source_points(trace: dict) -> list[dict]:
+    detection = trace.get("detection") or {}
+    for keys in (
+        ("range_angle_correction", "after_top"),
+        ("angle_bias_correction", "after_top"),
+        ("output_score_filter", "output_top"),
+        ("angle_bias_correction", "before_top"),
+        ("final_output", "top_detections"),
+        ("dbscan", "output_top"),
+    ):
+        points = _nested_get(detection, *keys, default=[]) or []
+        points = [point for point in points if isinstance(point, dict) and _point_xy(point) is not None]
+        if points:
+            return points
+    return []
+
+
+class _LineDeskewState:
+    def __init__(self, runtime_config):
+        self.settings = _line_deskew_settings(runtime_config)
+        self.history: list[dict] = []
+
+    def _append_history(self, points: list[dict]) -> None:
+        if not self.settings["enabled"]:
+            return
+        valid_points = [point for point in points if _point_xy(point) is not None]
+        if not valid_points:
+            return
+        representative = max(valid_points, key=_point_rank)
+        x_m, y_m = _point_xy(representative)
+        self.history.append(
+            {
+                "x_m": float(x_m),
+                "y_m": float(y_m),
+                "score": _round_or_none(_point_rank(representative)),
+            }
+        )
+        max_history = int(self.settings["max_history_frames"])
+        if len(self.history) > max_history:
+            del self.history[: len(self.history) - max_history]
+
+    def _fit_line(self) -> tuple[dict | None, str | None]:
+        min_history = int(self.settings["min_history_frames"])
+        if len(self.history) < min_history:
+            return None, "insufficient_history"
+        x_values = np.asarray([point["x_m"] for point in self.history], dtype=np.float64)
+        y_values = np.asarray([point["y_m"] for point in self.history], dtype=np.float64)
+        y_span = float(np.max(y_values) - np.min(y_values)) if y_values.size else 0.0
+        if y_span < float(self.settings["min_y_span_m"]):
+            return None, "insufficient_y_span"
+        slope, intercept = np.polyfit(y_values, x_values, 1)
+        residuals = x_values - ((float(slope) * y_values) + float(intercept))
+        return {
+            "model": "x=a*y+b",
+            "slope": float(slope),
+            "intercept": float(intercept),
+            "history_count": int(len(self.history)),
+            "y_span_m": y_span,
+            "x_span_m": float(np.max(x_values) - np.min(x_values)) if x_values.size else 0.0,
+            "residual_rms_m": float(np.sqrt(np.mean(np.square(residuals)))) if residuals.size else 0.0,
+        }, None
+
+    def _correct_point(self, point: dict, line: dict) -> tuple[dict, dict]:
+        x_m, y_m = _point_xy(point)
+        slope = float(line["slope"])
+        intercept = float(line["intercept"])
+        distance_numerator = float(x_m - (slope * y_m) - intercept)
+        denom = 1.0 + (slope * slope)
+        projection_x = float(x_m - (distance_numerator / denom))
+        projection_y = float(y_m + ((slope * distance_numerator) / denom))
+        dx = (projection_x - x_m) * float(self.settings["gain"])
+        dy = (projection_y - y_m) * float(self.settings["gain"])
+        shift_m = float(math.hypot(dx, dy))
+        capped = False
+        max_shift_m = float(self.settings["max_shift_m"])
+        if max_shift_m > 0.0 and shift_m > max_shift_m:
+            scale = max_shift_m / max(shift_m, 1e-9)
+            dx *= scale
+            dy *= scale
+            shift_m = max_shift_m
+            capped = True
+        corrected_x = float(x_m + dx)
+        corrected_y = float(y_m + dy)
+        corrected_range = float(math.hypot(corrected_x, corrected_y))
+        corrected_angle = float(math.degrees(math.atan2(corrected_x, max(corrected_y, 1e-6))))
+        corrected = dict(point)
+        corrected.update(
+            {
+                "x_m": corrected_x,
+                "y_m": corrected_y,
+                "range_m": corrected_range,
+                "angle_deg": corrected_angle,
+                "line_deskew_shift_m": shift_m,
+            }
+        )
+        pair = {
+            "before": point,
+            "after": corrected,
+            "projection": {
+                "x_m": round(projection_x, 4),
+                "y_m": round(projection_y, 4),
+            },
+            "shift_m": round(shift_m, 4),
+            "capped": bool(capped),
+        }
+        return corrected, pair
+
+    def trace_for(self, source_points: list[dict]) -> dict:
+        before = [dict(point) for point in source_points if _point_xy(point) is not None]
+        trace = {
+            "enabled": bool(self.settings["enabled"]),
+            "diagnostic_only": bool(self.settings["diagnostic_only"]),
+            "gain": round(float(self.settings["gain"]), 4),
+            "max_shift_m": round(float(self.settings["max_shift_m"]), 4),
+            "min_history_frames": int(self.settings["min_history_frames"]),
+            "max_history_frames": int(self.settings["max_history_frames"]),
+            "min_y_span_m": round(float(self.settings["min_y_span_m"]), 4),
+            "history_count_before": int(len(self.history)),
+            "before_count": int(len(before)),
+            "after_count": int(len(before)),
+            "before_top": before[:12],
+            "after_top": before[:12],
+            "active": False,
+            "reason": None,
+            "line": None,
+            "pairs": [],
+            "applied_to_tracker": False,
+        }
+        if not self.settings["enabled"]:
+            trace["reason"] = "disabled"
+            return trace
+        if not before:
+            trace["reason"] = "no_source_points"
+            self._append_history(before)
+            trace["history_count_after"] = int(len(self.history))
+            return trace
+
+        line, reason = self._fit_line()
+        if line is None:
+            trace["reason"] = reason or "line_unavailable"
+            self._append_history(before)
+            trace["history_count_after"] = int(len(self.history))
+            return trace
+
+        corrected_points = []
+        for point in before:
+            corrected, pair = self._correct_point(point, line)
+            corrected_points.append(corrected)
+            if len(trace["pairs"]) < 12:
+                trace["pairs"].append(pair)
+
+        shifts = [float(pair.get("shift_m") or 0.0) for pair in trace["pairs"]]
+        trace.update(
+            {
+                "after_count": int(len(corrected_points)),
+                "after_top": corrected_points[:12],
+                "active": True,
+                "reason": "diagnostic_only" if self.settings["diagnostic_only"] else "not_applied_to_tracker",
+                "line": {
+                    "model": line["model"],
+                    "slope": round(float(line["slope"]), 6),
+                    "intercept": round(float(line["intercept"]), 6),
+                    "history_count": int(line["history_count"]),
+                    "y_span_m": round(float(line["y_span_m"]), 4),
+                    "x_span_m": round(float(line["x_span_m"]), 4),
+                    "residual_rms_m": round(float(line["residual_rms_m"]), 4),
+                },
+                "shift_mean_m": _round_or_none(np.mean(shifts) if shifts else None),
+                "shift_max_m": _round_or_none(max(shifts) if shifts else None),
+            }
+        )
+        self._append_history(before)
+        trace["history_count_after"] = int(len(self.history))
+        return trace
 
 
 def _array_quality_stats(values) -> dict:
@@ -1591,6 +2277,21 @@ def _build_trace_summary(traces: list[dict]) -> dict:
                 "blob_centered": int(_nested_get(detection, "blob_center_refinement", "output_count", default=0) or 0),
                 "final_merge_after": int(_nested_get(detection, "candidate_merge_final", "after_count", default=0) or 0),
                 "dbscan_output": int(_nested_get(detection, "dbscan", "output_count", default=0) or 0),
+                "angle_bias_corrected": int(
+                    _nested_get(detection, "angle_bias_correction", "after_count", default=0) or 0
+                ),
+                "range_angle_corrected": int(
+                    _nested_get(detection, "range_angle_correction", "after_count", default=0) or 0
+                ),
+                "range_angle_active": int(
+                    bool(_nested_get(detection, "range_angle_correction", "active", default=False))
+                ),
+                "line_deskew_diagnostic": int(
+                    _nested_get(detection, "line_deskew_correction", "after_count", default=0) or 0
+                ),
+                "line_deskew_active": int(
+                    bool(_nested_get(detection, "line_deskew_correction", "active", default=False))
+                ),
                 "tracker_input": int(_nested_get(trace, "tracker_input_filter", "tracker_input_count", default=0) or 0),
                 "association_matched": int(_nested_get(tracker, "association", "matched_count", default=0) or 0),
                 "births": len(_nested_get(tracker, "track_lifecycle", "births", default=[]) or []),
@@ -1614,6 +2315,11 @@ def _build_trace_summary(traces: list[dict]) -> dict:
         "blob_centered",
         "final_merge_after",
         "dbscan_output",
+        "angle_bias_corrected",
+        "range_angle_corrected",
+        "range_angle_active",
+        "line_deskew_diagnostic",
+        "line_deskew_active",
         "tracker_input",
         "association_matched",
         "births",
@@ -1633,6 +2339,105 @@ def _build_trace_summary(traces: list[dict]) -> dict:
     }
 
 
+def _angle_bias_trace_consistency(traces: list[dict], runtime_config) -> dict:
+    enabled = bool(getattr(runtime_config, "angle_bias_correction_enabled", False))
+    expected_mode = str(
+        getattr(runtime_config, "angle_bias_correction_mode", "toward_center")
+        or "toward_center"
+    ).strip().lower()
+    modes: dict[str, int] = {}
+    eligible_frames = 0
+    missing_frames = 0
+    pair_count = 0
+    angle_sign_flips = 0
+    x_sign_flips = 0
+    max_abs_after_angle_deg = 0.0
+    max_abs_before_angle_deg = 0.0
+
+    for trace in traces:
+        detection = trace.get("detection") or {}
+        score_output_count = int(
+            _nested_get(detection, "output_score_filter", "output_count", default=0) or 0
+        )
+        final_output_count = int(_nested_get(detection, "final_output", "output_count", default=0) or 0)
+        correction = _nested_get(detection, "angle_bias_correction", default=None)
+        if enabled and (score_output_count > 0 or final_output_count > 0):
+            eligible_frames += 1
+            if not isinstance(correction, dict):
+                missing_frames += 1
+                continue
+
+        if not isinstance(correction, dict):
+            continue
+
+        mode = str(correction.get("mode") or "none").strip().lower()
+        modes[mode] = modes.get(mode, 0) + 1
+        for pair in correction.get("pairs") or []:
+            before = pair.get("before") or {}
+            after = pair.get("after") or {}
+            try:
+                before_angle = float(before.get("angle_deg"))
+                after_angle = float(after.get("angle_deg"))
+                before_x = float(before.get("x_m"))
+                after_x = float(after.get("x_m"))
+            except (TypeError, ValueError):
+                continue
+            pair_count += 1
+            max_abs_before_angle_deg = max(max_abs_before_angle_deg, abs(before_angle))
+            max_abs_after_angle_deg = max(max_abs_after_angle_deg, abs(after_angle))
+            if abs(before_angle) > 1e-6 and abs(after_angle) > 1e-6 and before_angle * after_angle < 0:
+                angle_sign_flips += 1
+            if abs(before_x) > 1e-6 and abs(after_x) > 1e-6 and before_x * after_x < 0:
+                x_sign_flips += 1
+
+    return {
+        "angle_bias_expected_enabled": enabled,
+        "angle_bias_expected_mode": expected_mode,
+        "angle_bias_trace_modes": [
+            {"label": label, "count": count}
+            for label, count in sorted(modes.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "angle_bias_eligible_frames": int(eligible_frames),
+        "angle_bias_missing_frames": int(missing_frames),
+        "angle_bias_pair_count": int(pair_count),
+        "angle_bias_angle_sign_flip_count": int(angle_sign_flips),
+        "angle_bias_x_sign_flip_count": int(x_sign_flips),
+        "angle_bias_max_abs_before_angle_deg": _round_or_none(max_abs_before_angle_deg),
+        "angle_bias_max_abs_after_angle_deg": _round_or_none(max_abs_after_angle_deg),
+    }
+
+
+def _validate_angle_bias_trace_consistency(consistency: dict) -> None:
+    if not bool(consistency.get("angle_bias_expected_enabled")):
+        return
+    expected_mode = str(consistency.get("angle_bias_expected_mode") or "").strip().lower()
+    modes = {
+        str(item.get("label") or "").strip().lower()
+        for item in consistency.get("angle_bias_trace_modes", [])
+        if isinstance(item, dict)
+    }
+    missing_frames = int(consistency.get("angle_bias_missing_frames") or 0)
+    if missing_frames:
+        raise RuntimeError(
+            "Angle-bias correction trace is missing for frames that produced score-filtered "
+            "detections. Restart the Streamlit process and rebuild the stage cache."
+        )
+    if modes and expected_mode not in modes:
+        raise RuntimeError(
+            "Angle-bias correction trace mode does not match the active runtime config "
+            f"({sorted(modes)} vs {expected_mode}). Restart Streamlit and rebuild the cache."
+        )
+    if expected_mode in {"toward_center", "fan_deskew", "despread"}:
+        angle_flips = int(consistency.get("angle_bias_angle_sign_flip_count") or 0)
+        x_flips = int(consistency.get("angle_bias_x_sign_flip_count") or 0)
+        if angle_flips or x_flips:
+            raise RuntimeError(
+                "Angle-bias correction crossed the center line in toward_center mode "
+                f"(angle flips={angle_flips}, x flips={x_flips}). "
+                "This usually means the cache was generated by a stale runtime module."
+            )
+
+
 def build_stage_cache(
     project_root: Path,
     session_id: str,
@@ -1649,6 +2454,7 @@ def build_stage_cache(
 ) -> dict:
     project_root = Path(project_root).resolve()
     ablation_mode = _normalize_ablation_mode(ablation_mode)
+    _refresh_runtime_module_bindings()
     run_detail = registry.fetch_run_detail(project_root, session_id)
     if run_detail is None:
         registry.refresh_registry(project_root)
@@ -1669,17 +2475,20 @@ def build_stage_cache(
         tdm_compensation_override=tdm_compensation_override,
         tdm_phase_sign_override=tdm_phase_sign_override,
     )
+    runtime_signature = _stage_cache_runtime_signature(project_root)
 
     paths = stage_cache_paths(project_root, session_id, ablation_mode, variant_label)
     requested_limit = int(frame_limit) if frame_limit not in (None, 0) else None
     if not force and paths["manifest_path"].exists() and paths["frames_path"].exists():
         existing_manifest = load_stage_cache_manifest(project_root, session_id, ablation_mode, variant_label) or {}
+        existing_signature = existing_manifest.get("runtime_signature") or {}
         feature_files_ready = (
             paths["features_path"].exists()
             and paths["feature_summary_path"].exists()
             and paths["trace_path"].exists()
             and paths["trace_summary_path"].exists()
             and int(existing_manifest.get("schema_version") or 0) >= STAGE_CACHE_SCHEMA_VERSION
+            and existing_signature.get("digest") == runtime_signature.get("digest")
         )
         if existing_manifest.get("frame_limit_requested") == requested_limit and feature_files_ready:
             return existing_manifest
@@ -1691,6 +2500,7 @@ def build_stage_cache(
     frame_features: list[dict] = []
     frame_traces: list[dict] = []
     previous_lead: dict | None = None
+    line_deskew_state = _LineDeskewState(components["runtime_config"])
     for ordinal, raw_frame in enumerate(iter_raw_capture_frame_packets(capture_dir)):
         if frame_limit is not None and int(frame_limit) > 0 and ordinal >= int(frame_limit):
             break
@@ -1767,6 +2577,10 @@ def build_stage_cache(
         _append_jsonl(paths["features_path"], feature_record)
         frame_features.append(feature_record)
         frame_trace = artifacts.get("frame_trace") or {}
+        detection_trace = frame_trace.setdefault("detection", {})
+        detection_trace["line_deskew_correction"] = line_deskew_state.trace_for(
+            _line_deskew_source_points(frame_trace)
+        )
         _append_jsonl(paths["trace_path"], frame_trace)
         frame_traces.append(frame_trace)
         processed_count += 1
@@ -1775,6 +2589,11 @@ def build_stage_cache(
     _write_json(paths["feature_summary_path"], feature_summary)
     trace_summary = _build_trace_summary(frame_traces)
     _write_json(paths["trace_summary_path"], trace_summary)
+    trace_consistency = _angle_bias_trace_consistency(
+        frame_traces,
+        components["runtime_config"],
+    )
+    _validate_angle_bias_trace_consistency(trace_consistency)
 
     manifest = {
         "schema_version": STAGE_CACHE_SCHEMA_VERSION,
@@ -1807,6 +2626,7 @@ def build_stage_cache(
             "shared_fft",
             "rdi",
             "rai",
+            "coordinate_correction",
             "rai_collapse_diagnostics",
             "detection.rda_dense_points",
             "detection.cfar",
@@ -1816,6 +2636,10 @@ def build_stage_cache(
             "detection.blob_center_refinement",
             "detection.candidate_merge_final",
             "detection.dbscan",
+            "detection.output_score_filter",
+            "detection.angle_bias_correction",
+            "detection.range_angle_correction",
+            "detection.line_deskew_correction",
             "tracker_input_filter",
             "tracker.kalman_prediction",
             "tracker.association",
@@ -1829,6 +2653,8 @@ def build_stage_cache(
         ],
         "feature_summary": feature_summary,
         "trace_summary": trace_summary,
+        "trace_consistency": trace_consistency,
+        "runtime_signature": runtime_signature,
         "runtime": {
             "cfg_path": str(components["cfg_path"]),
             "cfg_path_source": components["cfg_path_source"],
@@ -1850,6 +2676,108 @@ def build_stage_cache(
                     "angle_source",
                     components["detection_params"].get("angle_source", "collapsed_rai"),
                 )
+            ),
+            "xy_yaw_correction_deg": float(
+                getattr(components["runtime_config"], "xy_yaw_correction_deg", 0.0)
+            ),
+            "xy_lateral_offset_m": float(
+                getattr(components["runtime_config"], "xy_lateral_offset_m", 0.0)
+            ),
+            "xy_forward_offset_m": float(
+                getattr(components["runtime_config"], "xy_forward_offset_m", 0.0)
+            ),
+            "angle_bias_correction_enabled": bool(
+                getattr(components["runtime_config"], "angle_bias_correction_enabled", False)
+            ),
+            "angle_bias_correction_mode": str(
+                getattr(components["runtime_config"], "angle_bias_correction_mode", "toward_center")
+            ),
+            "angle_bias_correction_source": components["angle_bias_correction_source"],
+            "angle_bias_left_deg": float(
+                getattr(components["runtime_config"], "angle_bias_left_deg", 0.0)
+            ),
+            "angle_bias_center_deg": float(
+                getattr(components["runtime_config"], "angle_bias_center_deg", 0.0)
+            ),
+            "angle_bias_right_deg": float(
+                getattr(components["runtime_config"], "angle_bias_right_deg", 0.0)
+            ),
+            "angle_bias_center_band_deg": float(
+                getattr(components["runtime_config"], "angle_bias_center_band_deg", 7.0)
+            ),
+            "range_angle_correction_enabled": bool(
+                getattr(components["runtime_config"], "range_angle_correction_enabled", False)
+            ),
+            "range_angle_correction_diagnostic_only": bool(
+                getattr(components["runtime_config"], "range_angle_correction_diagnostic_only", True)
+            ),
+            "range_angle_correction_source": components["range_angle_correction_source"],
+            "range_angle_reference_half_width_m": float(
+                getattr(
+                    components["runtime_config"],
+                    "range_angle_correction_reference_half_width_m",
+                    3.5,
+                )
+            ),
+            "range_angle_reference_forward_m": float(
+                getattr(
+                    components["runtime_config"],
+                    "range_angle_correction_reference_forward_m",
+                    7.0,
+                )
+            ),
+            "range_angle_range_bins_m": [
+                float(value)
+                for value in getattr(
+                    components["runtime_config"],
+                    "range_angle_correction_range_bins_m",
+                    (),
+                )
+            ],
+            "range_angle_angle_bins_norm": [
+                float(value)
+                for value in getattr(
+                    components["runtime_config"],
+                    "range_angle_correction_angle_bins_norm",
+                    (),
+                )
+            ],
+            "range_angle_delta_table_deg": [
+                [float(item) for item in row]
+                for row in getattr(
+                    components["runtime_config"],
+                    "range_angle_correction_delta_table_deg",
+                    (),
+                )
+            ],
+            "range_angle_correction_max_delta_deg": float(
+                getattr(
+                    components["runtime_config"],
+                    "range_angle_correction_max_delta_deg",
+                    6.0,
+                )
+            ),
+            "line_deskew_correction_enabled": bool(
+                getattr(components["runtime_config"], "line_deskew_correction_enabled", False)
+            ),
+            "line_deskew_correction_diagnostic_only": bool(
+                getattr(components["runtime_config"], "line_deskew_correction_diagnostic_only", True)
+            ),
+            "line_deskew_correction_source": components["line_deskew_correction_source"],
+            "line_deskew_gain": float(
+                getattr(components["runtime_config"], "line_deskew_gain", 0.3)
+            ),
+            "line_deskew_max_shift_m": float(
+                getattr(components["runtime_config"], "line_deskew_max_shift_m", 0.08)
+            ),
+            "line_deskew_min_history_frames": int(
+                getattr(components["runtime_config"], "line_deskew_min_history_frames", 20)
+            ),
+            "line_deskew_max_history_frames": int(
+                getattr(components["runtime_config"], "line_deskew_max_history_frames", 90)
+            ),
+            "line_deskew_min_y_span_m": float(
+                getattr(components["runtime_config"], "line_deskew_min_y_span_m", 0.35)
             ),
             "channel_calibration_enabled": bool(
                 getattr(components["runtime_config"], "channel_calibration_enabled", False)
