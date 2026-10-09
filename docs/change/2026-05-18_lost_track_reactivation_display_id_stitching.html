@@ -44,7 +44,7 @@
     <li>live viewer, raw replay stage cache, serialized trace에 <code>display_id</code>가 남도록 연결했다.</li>
     <li>Streamlit Stage Debug의 multi-object plot에서 display 단계는 <code>display_id</code> 기준으로 묶고, 프레임 gap 또는 큰 위치 jump가 있으면 같은 ID라도 선을 끊어 표시한다.</li>
     <li>Stage Cache schema를 12로 올려 기존 cache가 자동 재생성되도록 했다.</li>
-    <li>기본 튜닝에 lost memory 24프레임, reactivation gate 0.85m, display stitching 36프레임/0.9m를 추가했다.</li>
+    <li>기본 튜닝에 lost memory 24프레임, reactivation gate 0.85m, display stitching 90프레임/0.9m를 추가했다.</li>
     <li>Streamlit 장시간 실행 중 <code>tracking_core.types</code>가 stale 상태로 남아 <code>display_id</code> 필드를 모르는 문제를 막기 위해 Stage Cache reload 범위에 하위 types 모듈을 포함했다.</li>
     <li>예전 <code>TrackEstimate</code> 객체가 섞여도 <code>dataclasses.replace</code> 실패 없이 <code>display_id</code>를 붙이는 fallback을 추가했다.</li>
     <li>Streamlit app rerun 시 <code>stage_cache</code> 모듈도 reload해 Force Generate가 stale 모듈을 덜 물도록 했다.</li>
@@ -91,6 +91,12 @@
     오래 살아 있던 Python 프로세스가 하위 dataclass 모듈을 reload하지 않아 생긴 stale module 문제였다.
     reload 범위와 fallback을 보강한 뒤 <code>20260518_205535</code> stage cache 250프레임 재생성이 성공했고,
     <code>display_output.confirmed_tracks</code>에 <code>display_id</code>가 저장되는 것을 확인했다.
+  </p>
+  <p>
+    <code>20260518_205535</code>의 오른쪽 궤적은 내부 <code>track_id=4</code>가 frame 121에서 끝나고
+    <code>track_id=7</code>이 frame 175에서 다시 시작했다. 두 지점의 거리는 약 0.13m였지만
+    기존 표시 ID 메모리가 36프레임이라 54프레임 gap을 넘기지 못했다. 표시 전용
+    <code>display_id_stitching_memory_frames</code>를 90으로 늘려 같은 위치 재등장을 표시 ID로 이어 붙이도록 조정했다.
   </p>
 
   <h2>남은 위험 또는 다음 후보</h2>

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>2026-05-18 Streamlit 영상 매칭 비교 페이지</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.6; margin: 28px; color: #1f2933; }
+    h1 { font-size: 1.5rem; margin-bottom: 0.4rem; }
+    h2 { font-size: 1.05rem; margin-top: 1.4rem; }
+    code { background: #eef2f7; padding: 0.1rem 0.3rem; border-radius: 4px; }
+    ul { padding-left: 1.3rem; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
+    th, td { border: 1px solid #d8dee9; padding: 0.45rem 0.55rem; text-align: left; }
+    th { background: #f3f6fa; }
+  </style>
+</head>
+<body>
+  <h1>Streamlit 영상 매칭 비교 페이지</h1>
+
+  <h2>목적</h2>
+  <p>
+    실제 촬영 영상과 레이더 좌표계 시뮬레이션을 같은 화면에서 비교할 수 있도록
+    Streamlit Radar Lab에 영상 매칭 페이지를 추가했다. 왼쪽에는
+    <code>lab_data/영상데이터</code>의 mp4 영상을 표시하고, 오른쪽에는 7m x 7m 실험 공간을
+    레이더 기준 좌표계로 그린 same-view simulation을 표시한다.
+  </p>
+
+  <h2>수정 파일</h2>
+  <ul>
+    <li><code>tools/lab/app.py</code></li>
+    <li><code>docs/change/2026-05-18_video_match_streamlit_page.html</code></li>
+  </ul>
+
+  <h2>변경 내용</h2>
+  <ul>
+    <li>Streamlit sidebar에 <code>Video Match</code> 페이지를 추가했다.</li>
+    <li>요청한 네 영상/로그 매칭을 고정 preset으로 등록했다.</li>
+    <li>preset 선택 UI와 매칭 목록 표를 추가하고, 선택한 항목의 왼쪽에는 영상, 오른쪽에는 7m x 7m 동일 시야 시뮬레이션을 보여준다.</li>
+    <li>시뮬레이션에는 하단 중앙 레이더 위치, 7m x 7m ROI, 좌우 상단 시야 가이드, 예상 이동 경로, 진행률 marker를 표시한다.</li>
+    <li>같은 session ID의 stage cache가 존재하면 오른쪽 시뮬레이션에 display/tracker trajectory를 자동 overlay하도록 했다.</li>
+  </ul>
+
+  <h2>영상/로그 매칭</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>동작</th>
+        <th>매칭 session</th>
+        <th>영상 파일</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>원</td><td><code>20260516_221511</code></td><td><code>lab_data/영상데이터/원.mp4</code></td></tr>
+      <tr><td>왼쪽 대각선</td><td><code>20260516_221418</code></td><td><code>lab_data/영상데이터/왼쪽대각선.mp4</code></td></tr>
+      <tr><td>가운데</td><td><code>20260516_221226</code></td><td><code>lab_data/영상데이터/가운데.mp4</code></td></tr>
+      <tr><td>오른쪽 대각선</td><td><code>20260516_221104</code></td><td><code>lab_data/영상데이터/오른쪽 대각선.mp4</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>검증 명령 또는 확인 방법</h2>
+  <ul>
+    <li><code>python -c "import ast, pathlib; ast.parse(pathlib.Path('tools/lab/app.py').read_text(encoding='utf-8')); print('app syntax ok')"</code></li>
+    <li><code>git diff --check -- tools/lab/app.py</code></li>
+    <li><code>Test-Path 'lab_data\영상데이터\원.mp4'</code> 및 나머지 세 영상 파일 존재 확인</li>
+    <li><code>python -c "from tools.lab.app import VIDEO_MATCH_PRESETS, _video_match_reference_path; print([(p['session_id'], p['label'], len(_video_match_reference_path(p['motion']))) for p in VIDEO_MATCH_PRESETS])"</code></li>
+  </ul>
+
+  <h2>결과</h2>
+  <ul>
+    <li><code>tools/lab/app.py</code> 문법 검사를 통과했다.</li>
+    <li><code>git diff --check</code>에서 공백 오류는 없었다. Windows 줄바꿈 경고만 확인됐다.</li>
+    <li>요청한 네 mp4 파일은 모두 로컬에 존재한다.</li>
+    <li>네 preset 모두 180개 sample의 기준 시뮬레이션 경로를 생성하는 것을 확인했다.</li>
+  </ul>
+
+  <h2>남은 위험 또는 다음 후보</h2>
+  <ul>
+    <li>현재 로컬 <code>lab_data/stage_cache</code>에는 요청한 네 session ID의 stage cache가 없어 처음 화면에서는 시뮬레이션 기준 경로만 보인다.</li>
+    <li>해당 session ID의 raw replay stage cache가 생성되면 같은 페이지에서 레이더 trajectory overlay가 자동으로 표시된다.</li>
+    <li>카메라 영상의 실제 시간축과 레이더 frame index를 완전히 동기화하려면 시작 frame offset과 duration 보정값을 preset에 추가해야 한다.</li>
+  </ul>
+</body>
+</html>

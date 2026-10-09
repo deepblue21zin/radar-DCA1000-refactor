@@ -53,6 +53,37 @@ MOTION_OPTIONS = [
     "custom",
 ]
 
+VIDEO_MATCH_PRESETS = [
+    {
+        "label": "원",
+        "session_id": "20260516_221511",
+        "video_path": PROJECT_ROOT / "lab_data" / "영상데이터" / "원.mp4",
+        "motion": "circle",
+        "description": "원 이동 영상",
+    },
+    {
+        "label": "왼쪽 대각선",
+        "session_id": "20260516_221418",
+        "video_path": PROJECT_ROOT / "lab_data" / "영상데이터" / "왼쪽대각선.mp4",
+        "motion": "left_diagonal",
+        "description": "왼쪽 대각선 영상",
+    },
+    {
+        "label": "가운데",
+        "session_id": "20260516_221226",
+        "video_path": PROJECT_ROOT / "lab_data" / "영상데이터" / "가운데.mp4",
+        "motion": "center",
+        "description": "가운데 직선 영상",
+    },
+    {
+        "label": "오른쪽 대각선",
+        "session_id": "20260516_221104",
+        "video_path": PROJECT_ROOT / "lab_data" / "영상데이터" / "오른쪽 대각선.mp4",
+        "motion": "right_diagonal",
+        "description": "오른쪽 대각선 영상",
+    },
+]
+
 
 def _rerun() -> None:
     rerun = getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None)
@@ -2491,6 +2522,524 @@ def _load_compare_final_trajectory(session_id: str) -> dict:
         "stats": _trajectory_stats([], len(trace_rows)),
         "manifest": manifest,
     }
+
+
+def _video_match_reference_path(motion: str, *, samples: int = 180) -> list[dict]:
+    samples = max(int(samples), 2)
+    t = np.linspace(0.0, 1.0, samples)
+    if motion == "circle":
+        theta = np.linspace(-0.5 * np.pi, 1.5 * np.pi, samples)
+        radius = 1.05
+        center_x = 0.0
+        center_y = 3.45
+        xs = center_x + radius * np.cos(theta)
+        ys = center_y + radius * np.sin(theta)
+    elif motion == "left_diagonal":
+        xs = np.linspace(-3.05, -0.45, samples)
+        ys = np.linspace(6.55, 1.0, samples)
+    elif motion == "right_diagonal":
+        xs = np.linspace(3.05, 0.45, samples)
+        ys = np.linspace(6.55, 1.0, samples)
+    else:
+        xs = 0.06 * np.sin(2.0 * np.pi * t)
+        ys = np.linspace(6.55, 1.0, samples)
+    return [
+        {"index": index, "x_m": float(x), "y_m": float(y)}
+        for index, (x, y) in enumerate(zip(xs, ys))
+    ]
+
+
+def _load_video_match_radar_overlay(session_id: str) -> dict:
+    payload = _load_compare_final_trajectory(session_id)
+    trajectory = payload.get("trajectory") or []
+    if trajectory:
+        return payload
+
+    trace_rows = payload.get("trace_rows") or stage_cache.load_stage_traces(PROJECT_ROOT, session_id)
+    if not trace_rows:
+        return payload
+
+    for stage, label in [
+        ("line_deskewed", "Line-deskew diagnostic"),
+        ("angle_corrected", "Angle-corrected candidates"),
+        ("tracker_input", "Tracker input"),
+    ]:
+        trajectory = _collect_stage_trajectory(trace_rows, stage)
+        if trajectory:
+            payload = dict(payload)
+            payload.update(
+                {
+                    "stage": stage,
+                    "stage_label": label,
+                    "trajectory": trajectory,
+                    "stats": _trajectory_stats(trajectory, len(trace_rows)),
+                }
+            )
+            return payload
+    return payload
+
+
+SAME_VIEW_STAGE_OPTIONS = {
+    "Display accepted tracks": "display_confirmed",
+    "Tracker confirmed state": "tracks_confirmed",
+    "Tracker input": "tracker_input",
+    "Line-deskew diagnostic": "line_deskew",
+    "Angle-corrected candidates": "angle_corrected",
+    "Score-filtered output": "score_filtered",
+}
+
+
+def _video_data_files() -> list[Path]:
+    video_dir = PROJECT_ROOT / "lab_data" / "영상데이터"
+    if not video_dir.exists():
+        return []
+    suffixes = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+    return sorted(
+        [path for path in video_dir.iterdir() if path.is_file() and path.suffix.lower() in suffixes],
+        key=lambda path: path.name,
+    )
+
+
+def _stage_cache_simulation_options() -> list[dict]:
+    cache_root = PROJECT_ROOT / "lab_data" / "stage_cache"
+    if not cache_root.exists():
+        return []
+    options = []
+    for cache_dir in sorted(cache_root.iterdir(), key=lambda path: path.name, reverse=True):
+        manifest_path = cache_dir / "manifest.json"
+        trace_path = cache_dir / "frame_trace.jsonl"
+        if not cache_dir.is_dir() or not manifest_path.exists() or not trace_path.exists():
+            continue
+        manifest = _load_json_file(manifest_path)
+        frame_count = int(manifest.get("frame_count") or 0)
+        if frame_count <= 0:
+            continue
+        options.append(
+            {
+                "session_id": cache_dir.name,
+                "cache_dir": cache_dir,
+                "frame_count": frame_count,
+                "mode": manifest.get("ablation_mode") or "baseline",
+                "generated_at": manifest.get("generated_at") or "",
+            }
+        )
+    return options
+
+
+def _format_simulation_option(option: dict) -> str:
+    return (
+        f"{option.get('session_id')} | frames={option.get('frame_count')} | "
+        f"mode={option.get('mode') or 'baseline'}"
+    )
+
+
+def _same_view_project(x_m: float, y_m: float, z_m: float = 0.0) -> tuple[float, float]:
+    return float(x_m) + float(y_m) * 0.08, float(y_m) * 0.56 + float(z_m) * 1.45
+
+
+def _human_like_point_cloud(center: dict, frame_index: int, *, count: int = 78) -> list[dict]:
+    x = _as_float(center.get("x_m"), 0.0) or 0.0
+    y = _as_float(center.get("y_m"), 0.0) or 0.0
+    seed = 20260519 + int(frame_index) * 101 + int(abs(x) * 1000) * 7 + int(abs(y) * 1000) * 11
+    rng = np.random.default_rng(seed)
+    phase = np.sin(float(frame_index) * 0.28)
+    points = []
+
+    for _ in range(32):
+        z = float(rng.uniform(0.72, 1.55))
+        width = 0.16 * (1.0 - 0.18 * abs(z - 1.15))
+        points.append(
+            {
+                "x_m": x + float(rng.normal(0.0, width)),
+                "y_m": y + float(rng.normal(0.0, 0.06)),
+                "z_m": z,
+                "intensity": float(rng.uniform(0.45, 1.0)),
+            }
+        )
+
+    for _ in range(12):
+        angle = float(rng.uniform(0.0, 2.0 * np.pi))
+        radius = abs(float(rng.normal(0.09, 0.025)))
+        points.append(
+            {
+                "x_m": x + radius * float(np.cos(angle)),
+                "y_m": y + float(rng.normal(0.0, 0.04)),
+                "z_m": 1.76 + radius * float(np.sin(angle)),
+                "intensity": float(rng.uniform(0.5, 1.0)),
+            }
+        )
+
+    for side in (-1.0, 1.0):
+        hip_x = x + side * 0.07
+        foot_x = x + side * (0.12 + 0.08 * phase)
+        for index in range(10):
+            blend = index / 9.0
+            points.append(
+                {
+                    "x_m": hip_x * (1.0 - blend) + foot_x * blend + float(rng.normal(0.0, 0.025)),
+                    "y_m": y + float(rng.normal(0.0, 0.045)),
+                    "z_m": 0.72 * (1.0 - blend) + 0.12 * blend + float(rng.normal(0.0, 0.025)),
+                    "intensity": float(rng.uniform(0.35, 0.9)),
+                }
+            )
+        phase *= -1.0
+
+    swing = float(np.sin(float(frame_index) * 0.28 + np.pi / 5.0))
+    for side in (-1.0, 1.0):
+        shoulder_x = x + side * 0.17
+        hand_x = x + side * (0.22 + 0.06 * swing)
+        for index in range(6):
+            blend = index / 5.0
+            points.append(
+                {
+                    "x_m": shoulder_x * (1.0 - blend) + hand_x * blend + float(rng.normal(0.0, 0.02)),
+                    "y_m": y + float(rng.normal(0.0, 0.04)),
+                    "z_m": 1.35 * (1.0 - blend) + 0.9 * blend + float(rng.normal(0.0, 0.025)),
+                    "intensity": float(rng.uniform(0.3, 0.8)),
+                }
+            )
+        swing *= -1.0
+
+    for _ in range(6):
+        points.append(
+            {
+                "x_m": x + float(rng.normal(0.0, 0.28)),
+                "y_m": y + float(rng.normal(0.0, 0.14)),
+                "z_m": float(rng.uniform(0.2, 1.7)),
+                "intensity": float(rng.uniform(0.18, 0.45)),
+            }
+        )
+    return points[:count]
+
+
+def _valid_xy_points(points: list[dict]) -> list[dict]:
+    valid = []
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+        x_m = _as_float(point.get("x_m"))
+        y_m = _as_float(point.get("y_m"))
+        if x_m is None or y_m is None:
+            continue
+        valid.append({**point, "x_m": x_m, "y_m": y_m})
+    return valid
+
+
+def _nearest_trajectory_point(trajectory: list[dict], frame_index: int) -> dict | None:
+    if not trajectory:
+        return None
+    before = [point for point in trajectory if int(point.get("index", 0)) <= int(frame_index)]
+    if before:
+        return before[-1]
+    return trajectory[0]
+
+
+def _render_same_view_radar_simulation(
+    trace_rows: list[dict],
+    frame_index: int,
+    *,
+    stage: str = "display_confirmed",
+    title: str = "Same-view Radar Point Cloud Simulation",
+    caption_prefix: str = "",
+) -> None:
+    if not trace_rows:
+        st.info("시뮬레이션에 사용할 stage cache trace가 없습니다. Stage Debug에서 cache를 먼저 생성해 주세요.")
+        return
+
+    safe_index = max(0, min(int(frame_index), len(trace_rows) - 1))
+    trace = trace_rows[safe_index]
+    trajectory = _collect_stage_trajectory(trace_rows, stage)
+    current_points = _valid_xy_points(_trace_stage_points(trace, stage))
+    if not current_points:
+        fallback = _nearest_trajectory_point(trajectory, safe_index)
+        current_points = [fallback] if fallback else []
+
+    fig, _ = _make_figure(width=7.2, height=5.4)
+    ax = fig.add_subplot(111)
+    ax.set_facecolor("#fbfdfe")
+
+    for x_value in np.linspace(-3.5, 3.5, 8):
+        ux0, uy0 = _same_view_project(float(x_value), 0.0, 0.0)
+        ux1, uy1 = _same_view_project(float(x_value), 7.0, 0.0)
+        ax.plot([ux0, ux1], [uy0, uy1], color="#e5edf2", linewidth=0.8, zorder=1)
+    for y_value in np.linspace(0.0, 7.0, 8):
+        ux0, uy0 = _same_view_project(-3.5, float(y_value), 0.0)
+        ux1, uy1 = _same_view_project(3.5, float(y_value), 0.0)
+        ax.plot([ux0, ux1], [uy0, uy1], color="#e5edf2", linewidth=0.8, zorder=1)
+
+    boundary = [(-3.5, 0.0), (3.5, 0.0), (3.5, 7.0), (-3.5, 7.0), (-3.5, 0.0)]
+    bx, by = zip(*[_same_view_project(x, y, 0.0) for x, y in boundary])
+    ax.plot(bx, by, color="#172232", linewidth=2.0, label="7m x 7m ROI", zorder=3)
+    for target in [(-3.5, 7.0), (3.5, 7.0)]:
+        gx, gy = zip(*[_same_view_project(0.0, 0.0, 0.0), _same_view_project(target[0], target[1], 0.0)])
+        ax.plot(gx, gy, color="#8aa0af", linewidth=1.1, linestyle="--", label="same-view guide" if target[0] < 0 else None, zorder=2)
+
+    rx, ry = _same_view_project(0.0, 0.0, 0.0)
+    ax.scatter([rx], [ry], s=70, color="#172232", marker="s", label="radar", zorder=7)
+    ax.text(rx + 0.08, ry + 0.05, "radar", color="#172232", fontsize=8)
+
+    if trajectory:
+        visible = [point for point in trajectory if int(point.get("index", 0)) <= safe_index]
+        if not visible:
+            visible = trajectory[:1]
+        tx, ty = zip(*[_same_view_project(point["x_m"], point["y_m"], 0.04) for point in visible])
+        ax.plot(tx, ty, color="#7b3cff", linewidth=2.2, label="radar trajectory", zorder=4)
+
+    cloud_points = []
+    for point in current_points[:4]:
+        cloud_points.extend(_human_like_point_cloud(point, safe_index))
+        cx, cy = _same_view_project(point["x_m"], point["y_m"], 0.03)
+        ax.scatter([cx], [cy], s=64, color="#f0b323", edgecolors="#172232", linewidth=0.9, zorder=8)
+
+    if cloud_points:
+        cloud_points = sorted(cloud_points, key=lambda point: float(point.get("z_m") or 0.0))
+        ux = []
+        uy = []
+        sizes = []
+        colors = []
+        for point in cloud_points:
+            px, py = _same_view_project(point["x_m"], point["y_m"], point.get("z_m", 0.0))
+            ux.append(px)
+            uy.append(py)
+            intensity = max(0.0, min(float(point.get("intensity") or 0.5), 1.0))
+            sizes.append(12.0 + 30.0 * intensity)
+            colors.append((0.16, 0.46 + 0.28 * intensity, 0.66 + 0.18 * intensity, 0.42 + 0.42 * intensity))
+        ax.scatter(ux, uy, s=sizes, c=colors, edgecolors="none", label="human-like point cloud", zorder=6)
+
+    ax.set_title(f"{title}\n7m x 7m ROI, radar at bottom center", fontsize=11, color="#20384d")
+    ax.set_xlim(-3.85, 4.25)
+    ax.set_ylim(-0.15, 6.65)
+    ax.set_xlabel("same-view x / perspective")
+    ax.set_ylabel("forward + height projection")
+    ax.grid(False)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(loc="upper right", frameon=False, fontsize=8)
+
+    caption_parts = [
+        caption_prefix,
+        f"frame={safe_index}/{len(trace_rows) - 1}",
+        f"stage={stage}",
+        f"objects={len(current_points)}",
+        f"cloud_points={len(cloud_points)}",
+    ]
+    _render_matplotlib_figure(fig, caption=" | ".join(part for part in caption_parts if part))
+
+
+def _draw_video_match_scene(ax) -> None:
+    boundary_x = [-3.5, 3.5, 3.5, -3.5, -3.5]
+    boundary_y = [0.0, 0.0, 7.0, 7.0, 0.0]
+    ax.plot(boundary_x, boundary_y, color="#172232", linewidth=1.9, label="7m x 7m ROI")
+    ax.plot([0.0, -3.5], [0.0, 7.0], color="#8aa0af", linewidth=1.1, linestyle="--", label="same-view guide")
+    ax.plot([0.0, 3.5], [0.0, 7.0], color="#8aa0af", linewidth=1.1, linestyle="--")
+    ax.scatter([0.0], [0.0], s=70, color="#172232", marker="s", zorder=8, label="radar")
+    ax.text(0.08, 0.12, "radar", color="#172232", fontsize=8)
+
+
+def _render_video_match_simulation(
+    preset: dict,
+    *,
+    progress_pct: int,
+    show_radar_overlay: bool,
+) -> None:
+    reference = _video_match_reference_path(str(preset.get("motion") or "center"))
+    overlay = _load_video_match_radar_overlay(str(preset["session_id"])) if show_radar_overlay else {}
+    overlay_trajectory = overlay.get("trajectory") or []
+
+    fig, plt = _make_figure(width=5.6, height=5.6)
+    ax = fig.add_subplot(111)
+    _draw_video_match_scene(ax)
+
+    ref_xs = [point["x_m"] for point in reference]
+    ref_ys = [point["y_m"] for point in reference]
+    ax.plot(ref_xs, ref_ys, color="#7b3cff", linewidth=2.2, label="expected path")
+    ax.scatter([ref_xs[0]], [ref_ys[0]], s=46, color="#7b3cff", edgecolors="white", linewidth=0.8, zorder=7)
+    ax.scatter([ref_xs[-1]], [ref_ys[-1]], s=58, color="#172232", edgecolors="#7b3cff", linewidth=1.0, zorder=7)
+
+    progress_index = int(round((len(reference) - 1) * max(0, min(int(progress_pct), 100)) / 100.0))
+    current = reference[progress_index]
+    ax.scatter(
+        [current["x_m"]],
+        [current["y_m"]],
+        s=92,
+        color="#f0b323",
+        edgecolors="#172232",
+        linewidth=1.1,
+        zorder=9,
+        label="video progress marker",
+    )
+
+    caption_parts = [
+        f"video=`{Path(preset['video_path']).name}`",
+        f"mapped session=`{preset['session_id']}`",
+    ]
+    if overlay_trajectory:
+        radar_xs = [point["x_m"] for point in overlay_trajectory]
+        radar_ys = [point["y_m"] for point in overlay_trajectory]
+        ax.plot(radar_xs, radar_ys, color="#0e8a7e", linewidth=1.9, marker="o", markersize=2.2, label="radar stage cache")
+        ax.scatter([radar_xs[0]], [radar_ys[0]], s=44, color="#0e8a7e", edgecolors="white", linewidth=0.8, zorder=7)
+        ax.scatter([radar_xs[-1]], [radar_ys[-1]], s=58, color="#0e8a7e", edgecolors="#172232", linewidth=1.0, zorder=7)
+        stats = overlay.get("stats") or {}
+        caption_parts.append(
+            f"radar overlay={overlay.get('stage_label', 'stage cache')} "
+            f"coverage {stats.get('coverage', 'n/a')}"
+        )
+    elif show_radar_overlay:
+        caption_parts.append("radar overlay=해당 session stage cache 없음")
+
+    ax.set_title(
+        f"{preset['label']} same-view simulation\n7m x 7m ROI, radar at bottom center",
+        fontsize=10,
+        color="#20384d",
+    )
+    ax.set_xlim(-3.75, 3.75)
+    ax.set_ylim(-0.15, 7.25)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
+    ax.grid(True, color="#e5edf2", linewidth=0.8)
+    ax.set_facecolor("#fbfdfe")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(loc="upper right", frameon=False, fontsize=8)
+    _render_matplotlib_figure(fig, caption=" | ".join(caption_parts))
+
+
+def _render_video_match_pair(preset: dict) -> None:
+    st.markdown(f"### {preset['label']} / {preset['session_id']}")
+    st.caption(str(preset.get("description") or "영상과 같은 7m x 7m 좌표계 시뮬레이션을 비교합니다."))
+
+    controls = st.columns([1, 1])
+    with controls[0]:
+        progress_pct = st.slider(
+            "Simulation Progress",
+            min_value=0,
+            max_value=100,
+            value=0,
+            step=1,
+            key=f"video-match-progress-{preset['session_id']}",
+        )
+    with controls[1]:
+        show_radar_overlay = st.checkbox(
+            "Overlay Radar Stage Cache",
+            value=True,
+            key=f"video-match-overlay-{preset['session_id']}",
+            help="같은 session ID의 stage cache가 있으면 display/tracker 궤적을 시뮬레이션 위에 겹칩니다.",
+        )
+
+    video_col, sim_col = st.columns([1, 1])
+    video_path = Path(preset["video_path"])
+    with video_col:
+        st.markdown("#### Video")
+        if video_path.exists():
+            st.video(video_path.read_bytes(), format="video/mp4")
+            st.caption(f"`{_relative_to_project(video_path)}`")
+        else:
+            st.error(f"영상 파일을 찾지 못했습니다: `{video_path}`")
+    with sim_col:
+        st.markdown("#### Same-view Simulation")
+        _render_video_match_simulation(
+            preset,
+            progress_pct=int(progress_pct),
+            show_radar_overlay=bool(show_radar_overlay),
+        )
+
+
+def _video_match_page() -> None:
+    st.subheader("Video Match")
+    st.write(
+        "`lab_data/영상데이터`의 실제 촬영 영상과 Stage Debug에서 생성한 stage cache 기반 "
+        "same-view point cloud simulation을 좌우로 비교합니다. 영상과 시뮬레이션 세션은 따로 선택할 수 있습니다."
+    )
+    _render_file_links({"video data folder": PROJECT_ROOT / "lab_data" / "영상데이터"})
+
+    video_files = _video_data_files()
+    simulation_options = _stage_cache_simulation_options()
+    if not video_files:
+        st.warning("`lab_data/영상데이터` 아래에서 선택할 영상 파일을 찾지 못했습니다.")
+        return
+    if not simulation_options:
+        st.info("선택할 stage cache 시뮬레이션이 없습니다. Stage Debug에서 측정 로그를 선택하고 stage cache를 먼저 생성해 주세요.")
+        return
+
+    control_a, control_b, control_c = st.columns([1.2, 1.35, 1.0])
+    with control_a:
+        selected_video = st.selectbox(
+            "Video File",
+            video_files,
+            index=0,
+            format_func=lambda path: path.name,
+            key="video-match-video-file",
+        )
+    with control_b:
+        selected_simulation = st.selectbox(
+            "Stage Debug Simulation",
+            simulation_options,
+            index=0,
+            format_func=_format_simulation_option,
+            key="video-match-simulation-session",
+        )
+    with control_c:
+        selected_stage_label = st.selectbox(
+            "Simulation Stage",
+            list(SAME_VIEW_STAGE_OPTIONS.keys()),
+            index=0,
+            key="video-match-simulation-stage",
+        )
+    progress_pct = st.slider(
+        "Simulation Progress",
+        min_value=0,
+        max_value=100,
+        value=0,
+        step=1,
+        key="video-match-simulation-progress",
+    )
+
+    trace_rows = stage_cache.load_stage_traces(PROJECT_ROOT, str(selected_simulation["session_id"]))
+    frame_index = int(round((len(trace_rows) - 1) * float(progress_pct) / 100.0)) if trace_rows else 0
+
+    video_col, simulation_col = st.columns([1, 1])
+    with video_col:
+        st.markdown("### Video")
+        st.video(Path(selected_video).read_bytes(), format="video/mp4")
+        st.caption(f"`{_relative_to_project(selected_video)}`")
+    with simulation_col:
+        st.markdown("### Same-view Simulation")
+        _render_same_view_radar_simulation(
+            trace_rows,
+            frame_index,
+            stage=SAME_VIEW_STAGE_OPTIONS[selected_stage_label],
+            title=f"{selected_simulation['session_id']} point cloud simulation",
+            caption_prefix=f"video={Path(selected_video).name}",
+        )
+
+    st.markdown("### Available Video / Simulation Sources")
+    table_col_a, table_col_b = st.columns([1, 1])
+    with table_col_a:
+        _render_table(
+            [
+                {
+                    "video": path.name,
+                    "path": _relative_to_project(path),
+                    "size_mb": round(path.stat().st_size / (1024 * 1024), 2),
+                }
+                for path in video_files
+            ],
+            key="video-match-video-files",
+            height=180,
+        )
+    with table_col_b:
+        _render_table(
+            [
+                {
+                    "session_id": option["session_id"],
+                    "frames": option["frame_count"],
+                    "mode": option["mode"],
+                    "generated_at": option["generated_at"],
+                }
+                for option in simulation_options[:20]
+            ],
+            key="video-match-simulation-sources",
+            height=180,
+        )
 
 
 def _render_compare_final_trajectory_grid(run_roles: list[tuple[str, dict]]) -> None:
@@ -5057,6 +5606,28 @@ def _stage_page() -> None:
         f"evidence={feature_record.get('frame_evidence') or 'n/a'}"
     )
 
+    st.markdown("### Same-view Point Cloud Simulation")
+    sim_control_a, sim_control_b = st.columns([1, 2])
+    with sim_control_a:
+        selected_sim_stage_label = st.selectbox(
+            "Simulation Stage",
+            list(SAME_VIEW_STAGE_OPTIONS.keys()),
+            index=0,
+            key=f"stage-debug-simulation-stage-{selected_session}-{selected_ablation_mode}-{selected_tdm_variant or 'base'}",
+        )
+    with sim_control_b:
+        st.caption(
+            "Stage Debug에서 선택한 frame과 stage cache를 시연영상 오른쪽 패널처럼 렌더링합니다. "
+            "Video Match 페이지에서도 같은 stage cache simulation을 선택해 영상과 나란히 비교할 수 있습니다."
+        )
+    _render_same_view_radar_simulation(
+        trace_rows,
+        int(selected_ordinal),
+        stage=SAME_VIEW_STAGE_OPTIONS[selected_sim_stage_label],
+        title=f"{selected_session} same-view point cloud",
+        caption_prefix=f"mode={selected_ablation_mode}",
+    )
+
     st.markdown("### Compact Stage Images")
     heatmap_cols = st.columns(3)
     with heatmap_cols[0]:
@@ -5168,6 +5739,7 @@ def main() -> None:
                 "Eval Harness",
                 "Analytics/Triage",
                 "Stage Timeline",
+                "Video Match",
                 "Stage Debug",
             ],
         )
@@ -5188,6 +5760,8 @@ def main() -> None:
         _analytics_page()
     elif page == "Stage Timeline":
         _stage_timeline_page()
+    elif page == "Video Match":
+        _video_match_page()
     else:
         _stage_page()
 

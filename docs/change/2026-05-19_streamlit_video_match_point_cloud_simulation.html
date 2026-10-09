@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>2026-05-19 Streamlit Video Match point cloud simulation</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.6; margin: 28px; color: #1f2933; }
+    h1 { font-size: 1.5rem; margin-bottom: 0.4rem; }
+    h2 { font-size: 1.05rem; margin-top: 1.4rem; }
+    code { background: #eef2f7; padding: 0.1rem 0.3rem; border-radius: 4px; }
+    ul { padding-left: 1.3rem; }
+  </style>
+</head>
+<body>
+  <h1>Streamlit Video Match point cloud simulation</h1>
+
+  <h2>목적</h2>
+  <p>
+    발표용 mp4 파일을 새로 만드는 방식이 아니라, Streamlit 안에서 실제 영상과 radar stage cache
+    시뮬레이션을 직접 비교할 수 있도록 한다. 측정할 때마다 Stage Debug에서 같은 시야의 point cloud
+    simulation을 확인하고, Video Match에서 영상과 해당 simulation을 나란히 볼 수 있게 만든다.
+  </p>
+
+  <h2>수정 파일</h2>
+  <ul>
+    <li><code>tools/lab/app.py</code></li>
+    <li><code>docs/change/2026-05-19_streamlit_video_match_point_cloud_simulation.html</code></li>
+  </ul>
+
+  <h2>변경 내용</h2>
+  <ul>
+    <li>Stage Debug에 <code>Same-view Point Cloud Simulation</code> 섹션을 추가했다.</li>
+    <li>선택한 stage cache frame과 stage를 바탕으로 7m x 7m ROI, radar 위치, trajectory, 사람형 point cloud를 렌더링한다.</li>
+    <li>Video Match에서 <code>lab_data/영상데이터</code> 아래 영상 파일을 직접 선택할 수 있게 했다.</li>
+    <li>Video Match에서 Stage Debug가 사용하는 stage cache simulation source를 선택할 수 있게 했다.</li>
+    <li>Video Match의 오른쪽 패널은 고정 preset 원/대각선이 아니라 선택한 stage cache trace의 실제 radar trajectory와 사람형 point cloud를 표시한다.</li>
+  </ul>
+
+  <h2>검증 명령 또는 확인 방법</h2>
+  <ul>
+    <li><code>python -c "import ast, pathlib; ast.parse(pathlib.Path('tools/lab/app.py').read_text(encoding='utf-8')); print('app syntax ok')"</code></li>
+    <li><code>python -c "from tools.lab.app import _video_data_files,_stage_cache_simulation_options,SAME_VIEW_STAGE_OPTIONS; print([p.name for p in _video_data_files()]); opts=_stage_cache_simulation_options(); print(len(opts), opts[0] if opts else None); print(SAME_VIEW_STAGE_OPTIONS)"</code></li>
+    <li><code>git diff --check -- tools/lab/app.py</code></li>
+  </ul>
+
+  <h2>결과</h2>
+  <ul>
+    <li><code>tools/lab/app.py</code> 문법 검사를 통과했다.</li>
+    <li><code>lab_data/영상데이터</code>에서 <code>가운데.mp4</code>, <code>오른쪽 대각선.mp4</code>, <code>왼쪽대각선.mp4</code>, <code>원.mp4</code>를 선택 목록으로 찾는 것을 확인했다.</li>
+    <li>stage cache simulation source 233개를 찾았고, 최신 source는 <code>20260518_233457</code>로 확인했다.</li>
+    <li><code>git diff --check</code>에서 공백 오류는 없었다. Windows 줄바꿈 경고만 확인됐다.</li>
+  </ul>
+
+  <h2>남은 위험 또는 다음 후보</h2>
+  <ul>
+    <li>현재 Video Match는 영상 재생 시간과 radar frame slider를 자동 동기화하지 않는다. 정확한 동기화가 필요하면 영상 시작 offset과 frame-rate mapping 값을 별도 preset으로 저장해야 한다.</li>
+    <li>사람형 point cloud는 stage cache의 중심 좌표를 기반으로 한 시각화용 cloud이다. 실제 low-level RDA dense point 전체를 그대로 3D로 투영한 것은 아니다.</li>
+  </ul>
+</body>
+</html>

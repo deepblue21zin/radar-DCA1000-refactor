@@ -1,6 +1,6 @@
 # Python 기반 mmWave Radar 실시간 캡처/처리 도구
 
-이 프로젝트는 `XWR1843 EVM`과 `DCA1000 EVM`을 사용해 raw ADC 데이터를 실시간으로 수집하고, Python에서 바로 `RDI(Range-Doppler Image)`와 `RAI(Range-Angle Image)`를 생성하며, 그 위에 검출과 추적까지 이어서 확인할 수 있게 만든 도구입니다.
+이 프로젝트는 `IWR6843ISK`와 `DCA1000 EVM`을 사용해 raw ADC 데이터를 실시간으로 수집하고, Python에서 바로 `RDI(Range-Doppler Image)`와 `RAI(Range-Angle Image)`를 생성하며, 그 위에 검출과 추적까지 이어서 확인할 수 있게 만든 도구입니다.
 
 현재 기준 주요 실행 진입점은 `real-time/live_motion_viewer.py`입니다.
 
@@ -32,7 +32,7 @@
 - 운영체제: Windows
 - Python: `3.8` 권장
 - 장비:
-  - `XWR1843 EVM`
+  - `IWR6843ISK`
   - `DCA1000 EVM`
 
 `requirements.txt`는 오래된 버전 기준이라 최신 Python에서는 바로 안 맞을 수 있습니다. 가능하면 별도 가상환경에서 맞춰서 사용하는 것을 권장합니다.
@@ -83,6 +83,7 @@ PowerShell을 쓴다면 activation만 아래처럼 바꾸면 됩니다.
 이 파일에는 PC나 세션에 따라 바뀌는 값이 들어 있습니다.
 
 - `config_path`
+- `radar_board`
 - `cli_port`
 - `tuning_path`
 - `logging.variant`
@@ -116,6 +117,72 @@ PowerShell을 쓴다면 activation만 아래처럼 바꾸면 됩니다.
 3. tuning settings
 
 나중에 읽은 값이 앞의 값을 덮어씁니다.
+
+### IWR6843ISK live 설정
+
+기본 live 실행은 `config/live_motion_runtime_settings.json`을 읽습니다. 현재 기본값은 검증 완료한
+IWR6843ISK 10 fps TX order + geometry AoA 설정입니다.
+
+- 기본/ISK runtime: `config/live_motion_runtime_settings.json` 또는 `config/live_motion_runtime_isk.json`
+- radar cfg: `config/profile_isk_3d_100ms_txorder.cfg`
+- tuning: `config/live_motion_tuning_isk.json`
+
+명시적으로 ISK runtime을 고정해서 실행하려면 `RADAR_RUNTIME_SETTINGS_PATH`를 지정합니다.
+
+```powershell
+$env:RADAR_RUNTIME_SETTINGS_PATH="config/live_motion_runtime_isk.json"
+python real-time/live_motion_viewer.py
+```
+
+### IWR6843ISK 안테나 오차 측정 리포트
+
+하드웨어 안테나와 Python 코드의 virtual antenna 해석이 맞는지 확인하려면,
+고정 반사체 전용 capture-only 도구로 raw를 저장한 뒤 별도 calibration 분석기를 실행합니다.
+이 측정 도구는 live viewer, 객체추적, DBSCAN, Kalman tracking, Streamlit 처리에 연결되지 않고
+DCA1000 raw ADC frame만 `logs/raw/`에 저장합니다.
+
+측정은 ISK runtime으로 실행합니다. 코너리플렉터 또는 고정 쇠판을 정면 2.0m에 둔 예시는 아래와 같습니다.
+
+```powershell
+$env:RADAR_RUNTIME_SETTINGS_PATH="config/live_motion_runtime_isk.json"
+python -B -m tools.calibration.capture_static_reflector `
+  --label center_2m `
+  --expected-angle-deg 0 `
+  --expected-range-m 2.0 `
+  --duration-s 8 `
+  --inspect
+```
+
+고정 반사체를 하나만 사용해서 위치를 옮기며 최소 3개 raw capture를 저장합니다.
+
+- `center`: 레이더 정면 0도, 예: 2.0m
+- `left`: 레이더 기준 왼쪽, 예: -30도 / 2.0m
+- `right`: 레이더 기준 오른쪽, 예: +30도 / 2.0m
+
+측정 후 생성된 `logs/raw/<session_id>`를 아래처럼 분석합니다.
+
+```powershell
+python -B -m tools.calibration.inspect_static_reflector `
+  --board isk `
+  --case center:logs/raw/<center_session>:0:2.0 `
+  --case left:logs/raw/<left_session>:-30:2.0 `
+  --case right:logs/raw/<right_session>:30:2.0
+```
+
+결과는 기본적으로 `logs/calibration/isk_antenna_error_<timestamp>/` 아래에 생성됩니다.
+
+- `report.html`: 전체 요약 리포트
+- `candidate_scores.csv`: channel order 후보별 정량 점수
+- `summary.json`: 분석 결과 원본 데이터
+- `angle_error_by_case.png`: 기대 angle과 측정 peak angle 비교
+- `angle_spectrum_by_case.png`: 위치별 angle spectrum 비교
+- `virtual_channel_order_candidates.png`: raw channel이 virtual slot에 배치되는 순서
+- `phase_error_heatmap.png`: case별/channel별 상대 phase
+- `magnitude_balance_heatmap.png`: channel별 magnitude 균형
+- `physical_vs_virtual_layout.png`: 명목 ISK virtual array와 코드 virtual slot 비교
+
+주의: 사람 이동 raw로도 실행은 가능하지만, 안테나 보정 판단에는 적합하지 않습니다.
+최종 판단은 정답 위치를 아는 고정 반사체 raw로 해야 합니다.
 
 ## `CLI COM`, `4096`, `4098`의 의미
 
@@ -293,6 +360,11 @@ python real-time/live_motion_replay.py --capture logs/raw/<session_id>
 ```bash
 python real-time/live_motion_replay.py --capture logs/raw/20260409_164523
 ```
+
+multi target
+python real-time/live_motion_replay.py --capture logs/raw/20260425_214436 --tuning config/live_motion_tuning_multi.json
+python -m tools.lab.registry
+
 
 옵션:
 

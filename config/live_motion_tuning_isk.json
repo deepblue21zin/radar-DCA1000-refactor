@@ -283,7 +283,7 @@
     "reactivation_doppler_gate_bins": 12,
     "display_id_stitching_enabled": true,
     "display_id_stitching_gate_m": 0.9,
-    "display_id_stitching_memory_frames": 36,
+    "display_id_stitching_memory_frames": 90,
     "display_id_stitching_direction_weight": 0.25,
     "display_id_stitching_doppler_gate_bins": 12,
     "local_remeasurement_patch_bands": [
